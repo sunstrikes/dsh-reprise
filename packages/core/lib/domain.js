@@ -324,7 +324,7 @@ export function loadDomainPack(dir) {
     try {
       value = JSON.parse(readFileSync(path, 'utf8'))
     } catch (error) {
-      problems.push(`${path}: is not valid JSON: ${error?.message ?? error}`)
+      problems.push(`${path} is not valid JSON: ${error?.message ?? error}`)
       return undefined
     }
     for (const problem of check(value)) problems.push(`${path}: ${problem}`)
