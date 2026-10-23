@@ -178,3 +178,48 @@ function copyPack(source) {
   cpSync(source, target, { recursive: true })
   return target
 }
+
+test('no kernel module names a metric, a model repository, or a domain file: the difference is data', () => {
+  const files = kernelFiles(join(ROOT, 'packages'))
+  assert.ok(files.length > 20, `the guard has to read the kernel it guards (found ${files.length} files)`)
+
+  // Every one of these is domain content the kernel used to spell out. A regression here is exactly
+  // "the difference went back into an `if`".
+  const forbidden = [
+    /\bauc\b/i,
+    /\blogloss\b/i,
+    /feed[-_ ]structure/i,
+    /model-repo/,
+    /structure\.json/,
+    /hidden_units/,
+    /examples?\//,
+    /\bskills\//,
+  ]
+  const offences = []
+  for (const file of files) {
+    const text = readFileSync(file, 'utf8')
+    for (const pattern of forbidden) {
+      const match = text.match(pattern)
+      if (match !== null) offences.push(`${file.slice(ROOT.length + 1)}: ${JSON.stringify(match[0])}`)
+    }
+  }
+  assert.deepEqual(offences, [], 'the kernel reads domain content from the pack; it does not contain it')
+})
+
+/** Every `.js` file under each `packages/<pkg>/lib` — the kernel, excluding tests, fixtures and clients. */
+function kernelFiles(packagesDir) {
+  const out = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) walk(path)
+      else if (entry.name.endsWith('.js')) out.push(path)
+    }
+  }
+  for (const entry of readdirSync(packagesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const lib = join(packagesDir, entry.name, 'lib')
+    if (existsSync(lib)) walk(lib)
+  }
+  return out
+}

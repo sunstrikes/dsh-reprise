@@ -11,7 +11,7 @@
  *      guarantee by consuming this view and nothing else.
  *   2. **Domain differences are data.** Which metrics exist, which direction is better, and which
  *      one decides "best" all come from the metric contract. The kernel knows the words `up` and
- *      `down` and nothing else about AUC, loss, or any other name.
+ *      `down` and nothing else about which metric it is or what it measures.
  *
  * The view is materialised per candidate in the workspace KV table, stamped with that candidate's
  * `max(local_seq)`. A tick therefore re-derives a candidate only when a new event landed for it,

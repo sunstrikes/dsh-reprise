@@ -1,10 +1,11 @@
 /**
  * The plugin configuration, validated once at boot instead of discovered mid-run.
  *
- * Everything domain-specific is here as data (user stories 27/28): the metric contract and its
- * direction, the round budget, the spend cap, the executor, the candidate implementer and the model
- * port. The kernel reads none of it as policy — it reads it as numbers and names — which is why a
- * user changes a metric direction without touching code.
+ * A run is **(run configuration) × (domain pack)**. What this run decides — the workspace it owns,
+ * its budget, how many rounds, which implementer and which model port — is here. What the *domain*
+ * knows — the metric contract, the priors, the adjustable surface, the five prompts and the executor
+ * entry — is in the pack, and `domain` names it. The kernel reads neither as policy: it reads them as
+ * numbers and names, which is why a user changes a metric direction without touching code.
  *
  * Two rules shape the validation:
  *
@@ -21,7 +22,8 @@
 
 import { resolve as resolvePath } from 'node:path'
 
-import { configWarnings, EXECUTOR_KINDS } from './warnings.js'
+import { DomainPackError, executorProblems, loadDomainPack, metricFromContract } from './domain.js'
+import { configWarnings } from './warnings.js'
 
 /** Five seconds: the cadence ticket 01 measured in the real host (78 beats / 415 s, drift ≤ 3 ms). */
 export const DEFAULT_INTERVAL_MS = 5_000
@@ -36,12 +38,13 @@ const isCommand = (value) => Array.isArray(value) && value.length > 0 && value.e
  * Validate and normalise one plugin/CLI configuration.
  *
  * @param {unknown} raw the object the host's bundle patch, the `run` CLI, or a test hands over
- * @param {{cwd?: string}} [options] `workspace` is resolved against this, not against wherever the
- *   host process happens to be
+ * @param {{cwd?: string, loadDomain?: (dir: string) => object}} [options] `workspace` and `domain`
+ *   are resolved against `cwd`, not against wherever the host process happens to be. `loadDomain` is
+ *   the seam a test uses to hand over a pack without a directory of files on disk.
  * @returns {{ok: true, config: object, problems: string[], warnings: object[]}
  *         | {ok: false, problem: string, problems: string[], warnings: object[]}}
  */
-export function resolveConfig(raw = {}, { cwd = process.cwd() } = {}) {
+export function resolveConfig(raw = {}, { cwd = process.cwd(), loadDomain = loadDomainPack } = {}) {
   const problems = []
   const fail = () => ({ ok: false, problem: problems[0], problems, warnings: [] })
 
@@ -54,21 +57,31 @@ export function resolveConfig(raw = {}, { cwd = process.cwd() } = {}) {
     problems.push('workspace must be the path of the directory this run owns, e.g. workspace: .reprise/run-1')
   }
 
-  const executor = raw.executor ?? { kind: 'local' }
-  if (!isObject(executor)) problems.push('executor must be an object with a kind')
-  else {
-    if (!EXECUTOR_KINDS.includes(executor.kind ?? 'local')) {
-      problems.push(`executor.kind must be one of ${EXECUTOR_KINDS.join(', ')} (got ${JSON.stringify(executor.kind)})`)
+  // The pack is loaded here, at boot, because every way it can be wrong is a way the run cannot
+  // work: no metric contract means nothing to compare, no prompts means a model answering nothing,
+  // no executor entry means no job. `loadDomain` is the test seam; production reads the directory.
+  let pack
+  if (!isText(raw.domain)) {
+    problems.push(
+      'domain must be the directory of one domain pack (a directory with a domain.json): the metric contract, ' +
+        'priors, adjustable surface, five prompts and executor entry are read from there, not from the kernel',
+    )
+  } else {
+    try {
+      pack = loadDomain(resolvePath(cwd, raw.domain))
+    } catch (error) {
+      if (!(error instanceof DomainPackError)) throw error
+      problems.push(...error.problems)
     }
-    if ((executor.kind ?? 'local') === 'local' && !isCommand(executor.command)) {
-      problems.push(
-        'executor.command must be a non-empty argv array — the local executor runs one process per job, ' +
-          'e.g. command: ["node", "train.mjs"]',
-      )
-    }
-    if (executor.kind === 'ray' && !isText(executor.base_url)) {
-      problems.push('executor.base_url must be the Ray dashboard URL when executor.kind is ray')
-    }
+  }
+
+  // The domain ships the entry that measures it; a run may override it (a laptop job versus the
+  // same training script on a cluster), and either way the shape is checked by one validator.
+  const executor = raw.executor ?? pack?.executor
+  if (executor === undefined) {
+    problems.push('executor must be an object with a kind — neither the run nor its domain pack declared one')
+  } else {
+    problems.push(...executorProblems(executor))
   }
 
   const candidate = raw.candidate
@@ -117,6 +130,23 @@ export function resolveConfig(raw = {}, { cwd = process.cwd() } = {}) {
     executor: { kind: 'local', ...executor },
     interval_ms: intervalMs,
     workspaceDir: resolvePath(cwd, raw.workspace),
+    domainPack: pack,
   }
+
+  // The pack declares what "better" means; a run may restate it. When a run says nothing, the pack
+  // answers — so a configuration that names a pack and no metric is complete rather than metric-less,
+  // and the two accounts cannot disagree by omission. (Collapsing the restatement entirely, so that
+  // one file names the metric, is a contract-resolution change, not this seam.)
+  const binding = metricFromContract(pack.metricContract)
+  if (config.metrics === undefined) {
+    config.metrics = {
+      primary: pack.metricContract.primary,
+      objectives: { ...pack.metricContract.objectives },
+    }
+  }
+  if (isObject(config.rounds) && config.rounds.metric === undefined) {
+    config.rounds = { ...config.rounds, metric: { ...binding } }
+  }
+
   return { ok: true, config, problems: [], warnings: configWarnings(config) }
 }

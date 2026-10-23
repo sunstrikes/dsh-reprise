@@ -34,6 +34,7 @@ import { createLocalPlatform } from '@dsh-reprise/exec/platform/local'
 import { createRayPlatform } from '@dsh-reprise/exec/platform/ray'
 
 import { fileArtifacts } from './artifacts.js'
+import { metricFromContract } from './domain.js'
 import { createJudge } from './judge.js'
 import { readRoundsState } from './rounds.js'
 
@@ -47,10 +48,11 @@ const isText = (value) => typeof value === 'string' && value.trim() !== ''
  *
  * Why this is needed at all: the candidate implementer is spawned with `cwd` set to the candidate's
  * worktree (that is the whole point of the port), so a *relative* script path in its argv resolves
- * against the wrong tree — the worktree does not contain `examples/`. Only elements that name a file
- * which actually exists under the launch directory are rewritten, so a bare binary (`node`), a flag
- * and a worktree-relative data path are all left alone. `{launch_dir}`, `{candidate}` and
- * `{worktree}` are also substituted for configurations that would rather be explicit.
+ * against the wrong tree — a worktree holds the candidate's repository, not the checkout the run was
+ * started from. Only elements that name a file which actually exists under the launch directory are
+ * rewritten, so a bare binary (`node`), a flag and a worktree-relative data path are all left alone.
+ * `{launch_dir}`, `{candidate}` and `{worktree}` are also substituted for configurations that would
+ * rather be explicit.
  */
 function absoluteise(argv, launchDir, variables = {}) {
   const substitute = (value) =>
@@ -306,15 +308,25 @@ export function portsFromConfig({ config, workspaceDir, store, log = () => {}, l
   }
 
   if (config.model !== undefined) {
+    const pack = config.domainPack
+    if (pack === undefined) {
+      throw new TypeError(
+        'the judge needs a domain pack: config.domain names the directory its five prompts and metric contract come from',
+      )
+    }
     ports.judge = createJudge({
       model: createCommandModel({
         command: absoluteise(config.model.command, launchDir),
         env: config.model.env,
         timeout_ms: config.model.timeout_ms,
       }),
-      metric: config.rounds?.metric ?? {},
+      // The pack declares "better"; a run may restate the metric it optimises for this round, which
+      // is the shape `rounds.metric` already had. Prompts and the adjustable surface come from the
+      // pack only: there is no second home for them to drift to.
+      metric: { ...metricFromContract(pack.metricContract), ...(config.rounds?.metric ?? {}) },
       baseline: () => baseline.read()?.value,
-      skillsDir: config.skills_dir,
+      skillsDir: pack.promptsDir,
+      surface: pack.surface,
       artifacts,
     })
   }
