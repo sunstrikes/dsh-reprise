@@ -424,9 +424,12 @@ inherited `GIT_DIR` points them at this one.
 
 Distinctive machinery worth not re-deriving during a review: phase-level artifact contracts, the
 four-state verdict vocabulary (`ok` / `conflict` / `missing` / `invalid`), the identity binding chain,
-and frontier and stop rules that are code rather than policy configuration. Chain of authority for a
-decision is `.scratch/spec.md` → `.scratch/issues/*.md` → the code; the tickets are the record of what
-was accepted and what was refused.
+and frontier and stop rules that are code rather than policy configuration. The code is the chain of
+authority for a decision, and it is the record of what was accepted and what was refused.
+
+Comments still cite things like `spec: 相位机` or `issue 06`. That is the shorthand this codebase was
+built with, naming a design record kept outside the repository as the author's working notes. Every
+claim in such a comment stands on its own — read the sentence, not the citation.
 
 </details>
 

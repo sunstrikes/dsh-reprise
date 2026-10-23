@@ -14,6 +14,6 @@ workspaces/
 *.db-shm
 .mnemon/
 
-# Scratch: the spec and tickets are tracked; bench dumps and temporary notes are not.
-.scratch/bench/
-.scratch/tmp/
+# Scratch: local design notes, spec and tickets. They stay on the machine that wrote them and are
+# never published with the repository.
+.scratch/

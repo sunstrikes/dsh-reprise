@@ -1,7 +1,6 @@
 /**
  * Guards the decision "the Source is registered from the plugin's own ctx, and nothing assumes a
- * service is synchronously visible" (spec: 宿主边界; `.scratch/research/cordis-fiber-settling.md`;
- * issue 10).
+ * service is synchronously visible" (spec: 宿主边界; issue 10).
  *
  * The measured facts this is written against:
  *   - a service must be declared in `export const inject` before it can be *accessed*; `ctx.get()`

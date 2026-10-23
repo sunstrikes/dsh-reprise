@@ -95,10 +95,6 @@ little" does not change that.
   `examples/feed-structure/lab/metric.mjs`. No real dataset, no scraped content, no third-party weights.
 - **A predecessor's dataset and checkpoints.** None exist in this repository, and the example needs
   none: it trains on a seeded synthetic dataset.
-- **The design notes under `.scratch/`.** They are part of this publication, not of the shipped
-  package. They were reviewed for third-party code and for material that is not ours to publish; the
-  parity analysis they contain is limited to capability names and consequences, and quotes no design
-  from the system it compares against.
 
 ## 6. Trademark and naming
 

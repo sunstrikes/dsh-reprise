@@ -1,8 +1,7 @@
 /**
  * Host registration: the one place this package touches a running dsh.
  *
- * The rules are not stylistic choices; each one cost a debugging round when it was measured
- * (`.scratch/research/cordis-fiber-settling.md`):
+ * The rules are not stylistic choices; each one cost a debugging round to measure:
  *
  *   1. **Declare the service.** `ctx.mnemonMemory` — and therefore every method on it — is only
  *      reachable from a plugin that lists it in `export const inject`. `ctx.get()` would report the

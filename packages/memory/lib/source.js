@@ -1,8 +1,8 @@
 /**
  * The dsh-mnemon Source adapter: the packet, offered to the host as one read-only memory source.
  *
- * The contract was measured, not guessed (`.scratch/research/cordis-fiber-settling.md`,
- * `dsh-mnemon`'s own type declarations):
+ * The contract was measured, not guessed (`dsh-mnemon`'s own type declarations, and the settling
+ * behaviour observed in the host):
  *
  *     MemorySourceDefinition { manifest, create(context) → MemorySourceRuntime }
  *     MemorySourceRuntime    { facts(request, signal), project(request, signal), query?, … }
