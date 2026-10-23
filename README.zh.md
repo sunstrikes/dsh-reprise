@@ -96,8 +96,8 @@ node scripts/link-workspace.mjs          # Node 22.5+; makes packages/* importab
 plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-reprise/packages/core" }
 ```
 
-然后提供你自己的配置。**随包发布的 patch 里根本没有 `config` 块**：没有 `workspace` 就无法启动运行，
-而一份真实配置需要的每个路径都属于拥有这次运行的那台机器。新增一条按 id 指向 `reprise-core` 的条目，
+然后提供你自己的配置。**随包发布的 patch 里根本没有 `config` 块**：没有 `workspace` 与 `domain`
+领域包就无法启动运行，而一份真实配置需要的每个路径都属于拥有这次运行的那台机器。新增一条按 id 指向 `reprise-core` 的条目，
 并把整份配置重述一遍——一个匹配的 override 会**整块替换** `config`，而不是深合并。把它写进你 profile
 的 `cordis.patch.yml`（或 `$DSH_HOME/cordis.patch.yml`，后者的优先级高于 profile 层）；
 [`packages/core/cordis.example.yml`](packages/core/cordis.example.yml) 是下面这个形状的填好版本，连
@@ -108,10 +108,8 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
   name: dsh-reprise
   config:
     workspace: /absolute/path/to/my-run      # required; created facts live here
+    domain: /absolute/path/to/my-domain-pack # required; 指标契约、先验、可调面白名单、五段提示词、执行器入口
     interval_ms: 5000
-    executor:
-      kind: local
-      command: ['node', 'train.mjs']         # one process per job, run inside the candidate worktree
     candidate:
       kind: command
       command: ['node', '/absolute/path/to/apply-change.mjs', '{candidate}']
@@ -136,14 +134,18 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 <a id="configure-it"></a>
 ### 配置
 
-所有领域特定的东西都是数据。内核对 AUC 是什么意思、哪个方向更好、什么叫「容量」假设一无所知。
+所有领域特定的东西都是数据，而且都在一个**领域包**里——一个目录，它的 `domain.json` 指明自己的指标
+契约、先验、可调面白名单、五段提示词和执行器入口（[`examples/feed-structure`](examples/feed-structure)
+就是一个完整的包）。内核不知道任何指标名、模型仓库或提示词：它从包里读；包缺了某一部分会在启动时被
+点名拒绝，而不是半配置地跑起来。
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `workspace` | **必填** | 运行拥有的目录；事实面就是它里面的 `workspace.db` |
+| `domain` | **必填** | 领域包目录；没有包就没有指标契约、没有提示词 |
 | `interval_ms` | `5000` | tick 节律 |
-| `executor.kind` | `'local'` | `local`（子进程）或 `ray`（Job Submission REST） |
-| `executor.command` | **`local` 时必填** | 一个作业的 argv，在候选的工作树（worktree）里解析 |
+| `executor.kind` | 取领域包 | `local`（子进程）或 `ray`（Job Submission REST） |
+| `executor.command` | 取领域包，**`local` 时必填** | 一个作业的 argv，在候选的工作树（worktree）里解析 |
 | `executor.base_url` | **`ray` 时必填** | Ray dashboard URL |
 | `executor.root_dir` / `metrics_required` | `'jobs'` / `true` | 作业目录所在位置；没有指标的作业算失败 |
 | `candidate.kind` | `'command'` | `command`、`claude` 或 `dsh`——LAND 的实现者 |
@@ -151,9 +153,8 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 | `runner.repo` / `runner.dir` | **配置 `candidate` 时必填** | 工作区里的仓库；工作树创建的位置 |
 | `runner.base_ref` | git 默认值 | 候选从中拉分支的那个 commit |
 | `model.command` | **配置了 `rounds` 时必填** | 每个判断相位都通过这个 argv 触达模型 |
-| `skills_dir` | `<repo>/skills/` | 五个 `SKILL.md` 的读取位置 |
-| `rounds.metric.name` / `.direction` | **必填** / `'higher'` | 轮次闸门优化的那一个指标 |
-| `rounds.metric.contract_ref` | 指标名 | 指向已冻结的指标契约（metric contract）的指针 |
+| `rounds.metric.name` / `.direction` | 取领域包的契约 | 轮次闸门优化的那一个指标；重述它就是让这次运行指向另一个目标 |
+| `rounds.metric.contract_ref` | 契约自己的 `name` | 指向已冻结的指标契约（metric contract）的指针 |
 | `rounds.max_rounds` / `.candidates_per_round` | `3` / `2` | 轮次工作流的形状 |
 | `rounds.retry.base_ms` / `.max_ms` / `.max_attempts` | `60000` / `3600000` / `3` | artifact 被拒后的退避，退到最后交给人 |
 | `stop.max_rounds` | `3` | `0` 关闭这条规则 |
@@ -161,7 +162,7 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 | `budget.gpu_hours_limit` | `0`（不限） | 硬上限；未设上限的远程执行器每次读取都会被警告 |
 | `budget.soft_ratio` / `.candidate_gpu_hours` | `0.8` / `0.5` | 到这个比例就停止派发；一次派发预扣多少 |
 | `budget.max_runtime_hours` / `.judge_tokens` | `0`（不限）/ `false` | 墙钟闸门；token 只记录，从不裁决 |
-| `metrics.primary` / `.objectives` | — | 在 INIT 时记录；会与轮次契约交叉核对 |
+| `metrics.primary` / `.objectives` | 取领域包的契约 | 在 INIT 时记录；会与轮次契约交叉核对 |
 | `poll.base_ms` / `.max_ms` / `.grace_attempts` | `1000` / `60000` / `2` | 作业轮询退避 |
 | `limits.max_wall_ms` / `.max_idle_ms` | `3600000` / `1800000` | 单作业的墙钟与静默期限 |
 
@@ -183,7 +184,7 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 | CLI | `node packages/core/lib/cli/run.js --workspace <dir> --config <file>` | 与宿主 tick 的同一套接线，由循环驱动；退出码 0 表示有结论、1 表示没有可比的指标、2 用法错误、3 超时 |
 | CLI | `node packages/core/lib/cli/dump.js --candidate <id>` | 时间线、每个闸门的结论、身份绑定、前沿（frontier）位置，以及运行为什么停下来 |
 | CLI | `node packages/core/lib/cli/intents.js place <kind>` / `list` | 人的意图（`proposal`、`grant`、`anchor`、`pause`、`resume`、`approval`、`experience`）写入 `<workspace>/pending/` |
-| Skills | `skills/{land,verify,cand-analyze,round-plan,round-reflect}/SKILL.md` | 模型在五个调用点各自被告知什么；磁盘上的 markdown，每次调用都重新读取——**不是** DSH skills，也没有按 DSH skill 注册 |
+| Skills | `<domain>/prompts/{land,verify,cand-analyze,round-plan,round-reflect}/SKILL.md` | 模型在五个调用点各自被告知什么；磁盘上的 markdown，属于领域包，每次调用都重新读取——**不是** DSH skills，也没有按 DSH skill 注册 |
 
 本包不提供服务、不发事件：它消费 `timer`、`connection` 和 `tools`。所有路由都是 `GET`；没有写端点
 可以去找，包括那种能让页面修改它正在报告的那次运行的端点。
@@ -214,14 +215,14 @@ node examples/feed-structure/init.mjs .workspace/feed
 一次真实的搭建，不是 fixture：它复制玩具模型仓库并提交（候选从那个 commit 拉分支），冻结一份记录
 运行起点的 sha256 清单，并通过真实的本地执行器跑 `metric.mjs` 测出基线。
 
-### Step 3 — 看你拥有的四个文件
+### Step 3 — 看你拥有的领域包
 
 ```
 node examples/feed-structure/inspect.mjs
 ```
 
-指标契约（方向和角色）、先验与假设分类、本轮的结构假设，以及接线。改动其中任何一个都是配置变更；
-内核对 AUC、点击，或你的模型一无所知。
+包的清单、指标契约（方向和角色）、可调面白名单、先验与假设分类、本轮的结构假设、执行器入口，以及
+接线。改动其中任何一个都是配置变更；内核对 AUC、点击，或你的模型一无所知。
 
 ### Step 4 — 跑循环
 
@@ -316,8 +317,7 @@ ln -s ~/.dsh/profiles/node_modules node_modules
 | `packages/memory` | 注入包，以 `dsh-mnemon` Source 暴露 |
 | `packages/ui` | 只读看板：宿主侧对路由的投影，加一个纯 ESM 客户端 |
 | `packages/exec-python` | 可选的代理指标桥（需要 torch）——只有 manifest，还没有代码 |
-| `skills/` | 五个调用点 skill：markdown，供拥有该领域的人编辑 |
-| `examples/feed-structure` | 一个完整走通的场景：指标契约、先验、结构假设、本地指标 |
+| `examples/feed-structure` | 一个完整的领域包，也是一个走通的场景：`domain.json` 加上指标契约、先验、可调面白名单、五段提示词、执行器入口、结构假设与本地指标 |
 
 依赖方向按包名无环：`contract` 不依赖这里的任何东西；`exec` 和 `memory` 依赖 `contract`；`core`
 依赖这三者。有一处刻意的例外：`ui` 用相对路径读 `core` 的 store 与 projection 模块，因为看板必须
@@ -348,15 +348,15 @@ ln -s ~/.dsh/profiles/node_modules node_modules
 区里还没有事实时，它用 `data: null` 加一个原因说明这件事，而不是失败。拒绝会带 `ok: false` 和
 `reason`。整条事实流永远不会成为一个工具结果。
 
-在循环内部，模型是一个子进程：在五个调用点的每一个，它读磁盘上的一份 `SKILL.md` 加上 JSON 事实
+在循环内部，模型是一个子进程：在五个调用点的每一个，它读领域包里的一份 `SKILL.md` 加上 JSON 事实
 （候选身份、L1 检查结果、监视器上报的指标），并以判定器能解析的 wire format 作答。它永远拿不到事实
 面、会话，或另一个候选的结果。
 
 #### Token 影响
 
 很小而且有界。一次状态回答是一页投影，裁到六条事件和十个前沿成员；工具是在有人问运行进展时被调用，
-不是每轮都调。五次判断调用各带一份 markdown skill（`skills/` 一共 246 行）加 JSON，而且每次都是新
-进程，所以一次运行里不会有东西累积。
+不是每轮都调。五次判断调用各带一份 markdown 提示词（领域包的 `prompts/` 一共 246 行）加 JSON，而且
+每次都是新进程，所以一次运行里不会有东西累积。
 
 #### KV Cache 影响
 

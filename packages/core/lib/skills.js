@@ -21,7 +21,6 @@
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 
 /**
  * The five places the model is consulted. Everything else in the loop is deterministic code — the
@@ -43,9 +42,6 @@ export const SKILL_DIRS = Object.freeze({
   round_plan: 'round-plan',
   round_reflect: 'round-reflect',
 })
-
-/** `<repo>/skills` — the pack ships with the repository and is not bundled into the package. */
-export const DEFAULT_SKILLS_DIR = fileURLToPath(new URL('../../../skills/', import.meta.url))
 
 export class SkillMissingError extends Error {
   /** @param {string} skillPath @param {string} callSite */
@@ -136,7 +132,12 @@ export function loadSkill(dir, callSite) {
  * @param {string} [dir]
  * @returns {Map<string, ReturnType<typeof loadSkill>>}
  */
-export function loadSkills(dir = DEFAULT_SKILLS_DIR) {
+export function loadSkills(dir) {
+  if (typeof dir !== 'string' || dir.trim() === '') {
+    throw new TypeError(
+      'loadSkills needs the directory the five prompts live in — they are part of a domain pack, and the kernel ships none',
+    )
+  }
   const skills = new Map()
   for (const callSite of CALL_SITES) skills.set(callSite, loadSkill(dir, callSite))
   return skills

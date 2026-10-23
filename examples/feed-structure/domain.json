@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "name": "feed-structure",
+  "metric_contract": "metric-contract.json",
+  "priors": "priors.json",
+  "surface": "surface.json",
+  "prompts": "prompts",
+  "executor": "executor.json",
+  "note": "This file is what makes this directory a domain pack. It names the five parts by relative path; the kernel infers nothing from filenames and reads nothing outside this directory, so the whole pack can be copied into another repository unchanged. `name` is quoted in every error about a broken part, and `schema_version` lets a future kernel refuse a pack it cannot read instead of misreading it."
+}

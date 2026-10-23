@@ -16,7 +16,7 @@ import test from 'node:test'
 import { artifactKinds, validateArtifact } from '@dsh-reprise/contract'
 
 import { createCandidate } from '../lib/loop.js'
-import { createJudge } from '../lib/judge.js'
+import { judgeFor } from './support/domain.js'
 import { readRoundsState, stepWorkspace } from '../lib/rounds.js'
 import { Store } from '../lib/store.js'
 
@@ -78,7 +78,7 @@ function setup({ config = CONFIG, answers = {}, baseline, judge, artifacts } = {
     round_reflect: GOLDEN_REFLECT,
     ...answers,
   })
-  const realJudge = judge ?? createJudge({
+  const realJudge = judge ?? judgeFor({
     model: model.model,
     metric: CONFIG.rounds.metric,
     baseline: config?.rounds?.baseline?.value,
@@ -482,7 +482,7 @@ test('the round workflow survives a restart: the phase and the plan come back fr
   const dir = mkdtempSync(join(tmpdir(), 'reprise-rounds-restart-'))
   const clock = new FakeClock()
   const model = scripted({ round_plan: GOLDEN_PLAN(1), round_reflect: GOLDEN_REFLECT })
-  const judge = createJudge({ model: model.model, metric: CONFIG.rounds.metric, baseline: 0.7012 })
+  const judge = judgeFor({ model: model.model, metric: CONFIG.rounds.metric, baseline: 0.7012 })
 
   const first = Store.open(dir)
   const ports = { store: first, clock, judge, config: CONFIG, model }

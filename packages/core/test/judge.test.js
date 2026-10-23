@@ -21,8 +21,8 @@ import test from 'node:test'
 
 import { validateArtifact } from '@dsh-reprise/contract'
 
-import { createJudge, defaultStaticChecks } from '../lib/judge.js'
-import { DEFAULT_SKILLS_DIR } from '../lib/skills.js'
+import { defaultStaticChecks } from '../lib/judge.js'
+import { FEED_PROMPTS_DIR, judgeFor } from './support/domain.js'
 
 const AT = 1_761_091_200_000
 
@@ -56,7 +56,7 @@ test('an accepting adversarial review yields a contract-valid verdict, with the 
   const model = scripted({
     verify: { verdict: 'accept', rationale: 'minimal diff, no evaluation changes', concerns: [] },
   })
-  const judge = createJudge({ model: model.model })
+  const judge = judgeFor({ model: model.model })
 
   const artifact = await judge.verify(VERIFY_INPUT)
 
@@ -85,7 +85,7 @@ test('the model cannot contribute the checks — only the review', async () => {
       checks: [{ name: 'invented_by_the_model', result: 'pass' }],
     },
   })
-  const artifact = await createJudge({ model: model.model }).verify(VERIFY_INPUT)
+  const artifact = await judgeFor({ model: model.model }).verify(VERIFY_INPUT)
 
   assert.ok(
     artifact.checks.every((check) => check.name !== 'invented_by_the_model'),
@@ -97,7 +97,7 @@ test('an adversarial review that rejects stops the candidate without calling the
   const model = scripted({
     verify: { verdict: 'reject', rationale: 'it also changes the evaluation split' },
   })
-  const artifact = await createJudge({ model: model.model }).verify(VERIFY_INPUT)
+  const artifact = await judgeFor({ model: model.model }).verify(VERIFY_INPUT)
 
   assert.deepEqual(validateArtifact('verify_verdict', artifact), { status: 'ok', message: '' })
   assert.equal(artifact.passed, false, 'a rejected review is not a pass')
@@ -107,7 +107,7 @@ test('an adversarial review that rejects stops the candidate without calling the
 
 test('a review that accepts while a static check failed is a conflict, not a pass', async () => {
   const model = scripted({ verify: { verdict: 'accept', rationale: 'I see nothing wrong' } })
-  const judge = createJudge({
+  const judge = judgeFor({
     model: model.model,
     staticChecks: () => [
       { name: 'worktree_clean', result: 'fail' },
@@ -126,7 +126,7 @@ test('a model answer full of numbers is not a verdict, and none of its numbers s
   const model = scripted({
     verify: { score: 0.987, rank: 1, confidence: 0.99, verdict: 'probably fine' },
   })
-  const artifact = await createJudge({ model: model.model }).verify(VERIFY_INPUT)
+  const artifact = await judgeFor({ model: model.model }).verify(VERIFY_INPUT)
 
   assert.equal(artifact.passed, false, 'an unusable review is a rejection, not an abstention')
   assert.equal(artifact.reviewer.verdict, 'reject')
@@ -139,7 +139,7 @@ test('a model answer full of numbers is not a verdict, and none of its numbers s
 
 test('a model port failure fails closed instead of crashing the tick', async () => {
   const model = scripted({ verify: new Error('upstream 503') })
-  const artifact = await createJudge({ model: model.model }).verify(VERIFY_INPUT)
+  const artifact = await judgeFor({ model: model.model }).verify(VERIFY_INPUT)
 
   assert.equal(artifact.passed, false)
   assert.equal(artifact.reviewer.verdict, 'reject')
@@ -151,7 +151,7 @@ test('an answer wrapped in prose and a fenced block is still read as the answer'
   const model = scripted({
     verify: 'Looking at this diff, I would accept it.\n\n```json\n{"verdict": "accept", "rationale": "no evaluation changes"}\n```\n',
   })
-  const artifact = await createJudge({ model: model.model }).verify(VERIFY_INPUT)
+  const artifact = await judgeFor({ model: model.model }).verify(VERIFY_INPUT)
 
   assert.equal(artifact.reviewer.verdict, 'accept', 'a model that wraps its JSON in prose is normal, not an error')
   assert.equal(artifact.passed, true)
@@ -168,7 +168,7 @@ const ANALYZE_INPUT = {
 }
 
 const judgeWithBaseline = (model, extra = {}) =>
-  createJudge({
+  judgeFor({
     model: model.model,
     metric: { name: 'auc', direction: 'higher' },
     baseline: 0.7012,
@@ -254,7 +254,7 @@ test('the metrics the monitor recorded on the phase state are the evidence when 
 
 test('the metric contract decides which reported number counts, not the model', async () => {
   const model = scripted({ cand_analyze: { root_cause: 'noise' } })
-  const judge = createJudge({
+  const judge = judgeFor({
     model: model.model,
     metric: { name: 'ndcg@10', direction: 'higher' },
     baseline: 0.3,
@@ -270,7 +270,7 @@ test('the metric contract decides which reported number counts, not the model', 
 
 test('a baseline that is not frozen yet yields inconclusive rather than a guess', async () => {
   const model = scripted({ cand_analyze: { root_cause: 'unclear' } })
-  const artifact = await createJudge({ model: model.model, metric: { name: 'auc' } }).analyze(ANALYZE_INPUT)
+  const artifact = await judgeFor({ model: model.model, metric: { name: 'auc' } }).analyze(ANALYZE_INPUT)
 
   assert.equal(artifact.verdict, 'inconclusive')
   assert.deepEqual(validateArtifact('analyze_report', artifact), { status: 'ok', message: '' })
@@ -278,9 +278,9 @@ test('a baseline that is not frozen yet yields inconclusive rather than a guess'
 
 test('editing a skill changes the next prompt from the same judge, with no rebuild', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'reprise-judge-skills-'))
-  cpSync(DEFAULT_SKILLS_DIR, dir, { recursive: true })
+  cpSync(FEED_PROMPTS_DIR, dir, { recursive: true })
   const model = scripted({ verify: { verdict: 'accept', rationale: 'ok' } })
-  const judge = createJudge({ model: model.model, skillsDir: dir })
+  const judge = judgeFor({ model: model.model, skillsDir: dir })
 
   await judge.verify(VERIFY_INPUT)
   const path = join(dir, 'verify', 'SKILL.md')
@@ -312,7 +312,7 @@ test('a round plan is contract-valid, and its identity fields come from code rat
       ],
     },
   })
-  const judge = createJudge({ model: model.model, metric: { name: 'auc', contract_ref: 'metric-contract.json' } })
+  const judge = judgeFor({ model: model.model, metric: { name: 'auc', contract_ref: 'metric-contract.json' } })
   const artifact = await judge.plan({ round: 2, facts: PLAN_FACTS })
 
   assert.deepEqual(validateArtifact('candidate_plan', artifact), { status: 'ok', message: '' })
@@ -333,7 +333,7 @@ test('two hypotheses with the same id are a conflict, not a plan', async () => {
       ],
     },
   })
-  const artifact = await createJudge({ model: model.model }).plan({ round: 1, facts: PLAN_FACTS })
+  const artifact = await judgeFor({ model: model.model }).plan({ round: 1, facts: PLAN_FACTS })
 
   const verdict = validateArtifact('candidate_plan', artifact)
   assert.equal(verdict.status, 'conflict')
@@ -344,7 +344,7 @@ test('a hypothesis with no statement is invalid, and the message names the field
   const model = scripted({
     round_plan: { hypotheses: [{ id: 'h1', expected_files: ['a.py'] }] },
   })
-  const artifact = await createJudge({ model: model.model }).plan({ round: 1, facts: PLAN_FACTS })
+  const artifact = await judgeFor({ model: model.model }).plan({ round: 1, facts: PLAN_FACTS })
 
   const verdict = validateArtifact('candidate_plan', artifact)
   assert.equal(verdict.status, 'invalid')
@@ -353,7 +353,7 @@ test('a hypothesis with no statement is invalid, and the message names the field
 
 test('a plan that names no hypothesis is refused rather than silently becoming an empty round', async () => {
   const model = scripted({ round_plan: { hypotheses: [] } })
-  const artifact = await createJudge({ model: model.model }).plan({ round: 1, facts: PLAN_FACTS })
+  const artifact = await judgeFor({ model: model.model }).plan({ round: 1, facts: PLAN_FACTS })
 
   const verdict = validateArtifact('candidate_plan', artifact)
   assert.equal(verdict.status, 'invalid')
@@ -371,7 +371,7 @@ test('a reflection is structured, and a model-authored stop flag or score is dis
       rank: 1,
     },
   })
-  const artifact = await createJudge({ model: model.model }).reflect({ round: 1, facts: PLAN_FACTS, now: AT })
+  const artifact = await judgeFor({ model: model.model }).reflect({ round: 1, facts: PLAN_FACTS, now: AT })
 
   assert.deepEqual(validateArtifact('round_reflect', artifact), { status: 'ok', message: '' })
   assert.equal(artifact.round, 1)
@@ -385,7 +385,7 @@ test('a reflection is structured, and a model-authored stop flag or score is dis
 
 test('a reflection with no summary does not advance anything', async () => {
   const model = scripted({ round_reflect: { lessons: [], next_round_focus: ['try something else'] } })
-  const artifact = await createJudge({ model: model.model }).reflect({ round: 1, facts: PLAN_FACTS, now: AT })
+  const artifact = await judgeFor({ model: model.model }).reflect({ round: 1, facts: PLAN_FACTS, now: AT })
 
   const verdict = validateArtifact('round_reflect', artifact)
   assert.equal(verdict.status, 'missing')
@@ -396,7 +396,7 @@ test('a reflection whose lessons are all empty strings is malformed, not merely 
   const model = scripted({
     round_reflect: { summary: 'nothing learned', lessons: [{ statement: '' }], next_round_focus: ['try again'] },
   })
-  const artifact = await createJudge({ model: model.model }).reflect({ round: 1, facts: PLAN_FACTS, now: AT })
+  const artifact = await judgeFor({ model: model.model }).reflect({ round: 1, facts: PLAN_FACTS, now: AT })
 
   const verdict = validateArtifact('round_reflect', artifact)
   assert.equal(verdict.status, 'invalid')
@@ -407,7 +407,7 @@ test('a reflection whose lessons are all empty strings is malformed, not merely 
 
 test('the LAND entry freezes the hypothesis it will implement and briefs the implementer from the skill', async () => {
   const model = scripted({})
-  const judge = createJudge({ model: model.model, metric: { name: 'auc', contract_ref: 'metric-contract.json' } })
+  const judge = judgeFor({ model: model.model, metric: { name: 'auc', contract_ref: 'metric-contract.json' } })
   const { artifact, prompt } = await judge.land({
     candidateId: 'r1-h1',
     round: 1,
@@ -427,7 +427,7 @@ test('the LAND entry freezes the hypothesis it will implement and briefs the imp
 
 test('a hypothesis that names no file never becomes a candidate', async () => {
   const model = scripted({})
-  const { artifact } = await createJudge({ model: model.model }).land({
+  const { artifact } = await judgeFor({ model: model.model }).land({
     candidateId: 'r1-h1',
     round: 1,
     hypothesis: { id: 'h1', statement: 'make the model better', expected_files: [] },

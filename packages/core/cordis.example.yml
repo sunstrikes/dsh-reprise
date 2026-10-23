@@ -9,11 +9,16 @@
 #
 # Two path rules, both learned the hard way:
 #
-#   - `workspace` and every repository-side script are **absolute**, because the host resolves a
-#     relative path against *its own* cwd, which is the application's, not this repository's;
+#   - `workspace`, `domain` and every repository-side script are **absolute**, because the host
+#     resolves a relative path against *its own* cwd, which is the application's, not this
+#     repository's;
 #   - the executor's command stays relative (`node metric.mjs`) because it runs inside the
 #     candidate's worktree, and the runner's `repo` / `dir` stay relative because they name
 #     directories inside the workspace.
+#
+# `domain` names the pack the run reads its metric contract, priors, adjustable surface, five prompts
+# and executor entry from. The `executor` block below is kept on purpose: the pack ships the same one,
+# and this run overrides nothing — delete it and the run measures the same way.
 #
 # The workspace named here is a fresh run of the example: `.workspace/demo` already reached FINALIZE
 # (max_rounds=1), so a loop pointed there would tick into nothing to do.
@@ -21,6 +26,7 @@
   name: 'dsh-reprise'
   config:
     workspace: /absolute/path/to/dsh-reprise/.workspace/demo2
+    domain: /absolute/path/to/dsh-reprise/examples/feed-structure
     interval_ms: 300
     metrics: { primary: auc, objectives: { auc: up } }
     stop: { max_rounds: 1 }

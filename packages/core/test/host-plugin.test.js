@@ -36,12 +36,21 @@ import test from 'node:test'
 
 import * as plugin from '../lib/index.js'
 import { Store } from '../lib/store.js'
+import { CONFIG_ONLY_PACK_DIR } from './support/domain.js'
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const tempWorkspace = () => join(mkdtempSync(join(tmpdir(), 'reprise-host-')), 'workspace')
 
-/** The local executor needs a command; nothing in these tests ever runs it. */
-const BASE = { executor: { kind: 'local', command: ['node', '-e', '0'] } }
+/**
+ * A host needs a domain pack: the metric contract, the five prompts and the executor entry are the
+ * domain's, and there is no packaged default. The pack below is configuration only, which is also
+ * the proof that a second domain needs no kernel change. The local executor needs a command; nothing
+ * in these tests ever runs it.
+ */
+const BASE = {
+  domain: CONFIG_ONLY_PACK_DIR,
+  executor: { kind: 'local', command: ['node', '-e', '0'] },
+}
 
 function collector() {
   const lines = []
@@ -134,6 +143,7 @@ test('a real executor with no GPU-hours limit is announced at boot, not discover
   const log = collector()
   await root.plugin(hostRuntime.TimerService)
   await root.plugin(plugin, {
+    ...BASE,
     workspace: tempWorkspace(),
     interval_ms: 20,
     executor: { kind: 'ray', base_url: 'http://ray.invalid' },

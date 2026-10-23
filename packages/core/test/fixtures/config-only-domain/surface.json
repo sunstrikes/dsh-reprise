@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "files": ["src/thing.json"],
+  "keys": ["width"],
+  "symbols": []
+}

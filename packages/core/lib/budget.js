@@ -9,7 +9,8 @@
  * with no callback to wait for — which is what lets the stop decision stay inside the tick.
  *
  * `cost_*` is deliberately absent: in the predecessor that name meant "model inference cost as an
- * optimisation objective", not money. Merging the two is how a budget gate ends up optimising AUC.
+ * optimisation objective", not money. Merging the two is how a budget gate ends up optimising the
+ * metric it was supposed to be paying for.
  *
  * @module
  */

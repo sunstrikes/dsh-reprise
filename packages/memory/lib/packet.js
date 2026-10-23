@@ -147,7 +147,7 @@ function guardrailsSection({ config, corpus, problems }) {
   return items
 }
 
-/** `auc:0.71,loss:0.31` — the declared objectives only, in contract order. A metric no objective names is not a score. */
+/** `name:value,name:value` — the declared objectives only, in contract order. A metric no objective names is not a score. */
 function vectorText(vector) {
   const entries = Object.entries(vector ?? {})
   return entries.length === 0 ? 'none' : entries.map(([name, value]) => `${name}:${value}`).join(',')

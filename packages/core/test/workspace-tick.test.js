@@ -20,8 +20,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { fileArtifacts } from '../lib/artifacts.js'
-import { createJudge } from '../lib/judge.js'
-import { DEFAULT_SKILLS_DIR } from '../lib/skills.js'
+import { FEED_PROMPTS_DIR, judgeFor } from './support/domain.js'
 import { tick } from '../lib/loop.js'
 import { readRoundsState } from '../lib/rounds.js'
 import { Store } from '../lib/store.js'
@@ -125,7 +124,7 @@ function setup({ config = ROUND_CONFIG, answers = {}, artifacts } = {}) {
     cand_analyze: { root_cause: 'the wider table removed collisions on rare features' },
     ...answers,
   })
-  const judge = createJudge({
+  const judge = judgeFor({
     model: recorded.model,
     metric: { name: 'auc', direction: 'higher', contract_ref: 'metric-contract.json' },
     baseline: 0.7012,
@@ -228,7 +227,7 @@ test('a review that accepts over a failed static check is recorded as a conflict
   const recorded = recordedModel(store, {
     verify: { verdict: 'accept', rationale: 'I see nothing wrong with it' },
   })
-  const judge = createJudge({
+  const judge = judgeFor({
     model: recorded.model,
     staticChecks: () => [
       { name: 'worktree_clean', result: 'fail' },
@@ -271,7 +270,7 @@ test('dump names the field a refused artifact was missing, so a reader can fix i
   const clock = new FakeClock()
   const recorded = recordedModel(store, { verify: { verdict: 'accept', rationale: 'looks fine' } })
   // A verdict with no checks is not a verdict, and the contract says so.
-  const judge = createJudge({ model: recorded.model, staticChecks: () => [] })
+  const judge = judgeFor({ model: recorded.model, staticChecks: () => [] })
   const ports = { store, clock, platform: fakePlatform(), harness: fakeHarness, judge }
   store.setState('c1', 'phase', { phase: 'LAND', round: 1, hypothesis: 'widen the embedding table to 2^22' })
   for (let index = 0; index < 6; index += 1) await tick(ports)
@@ -296,7 +295,7 @@ test('swapping one markdown skill changes what the gate decides, with no code ch
       request.prompt.includes('REJECT-EVERYTHING')
         ? { verdict: 'reject', rationale: 'the skill told me to reject everything' }
         : { verdict: 'accept', rationale: 'no problems found' }
-    const judge = createJudge({ model, skillsDir })
+    const judge = judgeFor({ model, skillsDir })
     store.setState('c1', 'phase', { phase: 'LAND', round: 1, hypothesis: 'widen the embedding table to 2^22' })
     const ports = { store, clock, platform: fakePlatform(), harness: fakeHarness, judge }
     for (let index = 0; index < 5; index += 1) await tick(ports)
@@ -305,10 +304,10 @@ test('swapping one markdown skill changes what the gate decides, with no code ch
     return phase
   }
 
-  assert.notEqual(await run(DEFAULT_SKILLS_DIR), 'REJECTED', 'the shipped skill lets a clean candidate through')
+  assert.notEqual(await run(FEED_PROMPTS_DIR), 'REJECTED', 'the shipped skill lets a clean candidate through')
 
   const edited = mkdtempSync(join(tmpdir(), 'reprise-skill-swap-pack-'))
-  cpSync(DEFAULT_SKILLS_DIR, edited, { recursive: true })
+  cpSync(FEED_PROMPTS_DIR, edited, { recursive: true })
   const path = join(edited, 'verify', 'SKILL.md')
   writeFileSync(path, `${readFileSync(path, 'utf8')}\n\nREJECT-EVERYTHING in this round.\n`)
 

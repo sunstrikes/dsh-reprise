@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "search_space": { "width": { "kind": "capacity", "values": [1, 2, 4] } },
+  "priors": [],
+  "hypothesis_classes": [
+    { "id": "capacity", "description": "make the thing wider", "expected_effect": "small gain, more compute" }
+  ]
+}

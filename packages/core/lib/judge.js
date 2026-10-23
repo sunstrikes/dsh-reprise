@@ -27,7 +27,7 @@
 
 import { isNonEmptyString, isPlainObject } from '@dsh-reprise/contract'
 
-import { DEFAULT_SKILLS_DIR, loadSkill, loadSkills, renderPrompt } from './skills.js'
+import { loadSkill, loadSkills, renderPrompt } from './skills.js'
 
 // Registers `round_reflect` and `land_hypothesis` with the contract as a side effect of importing.
 import './artifact-kinds.js'
@@ -42,9 +42,6 @@ export const ANSWER_SHAPES = Object.freeze({
   round_reflect:
     '{"summary": "<what this round taught, in a few sentences>", "lessons": [{"statement": "<a generalisable lesson>", "evidence": "<the candidate or observation it came from>"}], "next_round_focus": ["<a concrete thing the next round should look at>"]}',
 })
-
-/** The default metric contract. Domain differences are data; this is only a shape-free fallback. */
-export const DEFAULT_METRIC = Object.freeze({ name: 'auc', direction: 'higher' })
 
 const VERDICTS = Object.freeze(['improved', 'regressed', 'inconclusive'])
 
@@ -158,10 +155,16 @@ export function compareMetric(observed, baseline, direction = 'higher') {
 // ------------------------------------------------------------------ judge
 
 /**
+ * Everything domain-specific arrives as an argument from the pack (`domain.js`): the prompts
+ * directory, the metric contract and the adjustable surface. There is deliberately no default for
+ * any of them — a judge that fell back to a metric name or a prompt of its own would be the kernel
+ * answering a domain question, and the answer would look exactly like a configured one.
+ *
  * @param {{
  *   model: (request: { call_site: string, prompt: string, facts: object, answer_schema: string }) => Promise<unknown>,
- *   skillsDir?: string,
- *   metric?: { name?: string, direction?: 'higher' | 'lower', contract_ref?: string },
+ *   skillsDir: string,
+ *   metric: { name: string, direction?: 'higher' | 'lower' | 'up' | 'down', contract_ref?: string },
+ *   surface?: { files?: string[], keys?: string[], symbols?: string[] },
  *   baseline?: number | { value: number } | (() => number | { value: number } | undefined | Promise<number | { value: number } | undefined>),
  *   staticChecks?: (input: object) => { name: string, result: 'pass' | 'fail' }[],
  *   artifacts?: { write: (name: string, value: unknown) => unknown },
@@ -170,8 +173,9 @@ export function compareMetric(observed, baseline, direction = 'higher') {
  */
 export function createJudge({
   model,
-  skillsDir = DEFAULT_SKILLS_DIR,
+  skillsDir,
   metric = {},
+  surface,
   baseline,
   staticChecks = defaultStaticChecks,
   artifacts,
@@ -183,16 +187,39 @@ export function createJudge({
     )
   }
   if (typeof staticChecks !== 'function') throw new TypeError('staticChecks must be a function returning check results')
+  if (!isNonEmptyString(skillsDir)) {
+    throw new TypeError(
+      'a judge needs skillsDir — the five prompts are the domain pack\'s, and the kernel ships none (see domain.js)',
+    )
+  }
+  if (!isPlainObject(metric) || !isNonEmptyString(metric.name)) {
+    throw new TypeError(
+      'a judge needs the metric contract\'s primary metric (metric.name) — the domain pack declares it, and the kernel has no default',
+    )
+  }
 
   // Fail at construction, not mid-round: a missing skill produces a prompt with no instructions,
   // and a model without instructions still answers.
   loadSkills(skillsDir)
 
   const metricContract = Object.freeze({
-    name: isNonEmptyString(metric.name) ? metric.name : DEFAULT_METRIC.name,
-    direction: metric.direction === 'lower' ? 'lower' : 'higher',
-    contractRef: isNonEmptyString(metric.contract_ref) ? metric.contract_ref : isNonEmptyString(metric.name) ? metric.name : DEFAULT_METRIC.name,
+    name: metric.name,
+    direction: metric.direction === 'lower' || metric.direction === 'down' ? 'lower' : 'higher',
+    contractRef: isNonEmptyString(metric.contract_ref) ? metric.contract_ref : metric.name,
   })
+
+  // The adjustable surface, as the model sees it: which files, knobs and symbols a candidate may
+  // touch. Absent means the domain declared none, and the prompt then says nothing rather than
+  // inventing a whitelist; gate two is where an out-of-bounds change is refused (ticket 24).
+  const allowedSurface =
+    isPlainObject(surface)
+      ? {
+          files: Array.isArray(surface.files) ? surface.files : [],
+          keys: Array.isArray(surface.keys) ? surface.keys : [],
+          symbols: Array.isArray(surface.symbols) ? surface.symbols : [],
+        }
+      : undefined
+  const surfaceFacts = allowedSurface === undefined ? {} : { allowed_surface: allowedSurface }
 
   const persist = (kind, candidateId, artifact) => {
     if (typeof artifacts?.write !== 'function') return artifact
@@ -284,6 +311,7 @@ export function createJudge({
         hypothesis: state?.hypothesis ?? null,
         parent_binding: parent === undefined ? null : { parent_id: parent.parent_id ?? null, parent_commit: parent.parent_commit ?? null },
         files: Array.isArray(files) ? files : [],
+        ...surfaceFacts,
         l1_checks: checks,
       }
       const { answer, problem } = await ask('verify', facts)
@@ -414,6 +442,7 @@ export function createJudge({
           round,
           hypothesis: { id: hypothesis?.id ?? null, statement: statement ?? null, expected_files: hypothesis?.expected_files ?? [] },
           metric_contract: { name: metricContract.name, direction: metricContract.direction, contract_ref: metricContract.contractRef },
+          ...surfaceFacts,
         },
         answer: ANSWER_SHAPES.land,
       })

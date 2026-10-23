@@ -2,8 +2,8 @@
  * The artifact kinds this kernel understands.
  *
  * Domain differences belong in data, not here: an artifact kind states *shape and internal
- * consistency* only. Whether an AUC delta of +0.004 counts as improvement is a metric contract
- * question, answered elsewhere. These three exist because they cover the three model-backed
+ * consistency* only. Whether a delta of +0.004 counts as improvement is a metric contract question,
+ * answered elsewhere. These three exist because they cover the three model-backed
  * phases that produce a decision, and because a fourth kind must cost nothing but a validator
  * and its fixtures.
  *

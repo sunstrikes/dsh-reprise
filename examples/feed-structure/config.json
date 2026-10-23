@@ -1,4 +1,5 @@
 {
+  "domain": "examples/feed-structure",
   "workspace": ".workspace/feed",
   "interval_ms": 150,
   "metrics": { "primary": "auc", "objectives": { "auc": "up" } },
@@ -9,12 +10,6 @@
     "max_rounds": 1,
     "candidates_per_round": 2,
     "retry": { "base_ms": 1000, "max_ms": 4000, "max_attempts": 3 }
-  },
-  "executor": {
-    "kind": "local",
-    "command": ["node", "metric.mjs"],
-    "root_dir": "jobs",
-    "metrics_required": true
   },
   "candidate": {
     "kind": "command",
