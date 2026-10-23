@@ -3,7 +3,33 @@ description: "A model-structure exploration loop as a DeepSeek Harness bundle: d
 kind: "package-bundle"
 ---
 
+<p align="center">
+  <img src="packages/core/icon.svg" alt="dsh-reprise" width="96" height="96">
+</p>
+
+<p align="center">
+  <strong>English</strong> | <a href="README.zh.md">简体中文</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/sunstrikes/dsh-reprise/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/sunstrikes/dsh-reprise/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-263146?style=flat-square"></a>
+  <img alt="status: public beta" src="https://img.shields.io/badge/status-public%20beta-7da1de?style=flat-square">
+  <a href="https://github.com/sunstrikes/dsh-reprise/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/sunstrikes/dsh-reprise?style=flat-square&color=4b6fff"></a>
+  <img alt="node >= 22" src="https://img.shields.io/badge/node-%E2%89%A522-4b6fff?style=flat-square">
+  <img alt="DeepSeek Harness bundle" src="https://img.shields.io/badge/DeepSeek%20Harness-bundle-4b6fff?style=flat-square">
+</p>
+
+<div align="center">
+
 # dsh-reprise
+
+**An exploration loop whose conclusions you can check.**
+</div>
+
+> A DeepSeek Harness bundle: reproduce a published number, then iterate on the reproduction under
+> control — deterministic phases, a baseline frozen at INIT, a spend ledger that reserves before it
+> spends, and a stop decision computed from recorded facts rather than remembered intent.
 
 <a id="summary"></a>
 ## Summary

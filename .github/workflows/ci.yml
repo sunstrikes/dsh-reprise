@@ -1,0 +1,38 @@
+name: CI
+
+# The suite is the whole gate, and it needs no package manager: `link-workspace.mjs` writes the
+# workspace symlinks itself, so this job installs nothing and runs offline. The five tests in
+# `packages/core/test/host-plugin.test.js` drive cordis's real lifecycle; cordis ships with the
+# DeepSeek Harness profile and is absent here, so those five report themselves skipped — which is why
+# the job asserts "no failures", not "397 tests".
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Node 24 is the version this repository is tested on. `engines` allows 22 as well, but the
+        # fact plane's `node:sqlite` is flag-gated on early 22.x releases, so CI does not claim it.
+        node: ['24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Link the workspace packages
+        run: node scripts/link-workspace.mjs
+      - name: Check manifests and run the suite
+        run: npm test
