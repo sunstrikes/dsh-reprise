@@ -1,0 +1,6 @@
+{
+  "kind": "local",
+  "command": ["node", "metric.mjs"],
+  "root_dir": "jobs",
+  "metrics_required": true
+}

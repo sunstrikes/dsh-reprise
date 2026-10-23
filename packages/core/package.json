@@ -16,6 +16,7 @@
     "./rounds": "./lib/rounds.js",
     "./judge": "./lib/judge.js",
     "./skills": "./lib/skills.js",
+    "./domain": "./lib/domain.js",
     "./intents": "./lib/intents.js",
     "./artifacts": "./lib/artifacts.js",
     "./dump": "./lib/cli/dump.js",
