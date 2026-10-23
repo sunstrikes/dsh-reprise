@@ -2,49 +2,22 @@
   "domain": "examples/feed-structure",
   "workspace": ".workspace/feed",
   "interval_ms": 150,
-  "metrics": {
-    "primary": "auc",
-    "objectives": {
-      "auc": "up"
-    }
-  },
-  "stop": {
-    "max_rounds": 1
-  },
-  "budget": {
-    "candidate_gpu_hours": 0.5,
-    "gpu_hours_limit": 0
-  },
+  "metrics": { "primary": "auc", "objectives": { "auc": "up" } },
+  "stop": { "max_rounds": 1 },
+  "budget": { "candidate_gpu_hours": 0.5, "gpu_hours_limit": 0 },
   "rounds": {
-    "metric": {
-      "name": "auc",
-      "direction": "higher",
-      "contract_ref": "examples/feed-structure/metric-contract.json"
-    },
+    "metric": { "name": "auc", "direction": "higher", "contract_ref": "examples/feed-structure/metric-contract.json" },
     "max_rounds": 1,
     "candidates_per_round": 2,
-    "retry": {
-      "base_ms": 1000,
-      "max_ms": 4000,
-      "max_attempts": 3
-    }
+    "retry": { "base_ms": 1000, "max_ms": 4000, "max_attempts": 3 }
   },
   "candidate": {
     "kind": "command",
-    "command": [
-      "node",
-      "examples/feed-structure/apply-change.mjs",
-      "{candidate}",
-      "examples/feed-structure/hypotheses.json"
-    ],
+    "command": ["node", "examples/feed-structure/apply-change.mjs", "{candidate}", "examples/feed-structure/hypotheses.json"],
     "timeout_ms": 60000,
     "env": {}
   },
-  "runner": {
-    "repo": "model-repo",
-    "base_ref": "HEAD",
-    "dir": "worktrees"
-  },
+  "runner": { "repo": "model-repo", "base_ref": "HEAD", "dir": "worktrees" },
   "model": {
     "command": [
       "node",
@@ -54,13 +27,6 @@
       "examples/feed-structure/priors.json"
     ]
   },
-  "poll": {
-    "base_ms": 200,
-    "max_ms": 2000,
-    "grace_attempts": 2
-  },
-  "limits": {
-    "max_wall_ms": 120000,
-    "max_idle_ms": 120000
-  }
+  "poll": { "base_ms": 200, "max_ms": 2000, "grace_attempts": 2 },
+  "limits": { "max_wall_ms": 120000, "max_idle_ms": 120000 }
 }
