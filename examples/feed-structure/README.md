@@ -4,22 +4,31 @@ A complete, copyable scenario: **a click-prediction ranker whose structure is wr
 way, two structural hypotheses about how to fix it, and a metric that says which one was right.** It
 runs in about three seconds on a laptop.
 
-Everything the kernel sees is here as data. The kernel does not know what AUC means, which direction is
-better, or what a "capacity" hypothesis is — those live in three JSON files you own.
+Everything the kernel sees is here as data, and this directory **is a domain pack**: `domain.json`
+names the five parts, the kernel loads them, and nothing about this model lives in the code. A second
+domain is a second directory like this one — no source file changes.
 
 ```
-config.json             the wiring: executor, candidate implementer, model port, rounds, budget
+domain.json             the manifest: this directory is a pack, and these are its five parts
 metric-contract.json    what the metric is, its direction, and each metric's role
 priors.json             the search space, the beliefs the run starts from, the hypothesis classes
+surface.json            the adjustable-surface whitelist: files a candidate may edit, and the knobs
+prompts/                the five call-site prompts (land, verify, cand-analyze, round-plan, round-reflect)
+executor.json           how this domain is measured: the argv one job runs, inside the candidate worktree
+config.json             the run's own wiring: workspace, budget, rounds, implementer, model port
 hypotheses.json         this round's structural hypotheses and the change each one makes
-metric-contract.json    (also) the contract_ref the frozen round config points at
 recorded/judgement.json recorded model answers for VERIFY, CAND_ANALYZE and ROUND_REFLECT
 recorded-model.mjs      the model port: replays the recording through the real wire format
 apply-change.mjs        the candidate implementer: applies a hypothesis' change inside the worktree
 init.mjs                builds a workspace: model repo + frozen priors + a measured baseline
-inspect.mjs             prints the four files, with what to change in each
+inspect.mjs             prints the pack and the wiring, with what to change in each
 lab/                    the toy model repository candidates branch from (see lab/README.md)
 ```
+
+The split inside the pack is the useful part: **the pack is what a domain knows** (what better means,
+where a hypothesis may move, how one is measured, what the model is told), and **`config.json` is what
+this run decides** (which workspace, how much money, how many rounds, which implementer). A pack can be
+copied into another repository unchanged; a run configuration is about one machine.
 
 ## The scenario
 
@@ -46,10 +55,13 @@ Everything below is a configuration or data edit. No source file changes.
 
 | You want to… | Edit |
 |---|---|
-| flip the metric direction | `metric-contract.json` `direction` + `config.json` `rounds.metric.direction`, and `config.json` `metrics.objectives.auc` (`up`/`down`) — the projection warns if the two disagree |
+| flip the metric direction | `metric-contract.json` `direction` + `config.json` `rounds.metric.direction`, and `config.json` `metrics.objectives.auc` (`up`/`down`) — the projection warns if the run's two restatements disagree |
 | change what the run optimises | `config.json` `metrics.primary` + `objectives`, and `rounds.metric.name` |
 | rename a metric's role | `metric-contract.json` `role` (human-facing; the kernel ranks `objectives`) |
 | add a hypothesis class | `priors.json` `hypothesis_classes`, then use it in `hypotheses.json` — the recorded model refuses a plan whose class is not declared |
+| open or close the adjustable surface | `surface.json` `files` (the path whitelist a candidate's diff is checked against) and `keys` / `symbols` (what a hypothesis may move inside them) — `priors.json` still owns the allowed values |
+| change how a phase is asked | `prompts/<call-site>/SKILL.md` — markdown, re-read on every call, so the next prompt changes without a repackage |
+| change how this domain is measured | `executor.json` `command` (runs inside the candidate worktree); `config.json` `executor` overrides it for one run, e.g. the same script on a cluster |
 | run more hypotheses | `config.json` `rounds.candidates_per_round` (the catalogue ships three, two run) |
 | run more rounds | `config.json` `rounds.max_rounds` **and** `stop.max_rounds` — both, because the round workflow and the stop rule each have one |
 | cap the spend | `config.json` `budget.gpu_hours_limit` (0 = unlimited; setting it on a `ray` executor also silences the "no GPU-hours limit" warning) |

@@ -1,7 +1,51 @@
 # Extending
 
-Two extension points, one page each. Both are designed so that adding something does not require
-reading the phase machine, and both are held by a test rather than by a convention.
+Three extension points, one page each. All are designed so that adding something does not require
+reading the phase machine, and each is held by a test rather than by a convention.
+
+---
+
+# Add a domain pack (one directory)
+
+A **domain pack** is everything the kernel is not allowed to know about a model: what "better" means,
+where a hypothesis may move, how a candidate is measured, and what the model is told at each of the
+five call sites. None of it is code. A pack is a directory with a manifest that names five parts:
+
+```json
+// domain.json
+{
+  "schema_version": 1,
+  "name": "my-domain",
+  "metric_contract": "metric-contract.json",
+  "priors": "priors.json",
+  "surface": "surface.json",
+  "prompts": "prompts",
+  "executor": "executor.json"
+}
+```
+
+| Part | What it must contain | Read by |
+|---|---|---|
+| `metric_contract` | `name`, `primary`, `direction` (`higher`/`lower`), `objectives` ({metric: `up`/`down`}); `role` optional | the judge, the frontier, `rounds.metric` when the run does not restate it |
+| `priors` | `search_space`, `priors[]`, `hypothesis_classes[]` (each with an `id`) | the round planner's facts; the injection packet's search space |
+| `surface` | `files[]` (the path whitelist a candidate's diff is checked against), optional `keys[]` and `symbols[]` | the LAND/VERIFY facts as `allowed_surface`; gate two (ticket 24) |
+| `prompts` | `prompts/{land,verify,cand-analyze,round-plan,round-reflect}/SKILL.md`, non-empty | every model call site, re-read per call |
+| `executor` | what one job runs (`kind: local` + `command`) and where its output goes | `createPlatform`, and the frozen `executor` fact at INIT |
+
+Rules the loader (`packages/core/lib/domain.js`) enforces, all of them loud:
+
+1. **Nothing is inferred from filenames** — the manifest names each part, so the error can say which
+   field pointed at which missing file.
+2. **Nothing loads half-empty** — a missing or empty prompt, a missing `search_space`, or a contract
+   whose `direction` contradicts its `objectives.<primary>` is refused at boot with the file and key
+   named. The quiet version of that failure is a model prompted with nothing, which answers anyway.
+3. **A pack is self-contained** — every part must resolve inside the pack directory, so copying the
+   directory (into another repository, or an example) preserves its meaning.
+
+Point a run at it with `domain: /path/to/the/directory`. Nothing in `packages/` changes; if a second
+pack needs a kernel edit to work, the seam is leaking. `packages/core/test/fixtures/config-only-domain`
+is a full pack that is only configuration, and `packages/core/test/domain.test.js` loads it to hold
+that line.
 
 ---
 
@@ -95,8 +139,9 @@ rewriting the records of jobs that already ran.
 ## Wiring it into a run
 
 One branch, in one place: `packages/core/lib/ports.js` → `createPlatform()`. Add `kind: "my-executor"`
-to `executor.kind` in the configuration and pass whatever it needs (`base_url`, a directory, its own
-options) from the same config object. Nothing else in the kernel changes; the phase machine only ever
+to `executor.kind` — in the run configuration, or in the domain pack's `executor` entry when it is the
+domain's default — and pass whatever it needs (`base_url`, a directory, its own options) from the same
+object. Nothing else in the kernel changes; the phase machine only ever
 sees the port.
 
 ## What we have not verified

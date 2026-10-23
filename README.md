@@ -104,8 +104,8 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 ```
 
 Then supply your own configuration. **The shipped patch has no `config` block at all**: a run cannot
-start without a `workspace`, and every path a real config needs belongs to the machine that owns the
-run. Add an entry that targets `reprise-core` by id and restate the whole config — a matching override
+start without a `workspace` and a `domain` pack, and every path a real config needs belongs to the
+machine that owns the run. Add an entry that targets `reprise-core` by id and restate the whole config — a matching override
 *replaces* `config` wholesale rather than deep-merging it. Put it in your profile's
 `cordis.patch.yml` (or `$DSH_HOME/cordis.patch.yml`, which outranks the profile layer);
 [`packages/core/cordis.example.yml`](packages/core/cordis.example.yml) is the filled-in version of the
@@ -116,10 +116,8 @@ shape below, including the two path rules that cost a debugging round each.
   name: dsh-reprise
   config:
     workspace: /absolute/path/to/my-run      # required; created facts live here
+    domain: /absolute/path/to/my-domain-pack # required; the metric contract, priors, surface, prompts, executor
     interval_ms: 5000
-    executor:
-      kind: local
-      command: ['node', 'train.mjs']         # one process per job, run inside the candidate worktree
     candidate:
       kind: command
       command: ['node', '/absolute/path/to/apply-change.mjs', '{candidate}']
@@ -144,15 +142,19 @@ packet as a `dsh-mnemon` Source. Nothing in `packages/core` imports it.
 
 ### Configure it
 
-Everything domain-specific is data. The kernel does not know what AUC means, which direction is
-better, or what a "capacity" hypothesis is.
+Everything domain-specific is data, and it lives in a **domain pack** — a directory whose
+`domain.json` names its metric contract, its priors, its adjustable-surface whitelist, its five
+prompts and its executor entry ([`examples/feed-structure`](examples/feed-structure) is a complete
+one). The kernel does not know a metric name, a model repository or a prompt; it reads them from the
+pack, and a pack missing a part is refused by name at boot instead of running half-configured.
 
 | Field | Default | Meaning |
 |---|---|---|
 | `workspace` | **required** | directory the run owns; the fact plane is `workspace.db` inside it |
+| `domain` | **required** | directory of the domain pack; no pack, no metric contract, no prompts |
 | `interval_ms` | `5000` | tick cadence |
-| `executor.kind` | `'local'` | `local` (a subprocess) or `ray` (Job Submission REST) |
-| `executor.command` | **required for `local`** | argv of one job, resolved inside the candidate worktree |
+| `executor.kind` | the pack's | `local` (a subprocess) or `ray` (Job Submission REST) |
+| `executor.command` | the pack's, **required for `local`** | argv of one job, resolved inside the candidate worktree |
 | `executor.base_url` | **required for `ray`** | Ray dashboard URL |
 | `executor.root_dir` / `metrics_required` | `'jobs'` / `true` | where job dirs live; a job without metrics is a failure |
 | `candidate.kind` | `'command'` | `command`, `claude` or `dsh` — the LAND implementer |
@@ -160,9 +162,8 @@ better, or what a "capacity" hypothesis is.
 | `runner.repo` / `runner.dir` | **required with `candidate`** | repo inside the workspace; where worktrees are created |
 | `runner.base_ref` | git default | the commit candidates branch from |
 | `model.command` | **required if `rounds` is set** | every judgement phase reaches a model through this argv |
-| `skills_dir` | `<repo>/skills/` | where the five `SKILL.md` files are read from |
-| `rounds.metric.name` / `.direction` | **required** / `'higher'` | the one metric the round gate optimises |
-| `rounds.metric.contract_ref` | the metric name | pointer to the frozen metric contract |
+| `rounds.metric.name` / `.direction` | the pack's contract | the one metric the round gate optimises; restating it is how a run points at a different objective |
+| `rounds.metric.contract_ref` | the contract's `name` | pointer to the frozen metric contract |
 | `rounds.max_rounds` / `.candidates_per_round` | `3` / `2` | round workflow shape |
 | `rounds.retry.base_ms` / `.max_ms` / `.max_attempts` | `60000` / `3600000` / `3` | backoff for a refused artifact, then a human |
 | `stop.max_rounds` | `3` | `0` disables the rule |
@@ -170,7 +171,7 @@ better, or what a "capacity" hypothesis is.
 | `budget.gpu_hours_limit` | `0` (unlimited) | hard cap; an uncapped remote executor is warned about, every read |
 | `budget.soft_ratio` / `.candidate_gpu_hours` | `0.8` / `0.5` | stop dispatching at this fraction; what a dispatch reserves |
 | `budget.max_runtime_hours` / `.judge_tokens` | `0` (unlimited) / `false` | wall-clock gate; tokens are recorded, never judged |
-| `metrics.primary` / `.objectives` | — | recorded at INIT; cross-checked against the round contract |
+| `metrics.primary` / `.objectives` | the pack's contract | recorded at INIT; cross-checked against the round contract |
 | `poll.base_ms` / `.max_ms` / `.grace_attempts` | `1000` / `60000` / `2` | job poll backoff |
 | `limits.max_wall_ms` / `.max_idle_ms` | `3600000` / `1800000` | per-job wall-clock and silence deadlines |
 
@@ -193,7 +194,7 @@ afterwards, so editing the patch mid-run changes nothing the dashboard reports.
 | CLI | `node packages/core/lib/cli/run.js --workspace <dir> --config <file>` | the same wiring the host ticks, driven by a loop; exit 0 conclusion, 1 no comparable metric, 2 usage, 3 timeout |
 | CLI | `node packages/core/lib/cli/dump.js --candidate <id>` | timeline, every gate verdict, identity bindings, frontier position, and why the run stopped |
 | CLI | `node packages/core/lib/cli/intents.js place <kind>` / `list` | human intents (`proposal`, `grant`, `anchor`, `pause`, `resume`, `approval`, `experience`) written into `<workspace>/pending/` |
-| Skills | `skills/{land,verify,cand-analyze,round-plan,round-reflect}/SKILL.md` | what the model is told at each of the five call sites; markdown on disk, read fresh on every call — **not** DSH skills and not registered as such |
+| Skills | `<domain>/prompts/{land,verify,cand-analyze,round-plan,round-reflect}/SKILL.md` | what the model is told at each of the five call sites; markdown on disk, part of the domain pack, read fresh on every call — **not** DSH skills and not registered as such |
 
 The bundle provides no service and emits no event: it consumes `timer`, `connection` and `tools`.
 Every route is `GET`; there is no write endpoint to reach for, including one that would let the page
@@ -226,15 +227,16 @@ A real setup, not a fixture: it copies the toy model repository, commits it (can
 commit), freezes a sha256 manifest of what the run starts from, and measures the baseline by running
 `metric.mjs` through the actual local executor.
 
-### Step 3 — look at the four files you own
+### Step 3 — look at the domain pack you own
 
 ```
 node examples/feed-structure/inspect.mjs
 ```
 
-The metric contract (direction and role), the priors and hypothesis classes, this round's structural
-hypotheses, and the wiring. Changing any of them is a configuration change; the kernel knows nothing
-about AUC, clicks, or your model.
+The pack manifest, the metric contract (direction and role), the adjustable-surface whitelist, the
+priors and hypothesis classes, this round's structural hypotheses, the executor entry and the wiring.
+Changing any of them is a configuration change; the kernel knows nothing about AUC, clicks, or your
+model.
 
 ### Step 4 — run the loop
 
@@ -335,8 +337,7 @@ shipped code is plain ESM with no build step.
 | `packages/memory` | the injection packet, exposed as a `dsh-mnemon` Source |
 | `packages/ui` | read-only dashboard: host-side projections over routes, plus a plain-ESM client |
 | `packages/exec-python` | optional proxy-metric bridge (needs torch) — manifest only, no code yet |
-| `skills/` | the five call-site skills: markdown, meant to be edited by whoever owns the domain |
-| `examples/feed-structure` | a worked scenario: metric contract, priors, structural hypotheses, local metric |
+| `examples/feed-structure` | a complete domain pack and a worked scenario: `domain.json` plus the metric contract, priors, adjustable surface, five prompts, executor entry, structural hypotheses and a local metric |
 
 Dependency direction is acyclic by package name: `contract` depends on nothing here; `exec` and
 `memory` depend on `contract`; `core` depends on all three. One deliberate exception: `ui` reads
@@ -370,7 +371,7 @@ trimmed to six facts and ten frontier members; when a workspace has no facts yet
 stream is never a tool result.
 
 Inside the loop, the model is a subprocess: at each of the five call sites it reads one `SKILL.md` from
-disk plus JSON facts (candidate identity, L1 check results, the metrics the monitor reported), and
+the domain pack plus JSON facts (candidate identity, L1 check results, the metrics the monitor reported), and
 answers in a wire format the judge parses. It is never handed the fact plane, a session, or another
 candidate's outcome.
 
@@ -378,8 +379,8 @@ candidate's outcome.
 
 Small and bounded. A status answer is a single projection page trimmed to six events and ten frontier
 members; the tool is called when someone asks how the run is doing, not on every turn. The five
-judgement calls carry one markdown skill each (`skills/` is 246 lines in total) plus JSON, and each is a
-fresh process, so nothing accumulates across a run.
+judgement calls carry one markdown prompt each (the pack's `prompts/` are 246 lines in total) plus JSON,
+and each is a fresh process, so nothing accumulates across a run.
 
 #### KV Cache effect
 
