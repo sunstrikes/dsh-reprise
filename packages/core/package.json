@@ -1,0 +1,53 @@
+{
+  "name": "dsh-reprise",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Phase machine, tick, fact store, derived views, stop policy, dispatch",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./store": "./lib/store.js",
+    "./loop": "./lib/loop.js",
+    "./budget": "./lib/budget.js",
+    "./frontier": "./lib/frontier.js",
+    "./stop": "./lib/stop.js",
+    "./projection": "./lib/projection.js",
+    "./rounds": "./lib/rounds.js",
+    "./judge": "./lib/judge.js",
+    "./skills": "./lib/skills.js",
+    "./intents": "./lib/intents.js",
+    "./artifacts": "./lib/artifacts.js",
+    "./dump": "./lib/cli/dump.js",
+    "./cli/intents": "./lib/cli/intents.js",
+    "./client": "./client/index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "client",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@dsh-reprise/contract": "workspace:*",
+    "@dsh-reprise/exec": "workspace:*",
+    "@dsh-reprise/ui": "workspace:*"
+  }
+}

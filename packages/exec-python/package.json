@@ -1,0 +1,7 @@
+{
+  "name": "@dsh-reprise/exec-python",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Optional Python bridge for the second-scale proxy metric (forward smoke). Needs torch."
+}

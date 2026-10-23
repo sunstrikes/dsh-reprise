@@ -1,0 +1,36 @@
+{
+  "note": "Recorded model answers, one per judgement call site. This is the honest part of the laptop path: no provider, no key, no GPU — the four judgement phases replay these, and the kernel validates each one exactly as it would validate a live model's answer.",
+  "verify": {
+    "verdict": "accept",
+    "rationale": "only model/structure.json changed; metric.mjs and the seeded data generator are untouched, so the comparison against the baseline stays honest",
+    "concerns": []
+  },
+  "cand_analyze": {
+    "r1-h1": {
+      "root_cause": "the hidden layer can represent the interaction but recovers only part of it in the epochs it is given; capacity is the right direction and the wrong instrument"
+    },
+    "r1-h2": {
+      "root_cause": "the explicit cross gives the additive model the pairwise term it could not represent, which is where the metric's headroom was"
+    },
+    "r1-h3": {
+      "root_cause": "l2 changes the calibration of the fit and not its ranking, so auc lands back at the baseline"
+    }
+  },
+  "round_reflect": {
+    "summary": "the interaction hypothesis moved auc from 0.707 to 0.730 while extra capacity moved it to 0.718 and regularisation moved nothing. The headroom was representational, not parametric.",
+    "lessons": [
+      {
+        "statement": "when a prior names a pairwise interaction, making it explicit beats buying capacity to discover it",
+        "evidence": "r1-h2 (0.730) against r1-h1 (0.718) for a fifth of the training time"
+      },
+      {
+        "statement": "l2 is not a lever on a ranking metric in this space — it should not be proposed as one",
+        "evidence": "r1-h3 measured 0.7069 against a 0.70698 baseline"
+      }
+    ],
+    "next_round_focus": [
+      "cross the second and third fields, which the priors do not yet say anything about",
+      "check whether the four crosses are enough or the interaction needs its own embedding"
+    ]
+  }
+}

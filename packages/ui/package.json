@@ -1,0 +1,22 @@
+{
+  "name": "@dsh-reprise/ui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only dashboard: host-side projections plus connection fetch routes and a client bundle",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./routes": "./lib/routes.js",
+    "./views": "./lib/views.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "client",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}

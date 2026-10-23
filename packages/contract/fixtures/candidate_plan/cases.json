@@ -1,0 +1,39 @@
+[
+  {
+    "note": "one round, one structural hypothesis, the metric contract it plans against",
+    "expect": "ok",
+    "artifact": {
+      "round": 2,
+      "hypotheses": [
+        { "id": "h1", "statement": "widen the sparse embedding table to 4x", "expected_files": ["model.py"] }
+      ],
+      "metric_contract_ref": "auc/v1"
+    }
+  },
+  {
+    "note": "two hypotheses share an id, so downstream references are ambiguous",
+    "expect": "conflict",
+    "artifact": {
+      "round": 2,
+      "hypotheses": [
+        { "id": "h1", "statement": "widen the sparse embedding table to 4x", "expected_files": ["model.py"] },
+        { "id": "h1", "statement": "drop the second feature hash", "expected_files": ["model.py"] }
+      ],
+      "metric_contract_ref": "auc/v1"
+    }
+  },
+  {
+    "note": "a hypothesis with no statement is a file list, not a hypothesis",
+    "expect": "invalid",
+    "artifact": {
+      "round": 2,
+      "hypotheses": [{ "id": "h1", "statement": "   ", "expected_files": ["model.py"] }],
+      "metric_contract_ref": "auc/v1"
+    }
+  },
+  {
+    "note": "no hypotheses key: the plan was never produced",
+    "expect": "missing",
+    "artifact": { "round": 2, "metric_contract_ref": "auc/v1" }
+  }
+]

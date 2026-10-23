@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "note": "What this run starts from: the space a hypothesis may move within, the beliefs it may assume, and the classes a hypothesis must belong to. `node examples/feed-structure/init.mjs` freezes a sha256 manifest of model-repo/ next to the workspace: the loop never re-derives what it started from.",
+  "search_space": {
+    "hidden_units": { "kind": "capacity", "values": [0, 4, 8, 16, 32] },
+    "field_crosses": { "kind": "interaction", "values": [false, true] },
+    "l2": { "kind": "regularisation", "values": [0, 0.05, 0.3] },
+    "epochs": { "kind": "training budget", "values": [3, 10, 25] }
+  },
+  "priors": [
+    {
+      "statement": "the first two fields interact: young × long-session is worth more than either alone",
+      "confidence": "high",
+      "evidence": "a hand-built cross reaches auc≈0.730 while the additive baseline plateaus at 0.707"
+    },
+    {
+      "statement": "capacity alone recovers the interaction slowly — a 16-unit hidden layer needs ~25 epochs to get half of it",
+      "confidence": "medium",
+      "evidence": "hidden_units=16 at 3 epochs measures 0.707; at 25 epochs it measures 0.718"
+    },
+    {
+      "statement": "l2 does not move the ranking, only the calibration, so it is not a way to raise auc",
+      "confidence": "medium",
+      "evidence": "hidden_units=16, l2=0.3 measures 0.707 against 0.718 without it"
+    }
+  ],
+  "hypothesis_classes": [
+    {
+      "id": "capacity",
+      "description": "let the model represent more functions (a hidden layer, more units)",
+      "expected_effect": "small gain, more compute"
+    },
+    {
+      "id": "interaction",
+      "description": "make a pairwise interaction expressible (a crossed feature)",
+      "expected_effect": "the largest gain available in this space"
+    },
+    {
+      "id": "regularisation",
+      "description": "constrain the fit (l2, dropout) to trade ranking for calibration",
+      "expected_effect": "neutral-to-negative on auc"
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+# A worked configuration for `reprise-core`, from a real run of `examples/feed-structure`.
+#
+# This file is documentation, not a default: it is **not** in `packages/core/package.json`'s `files`,
+# so it never ships, and it is not loaded by the host. Copy the entry into your profile's
+# `cordis.patch.yml` (or `$DSH_HOME/cordis.patch.yml`, which outranks the profile layer), replace
+# every `/absolute/path/to/...`, and keep the rest as it is. Pointing the host at this checkout
+# directly would work too — the paths below are the ones the demo actually needs — but a config that
+# names somebody else's directory is exactly what this file exists to stop happening.
+#
+# Two path rules, both learned the hard way:
+#
+#   - `workspace` and every repository-side script are **absolute**, because the host resolves a
+#     relative path against *its own* cwd, which is the application's, not this repository's;
+#   - the executor's command stays relative (`node metric.mjs`) because it runs inside the
+#     candidate's worktree, and the runner's `repo` / `dir` stay relative because they name
+#     directories inside the workspace.
+#
+# The workspace named here is a fresh run of the example: `.workspace/demo` already reached FINALIZE
+# (max_rounds=1), so a loop pointed there would tick into nothing to do.
+- id: reprise-core
+  name: 'dsh-reprise'
+  config:
+    workspace: /absolute/path/to/dsh-reprise/.workspace/demo2
+    interval_ms: 300
+    metrics: { primary: auc, objectives: { auc: up } }
+    stop: { max_rounds: 1 }
+    budget: { candidate_gpu_hours: 0.5, gpu_hours_limit: 0 }
+    rounds:
+      metric:
+        name: auc
+        direction: higher
+        contract_ref: /absolute/path/to/dsh-reprise/examples/feed-structure/metric-contract.json
+      max_rounds: 1
+      candidates_per_round: 2
+      retry: { base_ms: 1000, max_ms: 4000, max_attempts: 3 }
+    executor:
+      kind: local
+      command: ['node', 'metric.mjs']
+      root_dir: jobs
+      metrics_required: true
+    candidate:
+      kind: command
+      command:
+        - node
+        - /absolute/path/to/dsh-reprise/examples/feed-structure/apply-change.mjs
+        - '{candidate}'
+        - /absolute/path/to/dsh-reprise/examples/feed-structure/hypotheses.json
+      timeout_ms: 60000
+      env: {}
+    runner: { repo: model-repo, base_ref: HEAD, dir: worktrees }
+    model:
+      command:
+        - node
+        - /absolute/path/to/dsh-reprise/examples/feed-structure/recorded-model.mjs
+        - /absolute/path/to/dsh-reprise/examples/feed-structure/hypotheses.json
+        - /absolute/path/to/dsh-reprise/examples/feed-structure/recorded/judgement.json
+        - /absolute/path/to/dsh-reprise/examples/feed-structure/priors.json
+    poll: { base_ms: 200, max_ms: 2000, grace_attempts: 2 }
+    limits: { max_wall_ms: 120000, max_idle_ms: 120000 }

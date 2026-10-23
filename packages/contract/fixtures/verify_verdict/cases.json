@@ -1,0 +1,43 @@
+[
+  {
+    "note": "a clean pass: static checks green and the adversarial review accepts",
+    "expect": "ok",
+    "artifact": {
+      "candidate_id": "c1",
+      "passed": true,
+      "checks": [{ "name": "static_imports", "result": "pass" }],
+      "reviewer": { "verdict": "accept", "rationale": "no behaviour change outside the target module" },
+      "decided_at_ms": 1761091200000
+    }
+  },
+  {
+    "note": "the gate passed while the adversarial review rejected — the review participates in the verdict, so this is a contradiction and not a policy choice",
+    "expect": "conflict",
+    "artifact": {
+      "candidate_id": "c1",
+      "passed": true,
+      "checks": [{ "name": "static_imports", "result": "pass" }],
+      "reviewer": { "verdict": "reject", "rationale": "silently changes the loss scale" },
+      "decided_at_ms": 1761091200000
+    }
+  },
+  {
+    "note": "passed as the string \"true\" — the single most common model output, and the reason passed must be a strict boolean",
+    "expect": "invalid",
+    "artifact": {
+      "candidate_id": "c1",
+      "passed": "true",
+      "checks": [{ "name": "static_imports", "result": "pass" }],
+      "decided_at_ms": 1761091200000
+    }
+  },
+  {
+    "note": "no verdict at all: the phase never produced one",
+    "expect": "missing",
+    "artifact": {
+      "candidate_id": "c1",
+      "checks": [{ "name": "static_imports", "result": "pass" }],
+      "decided_at_ms": 1761091200000
+    }
+  }
+]

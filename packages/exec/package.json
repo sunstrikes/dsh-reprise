@@ -1,0 +1,25 @@
+{
+  "name": "@dsh-reprise/exec",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Candidate-implementer and external-job adapters, with published conformance suites",
+  "main": "./lib/platform.js",
+  "exports": {
+    ".": "./lib/platform.js",
+    "./harness": "./lib/harness.js",
+    "./harness/claude": "./lib/harness-claude.js",
+    "./harness/dsh": "./lib/harness-dsh.js",
+    "./platform/local": "./lib/platform-local.js",
+    "./platform/ray": "./lib/platform-ray.js",
+    "./local-runner": "./lib/local-runner.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "feed-click-auc",
+  "primary": "auc",
+  "direction": "higher",
+  "objectives": { "auc": "up" },
+  "role": {
+    "auc": "primary — the only objective the frontier ranks, and the number the gate compares against the baseline",
+    "logloss": "diagnostic — recorded so a human can see calibration, never ranked",
+    "train_seconds": "cost — recorded by the executor, never optimised",
+    "parameters": "guardrail — a ceiling a structural change must not cross, not a thing to maximise"
+  },
+  "notes": [
+    "The kernel reads `direction` and `objectives`; `role` is for people and for the dashboard.",
+    "`rounds.metric.direction` in config.json must agree with `direction` here (higher = up). If they disagree, `overview()` warns: two accounts of \"better\" make two rounds incomparable.",
+    "Changing either one is a configuration change, not a code change."
+  ]
+}

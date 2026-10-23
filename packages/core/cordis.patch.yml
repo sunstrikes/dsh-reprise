@@ -1,0 +1,16 @@
+# Bundle patch layer. One row: the entry composes the boot observation and the ticking child
+# fibre internally, so the Loader only ever sees the package's own name.
+#
+# **The row carries no config, on purpose.** A run cannot start without a `workspace`, and every path
+# a real config needs — the workspace, the executor's command, the candidate implementer, the model
+# port — belongs to the machine that owns the run, not to the package. Shipped here, every installer
+# would inherit whichever directory the author happened to have.
+#
+# So add one entry that targets `reprise-core` by id in your profile's `cordis.patch.yml` and restate
+# the whole config: a matching override replaces `config` wholesale, it does not deep-merge. The
+# worked example, including the two path rules that cost a debugging round each, is
+# `cordis.example.yml` beside this file; the repository README's "Install and mount" section is the
+# short version.
+- insert:
+    - id: reprise-core
+      name: 'dsh-reprise'

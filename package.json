@@ -1,0 +1,18 @@
+{
+  "name": "dsh-reprise-workspace",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Model-structure exploration loop as a DeepSeek Harness plugin",
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@10.0.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "pretest": "node scripts/check.mjs",
+    "test": "node --test packages/*/test/*.test.js",
+    "dump": "node packages/core/lib/cli/dump.js"
+  }
+}

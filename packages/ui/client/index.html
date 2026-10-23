@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>reprise — read-only dashboard</title>
+    <style>
+      /*
+       * Colour comes from the host's theme tokens (`--dsw-alias-*`, the names dsh-client-ui-theme
+       * publishes) and from nothing else. A page served on its own has no token sheet loaded, so each
+       * reference carries a CSS *system* colour as its fallback (`Canvas`, `CanvasText`, `GrayText`,
+       * `ButtonBorder`, `AccentColor`) — those follow the reader's OS scheme and `color-scheme`, which
+       * is why there is no palette, and no hard-coded colour, in this file.
+       */
+      :root {
+        color-scheme: light dark;
+        --reprise-bg: var(--dsw-alias-bg-base, Canvas);
+        --reprise-surface: var(--dsw-alias-bg-layer-1, Canvas);
+        --reprise-surface-raised: var(--dsw-alias-bg-layer-2, Canvas);
+        --reprise-text: var(--dsw-alias-label-primary, CanvasText);
+        --reprise-dim: var(--dsw-alias-label-secondary, GrayText);
+        --reprise-border: var(--dsw-alias-border-l1, ButtonBorder);
+        --reprise-border-strong: var(--dsw-alias-border-l3, currentColor);
+        --reprise-accent: var(--dsw-alias-brand-primary, AccentColor);
+        --reprise-radius: var(--dsw-radius-md, 0.5rem);
+        --reprise-font: var(--dsw-font-family, system-ui, sans-serif);
+        --reprise-mono: var(--ds-font-family-code, ui-monospace, monospace);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        padding: 1.5rem;
+        background: var(--reprise-bg);
+        color: var(--reprise-text);
+        font-family: var(--reprise-font);
+        font-size: var(--dsh-content-font-size, 0.875rem);
+        line-height: 1.5;
+      }
+
+      h1 {
+        margin: 0 0 0.25rem;
+        font-size: 1.125rem;
+        font-weight: 600;
+      }
+
+      h2 {
+        margin: 0 0 0.5rem;
+        font-size: 0.9375rem;
+        font-weight: 600;
+      }
+
+      h3 {
+        margin: 1rem 0 0.375rem;
+        font-size: 0.8125rem;
+        font-weight: 600;
+        color: var(--reprise-dim);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+
+      .masthead {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+        padding-bottom: 0.75rem;
+        border-bottom: 1px solid var(--reprise-border);
+      }
+
+      .masthead .meta {
+        color: var(--reprise-dim);
+        font-family: var(--reprise-mono);
+        font-size: 0.75rem;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+        gap: 1rem;
+        align-items: start;
+      }
+
+      section.card {
+        padding: 0.875rem 1rem;
+        background: var(--reprise-surface);
+        border: 1px solid var(--reprise-border);
+        border-radius: var(--reprise-radius);
+      }
+
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+        gap: 0.75rem;
+        margin: 0;
+      }
+
+      .stat dt {
+        color: var(--reprise-dim);
+        font-size: 0.75rem;
+      }
+
+      .stat dd {
+        margin: 0.125rem 0 0;
+        font-family: var(--reprise-mono);
+        font-size: 1rem;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-family: var(--reprise-mono);
+        font-size: 0.75rem;
+      }
+
+      th,
+      td {
+        padding: 0.25rem 0.5rem 0.25rem 0;
+        border-bottom: 1px solid var(--reprise-border);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        color: var(--reprise-dim);
+        font-weight: 500;
+      }
+
+      button {
+        padding: 0.125rem 0.375rem;
+        color: var(--reprise-text);
+        background: var(--reprise-surface-raised);
+        border: 1px solid var(--reprise-border);
+        border-radius: var(--reprise-radius);
+        font-family: var(--reprise-mono);
+        font-size: 0.75rem;
+        cursor: pointer;
+      }
+
+      button[aria-pressed='true'] {
+        border-color: var(--reprise-accent);
+      }
+
+      /*
+       * The four gate states are told apart by their name and by a heavier border, never by hue: the
+       * `ok`/`missing`/`conflict`/`invalid` vocabulary has to survive a screenshot and a reader who
+       * cannot see colour, and the pair `conflict`/`invalid` must never look interchangeable.
+       */
+      .badge {
+        display: inline-block;
+        padding: 0 0.375rem;
+        border: 1px solid var(--reprise-border);
+        border-radius: var(--reprise-radius);
+        font-family: var(--reprise-mono);
+        font-size: 0.6875rem;
+        text-transform: uppercase;
+      }
+
+      .badge[data-state='conflict'],
+      .badge[data-state='invalid'] {
+        border-width: 2px;
+        border-color: var(--reprise-border-strong);
+        font-weight: 600;
+      }
+
+      .badge[data-state='missing'] {
+        border-style: dashed;
+      }
+
+      ol,
+      ul {
+        margin: 0;
+        padding-left: 1.125rem;
+      }
+
+      li {
+        margin: 0.125rem 0;
+      }
+
+      pre,
+      code {
+        font-family: var(--reprise-mono);
+        font-size: 0.75rem;
+      }
+
+      pre {
+        overflow-x: auto;
+        margin: 0.375rem 0 0;
+        padding: 0.5rem;
+        border: 1px solid var(--reprise-border);
+        border-radius: var(--reprise-radius);
+        white-space: pre-wrap;
+      }
+
+      .note {
+        margin: 0.5rem 0 0;
+        padding: 0.375rem 0.5rem;
+        color: var(--reprise-text);
+        border-left: 2px solid var(--reprise-accent);
+      }
+
+      .warning {
+        margin: 0.5rem 0 0;
+        padding: 0.375rem 0.5rem;
+        font-weight: 600;
+        color: var(--reprise-text);
+        border: 1px solid var(--reprise-border-strong);
+        border-left: 2px solid var(--reprise-accent);
+        border-radius: var(--reprise-radius);
+      }
+
+      .empty,
+      .dim {
+        color: var(--reprise-dim);
+      }
+
+      .timeline {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .timeline li {
+        display: grid;
+        grid-template-columns: 4.5rem 1fr;
+        gap: 0.5rem;
+        padding: 0.125rem 0;
+      }
+
+      .timeline .seq {
+        color: var(--reprise-dim);
+      }
+    </style>
+  </head>
+  <body>
+    <header class="masthead">
+      <h1>reprise</h1>
+      <span class="meta" id="workspace"></span>
+      <span class="meta" id="status">connecting…</span>
+      <span class="meta" id="cursor"></span>
+    </header>
+
+    <div class="grid">
+      <section class="card" id="overview" aria-live="polite">
+        <h2>Overview</h2>
+        <p class="empty">waiting for facts…</p>
+      </section>
+
+      <section class="card" id="conclusion" aria-live="polite">
+        <h2>Conclusion</h2>
+        <p class="empty">waiting for facts…</p>
+      </section>
+
+      <section class="card" id="rounds" aria-live="polite">
+        <h2>Rounds</h2>
+        <p class="empty">waiting for facts…</p>
+      </section>
+
+      <section class="card" id="candidate" aria-live="polite">
+        <h2>Candidate</h2>
+        <p class="empty">choose a candidate from a round.</p>
+      </section>
+
+      <section class="card" id="stream" aria-live="polite">
+        <h2>New facts</h2>
+        <p class="empty">nothing yet.</p>
+      </section>
+    </div>
+
+    <script type="module" src="./dashboard.js"></script>
+  </body>
+</html>

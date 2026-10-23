@@ -1,0 +1,27 @@
+{
+  "round": 1,
+  "note": "The round's structural hypotheses, as a ROUND_PLAN answer would carry them. `class` names a hypothesis class declared in priors.json — the recorded model refuses a plan whose class it does not declare. `change` is what the implementer applies to model/structure.json; a real implementer would be a coding harness editing real files.",
+  "hypotheses": [
+    {
+      "id": "h1",
+      "class": "capacity",
+      "statement": "add a 16-unit tanh hidden layer and train it for 25 epochs",
+      "expected_files": ["model/structure.json"],
+      "change": { "hidden_units": 16, "epochs": 25 }
+    },
+    {
+      "id": "h2",
+      "class": "interaction",
+      "statement": "make the interaction between the first two fields explicit with four crossed features",
+      "expected_files": ["model/structure.json"],
+      "change": { "field_crosses": true }
+    },
+    {
+      "id": "h3",
+      "class": "regularisation",
+      "statement": "keep the 16-unit hidden layer but add l2 0.3",
+      "expected_files": ["model/structure.json"],
+      "change": { "hidden_units": 16, "epochs": 25, "l2": 0.3 }
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "name": "@dsh-reprise/memory",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The injection packet: what a model turn actually sees, projected from facts through dsh-mnemon",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./packet": "./lib/packet.js",
+    "./source": "./lib/source.js",
+    "./strategy": "./lib/strategy.js",
+    "./experiences": "./lib/experiences.js",
+    "./render": "./lib/render.js",
+    "./register": "./lib/register.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

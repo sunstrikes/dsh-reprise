@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Reprise Loop",
+    "description": "Runs the candidate-structure exploration loop in the background: phase machine, fact plane, spend ledger, stop rules, and a read-only dashboard."
+  }
+}

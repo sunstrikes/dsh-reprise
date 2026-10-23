@@ -1,0 +1,6 @@
+# Bundle patch layer: the injection packet registers itself as a dsh-mnemon source.
+# It has no client half and no tick; core mounts the same module when it wants the packet inside
+# the loop, so this row exists for hosts that only want the memory surface.
+- insert:
+    - id: reprise-memory
+      name: '@dsh-reprise/memory'

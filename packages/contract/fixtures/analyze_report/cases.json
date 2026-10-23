@@ -1,0 +1,49 @@
+[
+  {
+    "note": "the analysis echoes the metric it reasoned from, so the conclusion is checkable without a model in the loop",
+    "expect": "ok",
+    "artifact": {
+      "candidate_id": "c1",
+      "verdict": "improved",
+      "observed": { "metric": "auc", "value": 0.7123 },
+      "concluded": { "metric": "auc", "value": 0.7123 },
+      "root_cause": "the wider embedding table reduced collisions on rare features",
+      "at_ms": 1761091200000
+    }
+  },
+  {
+    "note": "reasoned from 0.7123 but concluded 0.72 — the report contradicts its own evidence",
+    "expect": "conflict",
+    "artifact": {
+      "candidate_id": "c1",
+      "verdict": "improved",
+      "observed": { "metric": "auc", "value": 0.7123 },
+      "concluded": { "metric": "auc", "value": 0.72 },
+      "root_cause": "the wider embedding table reduced collisions on rare features",
+      "at_ms": 1761091200000
+    }
+  },
+  {
+    "note": "verdict outside the enum: free text cannot be compared across candidates",
+    "expect": "invalid",
+    "artifact": {
+      "candidate_id": "c1",
+      "verdict": "better",
+      "observed": { "metric": "auc", "value": 0.7123 },
+      "concluded": { "metric": "auc", "value": 0.7123 },
+      "root_cause": "the wider embedding table reduced collisions on rare features",
+      "at_ms": 1761091200000
+    }
+  },
+  {
+    "note": "no root cause: an analysis that only restates the number explains nothing",
+    "expect": "missing",
+    "artifact": {
+      "candidate_id": "c1",
+      "verdict": "improved",
+      "observed": { "metric": "auc", "value": 0.7123 },
+      "concluded": { "metric": "auc", "value": 0.7123 },
+      "at_ms": 1761091200000
+    }
+  }
+]

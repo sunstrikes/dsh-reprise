@@ -1,0 +1,8 @@
+#!/bin/sh
+# The check the suite cannot make, plus the suite — with git's own environment stripped.
+#
+# Git exports GIT_DIR and friends while a hook runs. The tests here create their own
+# temporary repositories, so an inherited GIT_DIR points them at this repository instead:
+# `fatal: .git/index: index file open failed: Not a directory`. This hook found that out
+# by failing on the very commit that added it.
+exec env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY npm test --silent

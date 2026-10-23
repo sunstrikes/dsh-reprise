@@ -1,0 +1,19 @@
+# Matches the directory and the development symlink to the profile's module tree.
+node_modules
+dist/
+*.tsbuildinfo
+.DS_Store
+
+# Runtime workspaces hold the fact plane. Never commit a workspace.
+workspaces/
+# The five-step path writes here (`.workspace/feed`), including a throwaway git repo and candidate
+# worktrees. A workspace is copyable and disposable; it is not source.
+.workspace/
+*.db
+*.db-wal
+*.db-shm
+.mnemon/
+
+# Scratch: the spec and tickets are tracked; bench dumps and temporary notes are not.
+.scratch/bench/
+.scratch/tmp/
