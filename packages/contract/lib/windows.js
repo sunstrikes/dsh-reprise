@@ -242,9 +242,9 @@ function describeNames(names) {
  *
  * The rule, in full:
  *
- *  - **Windows are paired by their bounds, never by their position.** Attempted in turn, a candidate
- *    `[2,3,4]` and a baseline `[1,2,3]` pair 2 with 2 and 3 with 3; the candidate's 4 and the
- *    baseline's 1 are reported in `dropped`. Pairing "window 3 with window 3" across two runs that
+ *  - **Windows are paired by their bounds, never by their position.** A candidate `[2,3,4]` against a
+ *    baseline `[1,2,3]` pairs 2 with 2 and 3 with 3; the candidate's 4 and the baseline's 1 are
+ *    reported in `dropped`. Pairing "window 3 with window 3" across two runs that
  *    evaluated at different steps compares two different amounts of training and calls the
  *    difference an improvement, which is the failure this rule exists to prevent.
  *  - **Nothing in common is `missing`, not `invalid` and not an equal result.** The comparable window
