@@ -38,6 +38,13 @@
  *  - the same bounds claiming *different* numbers is a **conflict** — two accounts of one window,
  *    which is a finding about the fact plane rather than a malformed document.
  *
+ * Pairing is the module's other half and is a rule rather than a convenience: `pairWindows` states
+ * what happens when two runs share only part of their windows (the intersection is compared, the rest
+ * is named in `dropped`), share none (`missing` — no comparison exists, nothing is malformed), are
+ * counted in different units (`conflict`), or measured different metrics per window (reported per
+ * pair, never silently dropped). A reader-facing version of the rule, with the cluster commands that
+ * produce real samples, is `docs/windowed-samples.md`.
+ *
  * @module
  */
 
@@ -200,13 +207,23 @@ function metricNames(windows) {
   return [...names].sort()
 }
 
-/** The metric names both of these two windows measured, sorted. */
+/** The metric names both of these two windows measured, sorted — the only ones a comparison may use. */
 function sharedMetricNames(left, right) {
   if (!isPlainObject(left.metrics) || !isPlainObject(right.metrics)) return []
   const inRight = new Set(Object.keys(right.metrics))
   return Object.keys(left.metrics)
     .filter((name) => inRight.has(name))
     .sort()
+}
+
+/** The metric names exactly one of these two windows measured, sorted. Reported, never silently dropped. */
+function exclusiveMetricNames(left, right) {
+  const leftNames = isPlainObject(left.metrics) ? Object.keys(left.metrics) : []
+  const rightNames = isPlainObject(right.metrics) ? Object.keys(right.metrics) : []
+  return {
+    left: leftNames.filter((name) => !rightNames.includes(name)).sort(),
+    right: rightNames.filter((name) => !leftNames.includes(name)).sort(),
+  }
 }
 
 function describe(window) {
@@ -218,60 +235,101 @@ function describeNames(names) {
 }
 
 /**
- * Pair a candidate's window series with its baseline's, by window bounds, keeping only the
- * intersection.
+ * Pair a candidate's window series with its baseline's, by window bounds, and keep only the
+ * intersection. This is a *rule*, not a convenience helper, because every later comparison (which
+ * metric counts, whether a run is read as the mean of its windows or as its last window, whether the
+ * candidate improved) is built on its answers.
  *
- * Why the intersection and not a join: a comparison that pairs window 3 with window 3 of a baseline
- * which evaluated at different steps compares two different amounts of training and calls the
- * difference an improvement. Two windows are comparable only when they cover the same interval, so
- * a window whose bounds the other side never reported is **dropped and named**, not paired with the
- * nearest thing.
+ * The rule, in full:
  *
- * `comparable` is false when nothing can be compared (no window lines up, or the lined-up windows
- * share no metric). `reason` says which, in a sentence a caller can log — this is a `data` problem
- * in the language of the platform port, never an equal result. Both series are expected to have
- * passed `validateArtifact('window_series', …)` first; this function reports what it could not read
- * rather than throwing, because a log that cannot be paired must not crash a tick.
+ *  - **Windows are paired by their bounds, never by their position.** Attempted in turn, a candidate
+ *    `[2,3,4]` and a baseline `[1,2,3]` pair 2 with 2 and 3 with 3; the candidate's 4 and the
+ *    baseline's 1 are reported in `dropped`. Pairing "window 3 with window 3" across two runs that
+ *    evaluated at different steps compares two different amounts of training and calls the
+ *    difference an improvement, which is the failure this rule exists to prevent.
+ *  - **Nothing in common is `missing`, not `invalid` and not an equal result.** The comparable window
+ *    was simply never produced by the other run, so the answer is "no comparison exists" — a state
+ *    the caller must report as a `data` failure rather than treat as "no difference". `invalid` is
+ *    reserved for a side that is there and is not a window series at all.
+ *  - **Two different units are `conflict`.** Both sides are well-formed and each is right in its own
+ *    terms; they disagree about what a window covers, so nothing may be compared.
+ *  - **The metric table is per window.** A metric one side measured and the other did not is
+ *    reported per pair (`comparable_metrics`, `candidate_only_metrics`, `baseline_only_metrics`) and
+ *    across the series (`metrics.common` / `candidate_only` / `baseline_only`). Silently dropping it
+ *    would let a run that measured one objective look like a run that measured three.
+ *  - **`ok` means at least one paired window shares at least one metric.** Bounds that line up while
+ *    every metric was renamed are still no comparison.
+ *
+ * The answer is a `Validation`-shaped object (`status` / `message`) so it travels through the same
+ * vocabulary as every artifact check: `isBlocking(pairing)` is true exactly when nothing may be
+ * compared. Both series are expected to have passed `validateArtifact('window_series', …)` first;
+ * this function reports what it could not read rather than throwing, because a log that cannot be
+ * paired must not crash a tick.
  *
  * @param {{unit?: string, windows?: unknown[]}} candidate
  * @param {{unit?: string, windows?: unknown[]}} baseline
  * @returns {{
+ *   status: 'ok' | 'missing' | 'conflict' | 'invalid',
+ *   message: string,
  *   unit: string | null,
- *   pairs: Array<{ start: number, end: number, candidate: { index: number, metrics: object }, baseline: { index: number, metrics: object }, metrics: string[] }>,
+ *   pairs: Array<{
+ *     start: number,
+ *     end: number,
+ *     candidate: { index: number, metrics: object },
+ *     baseline: { index: number, metrics: object },
+ *     comparable_metrics: string[],
+ *     candidate_only_metrics: string[],
+ *     baseline_only_metrics: string[],
+ *   }>,
  *   dropped: { candidate: Array<{ index: number, start: number, end: number }>, baseline: Array<{ index: number, start: number, end: number }> },
  *   metrics: { common: string[], candidate_only: string[], baseline_only: string[] },
- *   comparable: boolean,
- *   reason: string | undefined,
  * }}
  */
 export function pairWindows(candidate, baseline) {
   const candidateWindows = windowsOf(candidate)
   const baselineWindows = windowsOf(baseline)
-  const refusal = {
+  const nothing = {
+    status: 'missing',
+    message: '',
     unit: null,
     pairs: [],
     dropped: { candidate: [], baseline: [] },
     metrics: { common: [], candidate_only: [], baseline_only: [] },
-    comparable: false,
-    reason: undefined,
   }
 
+  if (candidate === undefined || candidate === null) {
+    return { ...nothing, message: 'there is no candidate window series to compare — no measurement was collected' }
+  }
   if (candidateWindows === undefined) {
-    return { ...refusal, reason: 'the candidate side is not a window series: it holds no windows array' }
+    return { ...nothing, status: 'invalid', message: 'the candidate side is not a window series: it holds no windows array' }
+  }
+  if (baseline === undefined || baseline === null) {
+    return {
+      ...nothing,
+      dropped: { candidate: candidateWindows.map(describe), baseline: [] },
+      metrics: { common: [], candidate_only: metricNames(candidateWindows), baseline_only: [] },
+      message: 'there is no baseline window series to compare against — a candidate with nothing to be compared to is not a result',
+    }
   }
   if (baselineWindows === undefined) {
-    return { ...refusal, reason: 'the baseline side is not a window series: it holds no windows array' }
+    return {
+      ...nothing,
+      status: 'invalid',
+      dropped: { candidate: candidateWindows.map(describe), baseline: [] },
+      message: 'the baseline side is not a window series: it holds no windows array',
+    }
   }
   if (candidate.unit !== baseline.unit) {
     return {
-      ...refusal,
+      ...nothing,
+      status: 'conflict',
       dropped: { candidate: candidateWindows.map(describe), baseline: baselineWindows.map(describe) },
       metrics: {
         common: [],
         candidate_only: metricNames(candidateWindows),
         baseline_only: metricNames(baselineWindows),
       },
-      reason: `the candidate is counted in ${JSON.stringify(candidate.unit)} and the baseline in ${JSON.stringify(baseline.unit)}: two units cannot be paired, so neither window list means what the other says`,
+      message: `the candidate is counted in ${JSON.stringify(candidate.unit)} and the baseline in ${JSON.stringify(baseline.unit)}: two units describe different intervals, so no window of one means what the other says`,
     }
   }
 
@@ -294,12 +352,15 @@ export function pairWindows(candidate, baseline) {
       continue
     }
     paired.add(key)
+    const exclusive = exclusiveMetricNames(window, match)
     pairs.push({
       start: window.start,
       end: window.end,
       candidate: { index: window.index, metrics: window.metrics },
       baseline: { index: match.index, metrics: match.metrics },
-      metrics: sharedMetricNames(window, match),
+      comparable_metrics: sharedMetricNames(window, match),
+      candidate_only_metrics: exclusive.left,
+      baseline_only_metrics: exclusive.right,
     })
   }
   const droppedBaseline = baselineWindows.filter((window) => !paired.has(windowKey(window))).map(describe)
@@ -308,6 +369,7 @@ export function pairWindows(candidate, baseline) {
   const baselineNames = metricNames(baselineWindows)
   const common = candidateNames.filter((name) => baselineNames.includes(name))
   const result = {
+    ...nothing,
     unit: candidate.unit,
     pairs,
     dropped: { candidate: droppedCandidate, baseline: droppedBaseline },
@@ -316,21 +378,19 @@ export function pairWindows(candidate, baseline) {
       candidate_only: candidateNames.filter((name) => !common.includes(name)),
       baseline_only: baselineNames.filter((name) => !common.includes(name)),
     },
-    comparable: pairs.length > 0 && common.length > 0,
-    reason: undefined,
   }
 
   if (pairs.length === 0) {
     return {
       ...result,
-      reason: `the two runs share no window: ${candidateWindows.length} candidate window(s) and ${baselineWindows.length} baseline window(s) have no bounds in common, so one of them was measured over different intervals`,
+      message: `the two runs share no window: ${candidateWindows.length} candidate window(s) and ${baselineWindows.length} baseline window(s) have no bounds in common, so one of them was measured over different intervals`,
     }
   }
-  if (common.length === 0) {
+  if (!pairs.some((pair) => pair.comparable_metrics.length > 0)) {
     return {
       ...result,
-      reason: `the paired windows share no metric name (candidate: ${describeNames(candidateNames)}; baseline: ${describeNames(baselineNames)})`,
+      message: `the paired windows share no metric name (candidate: ${describeNames(candidateNames)}; baseline: ${describeNames(baselineNames)})`,
     }
   }
-  return result
+  return { ...result, status: 'ok', message: '' }
 }

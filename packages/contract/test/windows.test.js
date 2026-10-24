@@ -21,7 +21,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { pairWindows, validateArtifact, windowKey } from '../lib/index.js'
+import { isBlocking, pairWindows, validateArtifact, windowKey } from '../lib/index.js'
 
 const KIND = 'window_series'
 
@@ -102,7 +102,8 @@ test('pairing keeps the intersection and names every window it dropped', () => {
 
   const pairing = pairWindows(candidate, baseline)
 
-  assert.equal(pairing.comparable, true)
+  assert.equal(pairing.status, 'ok', pairing.message)
+  assert.equal(pairing.message, '', 'an ok pairing has nothing to warn about')
   assert.equal(pairing.unit, 'step')
   assert.deepEqual(
     pairing.pairs.map((pair) => [pair.start, pair.end]),
@@ -125,20 +126,48 @@ test('pairing keeps the intersection and names every window it dropped', () => {
     ],
     'and the baseline windows the candidate never measured are named too',
   )
-  assert.equal(pairing.reason, undefined)
 
   // A pair carries both sides' own ordinals and the numbers each side reported, so a comparison can
   // reach the values without re-joining the series.
   assert.deepEqual(pairing.pairs[1].candidate, { index: 1, metrics: { metric_a: 1.25, metric_b: 0.3 } })
   assert.deepEqual(pairing.pairs[1].baseline, { index: 1, metrics: { metric_a: 1.2, metric_b: 0.28 } })
-  assert.deepEqual(pairing.pairs[1].metrics, ['metric_a', 'metric_b'])
+  assert.deepEqual(pairing.pairs[1].comparable_metrics, ['metric_a', 'metric_b'])
+  assert.deepEqual(pairing.pairs[1].candidate_only_metrics, [])
+  assert.deepEqual(pairing.pairs[1].baseline_only_metrics, [])
 })
 
 test('a window that lines up on one bound only is not paired: bounds are an interval, not a start', () => {
   const pairing = pairWindows(series('step', [[0, 10, 20, { metric_a: 1 }]]), series('step', [[0, 10, 25, { metric_a: 1 }]]))
   assert.deepEqual(pairing.pairs, [])
-  assert.equal(pairing.comparable, false)
-  assert.match(pairing.reason, /share no window/)
+  assert.equal(pairing.status, 'missing', 'no comparable window exists; nothing is malformed')
+  assert.equal(isBlocking(pairing), true, 'a pairing that cannot compare must block the comparison')
+  assert.match(pairing.message, /share no window/)
+})
+
+test('overlapping runs pair the windows they share and drop the tails: [2,3,4] against [1,2,3] compares 2 and 3 only', () => {
+  const candidateWindows = series('step', [
+    [0, 2, 3, { metric_a: 1.5 }],
+    [1, 3, 4, { metric_a: 1.4 }],
+    [2, 4, 5, { metric_a: 1.3 }],
+  ])
+  const baselineWindows = series('step', [
+    [0, 1, 2, { metric_a: 1.45 }],
+    [1, 2, 3, { metric_a: 1.42 }],
+    [2, 3, 4, { metric_a: 1.35 }],
+  ])
+
+  const pairing = pairWindows(candidateWindows, baselineWindows)
+  assert.equal(pairing.status, 'ok')
+  assert.deepEqual(
+    pairing.pairs.map((pair) => [pair.start, pair.end]),
+    [
+      [2, 3],
+      [3, 4],
+    ],
+    'the intersection of the two runs, in the candidate\'s own order',
+  )
+  assert.deepEqual(pairing.dropped.candidate, [{ index: 2, start: 4, end: 5 }], 'the candidate ran on past the baseline')
+  assert.deepEqual(pairing.dropped.baseline, [{ index: 0, start: 1, end: 2 }], 'the baseline started earlier than the candidate')
 })
 
 test('two runs counted in different units are not paired at all, and the reason names both units', () => {
@@ -147,8 +176,8 @@ test('two runs counted in different units are not paired at all, and the reason 
     series('epoch', [[0, 0, 10, { metric_a: 1 }]]),
   )
   assert.deepEqual(pairing.pairs, [], '10 steps and 10 epochs are not the same interval')
-  assert.equal(pairing.comparable, false)
-  assert.match(pairing.reason, /"step".*"epoch"/)
+  assert.equal(pairing.status, 'conflict', 'both sides are well-formed; they disagree about what a window covers')
+  assert.match(pairing.message, /"step".*"epoch"/)
 })
 
 test('paired windows report the metric names both sides measured, and separate the rest', () => {
@@ -156,13 +185,19 @@ test('paired windows report the metric names both sides measured, and separate t
     series('step', [[0, 0, 10, { metric_a: 1.5, metric_b: 0.25 }]]),
     series('step', [[0, 0, 10, { metric_b: 0.2, metric_c: 0.9 }]]),
   )
-  assert.deepEqual(pairing.pairs[0].metrics, ['metric_b'], 'only a metric both sides measured can be compared')
+  assert.deepEqual(pairing.pairs[0].comparable_metrics, ['metric_b'], 'only a metric both sides measured can be compared')
+  assert.deepEqual(
+    pairing.pairs[0].candidate_only_metrics,
+    ['metric_a'],
+    'a metric one side measured and the other did not is reported per window, not silently dropped',
+  )
+  assert.deepEqual(pairing.pairs[0].baseline_only_metrics, ['metric_c'])
   assert.deepEqual(pairing.metrics, {
     common: ['metric_b'],
     candidate_only: ['metric_a'],
     baseline_only: ['metric_c'],
   })
-  assert.equal(pairing.comparable, true)
+  assert.equal(pairing.status, 'ok')
 })
 
 test('windows that line up but share no metric are not a comparison', () => {
@@ -171,28 +206,36 @@ test('windows that line up but share no metric are not a comparison', () => {
     series('step', [[0, 0, 10, { metric_c: 0.9 }]]),
   )
   assert.equal(pairing.pairs.length, 1, 'the windows do line up…')
-  assert.equal(pairing.comparable, false, '…but comparing nothing is not a comparison')
-  assert.match(pairing.reason, /share no metric name/)
-  assert.match(pairing.reason, /metric_a/)
-  assert.match(pairing.reason, /metric_c/)
+  assert.equal(pairing.status, 'missing', '…but comparing nothing is not a comparison')
+  assert.match(pairing.message, /share no metric name/)
+  assert.match(pairing.message, /metric_a/)
+  assert.match(pairing.message, /metric_c/)
 })
 
 test('a side that is not a series is a refusal with a reason, never a crash', () => {
+  const baseline = series('step', [[0, 0, 10, { metric_a: 1 }]])
+
+  // Nothing there is `missing`: the window series was never produced.
+  const absent = pairWindows(undefined, baseline)
+  assert.equal(absent.status, 'missing')
+  assert.match(absent.message, /no candidate window series/)
+
+  // There, and not a series, is `invalid`: the two states are recovered from differently.
   for (const [label, side] of [
-    ['undefined', undefined],
     ['a string', 'windows'],
     ['no windows array', { unit: 'step' }],
     ['a window that is not an object', { unit: 'step', windows: [3] }],
   ]) {
-    const pairing = pairWindows(side, series('step', [[0, 0, 10, { metric_a: 1 }]]))
-    assert.equal(pairing.comparable, false, `${label} must not be comparable`)
+    const pairing = pairWindows(side, baseline)
+    assert.equal(pairing.status, 'invalid', `${label} exists and breaks the shape`)
     assert.deepEqual(pairing.pairs, [])
-    assert.match(pairing.reason, /not a window series/, `${label} must say what it could not read`)
+    assert.match(pairing.message, /not a window series/, `${label} must say what it could not read`)
   }
 })
 
 test('pairing one run against itself pairs every window — the trivial case a comparison must get right', () => {
   const pairing = pairWindows(candidate, candidate)
+  assert.equal(pairing.status, 'ok')
   assert.equal(pairing.pairs.length, candidate.windows.length)
   assert.deepEqual(pairing.dropped, { candidate: [], baseline: [] })
   for (const pair of pairing.pairs) {
