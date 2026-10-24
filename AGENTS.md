@@ -8,6 +8,7 @@ the file that answers the question, so this page stays cheap enough to load on e
 | running it, or wiring it into the host | [README.md](README.md) |
 | unsure what a word means (fact, view, injection packet, candidate, frontier) | [CONTEXT.md](CONTEXT.md) |
 | adding an executor or an artifact kind | [docs/extending.md](docs/extending.md) |
+| turning a run's metrics into per-window samples, or comparing two runs window by window | [docs/windowed-samples.md](docs/windowed-samples.md) |
 | reviewing a diff | [CODING_STANDARDS.md](CODING_STANDARDS.md) |
 
 ## Before claiming a ticket done

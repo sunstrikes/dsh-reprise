@@ -117,6 +117,15 @@ as "still running" and hang a candidate for a night.
    timed-out job is actually cancelled.
 10. **A healthy job inside its limits is left alone.**
 
+## Where the numbers come from, window by window
+
+An executor that reports a *series* rather than one number returns it as the `window_series` artifact
+— one row per window, with the window's bounds and its metrics table. How the run wrote those numbers
+(a tensorboard event file, a marker line in the driver log) is the adapter's business, in
+`packages/exec/lib/window-samples.js`; the shape and its validator are the contract's. The rule for
+pairing a candidate's windows with its baseline's — the intersection, and why no intersection is a
+`missing` and not an `invalid` — is in [windowed-samples.md](windowed-samples.md).
+
 ## What you write
 
 ```js
