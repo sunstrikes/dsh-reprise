@@ -115,10 +115,15 @@ function metricWarnings(config) {
   return warnings
 }
 
+/** A model port is declared when the run names a CLI (`kind`) or an argv to reach one (`command`). */
+export const modelPortDeclared = (model) =>
+  (typeof model?.kind === 'string' && model.kind !== '') ||
+  (Array.isArray(model?.command) && model.command.length > 0)
+
 function modelWarning(config) {
   const rounds = config?.rounds
   if (rounds === undefined || rounds === null || rounds === false || rounds.enabled === false) return []
-  const hasPort = Array.isArray(config?.model?.command) && config.model.command.length > 0
+  const hasPort = modelPortDeclared(config?.model)
   if (hasPort) return []
   return [
     {
@@ -128,7 +133,7 @@ function modelWarning(config) {
       where: 'plugin.log',
       label: '没有模型入口',
       message:
-        'config.rounds is set but no model port is configured (model.command): ROUND_PLAN and ROUND_REFLECT are ' +
+        'config.rounds is set but no model port is configured (model.kind or model.command): ROUND_PLAN and ROUND_REFLECT are ' +
         'model entries, so those phases will be refused and the run will stall at the first round.',
     },
   ]

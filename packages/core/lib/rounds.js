@@ -24,6 +24,7 @@ import { isBlocking, isNonEmptyString, isTerminal, validateArtifact } from '@dsh
 
 import { fileArtifacts, memoryArtifacts } from './artifacts.js'
 import { stepBaseline } from './baseline.js'
+import { MODEL_UNAVAILABLE, isModelUnavailable, modelFailureOf, recordModelUnavailable } from './model-failure.js'
 // The cycle with loop.js (loop → rounds → loop) is safe by construction: `createCandidate` is a
 // hoisted function declaration, and it is only called while a tick is already running.
 import { createCandidate } from './loop.js'
@@ -379,6 +380,9 @@ async function planNextRound(context, state) {
   try {
     artifact = await judge.plan({ round, facts: roundFacts(store, state, settings) })
   } catch (error) {
+    // No model answered: not a refused artifact. Refusing here would spend the round's retry budget
+    // and then ask a human to fix a provider, and the plan would look like a bad hypothesis.
+    if (isModelUnavailable(error)) return modelOut(context, state, 'round_plan', error)
     return refuse(context, state, { step: 'round_plan', status: 'invalid', message: `the round plan could not be produced: ${messageOf(error)}` })
   }
 
@@ -463,6 +467,7 @@ async function reflectRound(context, state) {
   try {
     artifact = await judge.reflect({ round, facts: roundFacts(store, state, settings), now })
   } catch (error) {
+    if (isModelUnavailable(error)) return modelOut(context, state, 'round_reflect', error)
     return refuse(context, state, { step: 'round_reflect', status: 'invalid', message: `the reflection could not be produced: ${messageOf(error)}` })
   }
 
@@ -491,6 +496,36 @@ function finalizeStep({ store, now }, state) {
   writeState(store, { ...state, finalized_at_ms: now })
   store.logOp('workspace_finalized', { rounds: state.round }, now)
   return { action: 'finalized', phase: 'FINALIZE', round: state.round }
+}
+
+/**
+ * No model answered at a workspace phase: record one operator fact, back off, change no artifact.
+ *
+ * The workspace keeps its `attempts` (refused artifacts) untouched on purpose — an outage is not a
+ * malformed answer, and spending the retry budget on one would end with a pause that tells a human to
+ * go fix a provider they cannot reach from here.
+ */
+function modelOut(context, state, step, failure) {
+  const { store, now, log } = context
+  const outcome = recordModelUnavailable({
+    store,
+    now,
+    step,
+    subject: `round-${Math.max(1, state.plan?.round ?? (state.round ?? 0) + 1)}`,
+    failure: modelFailureOf(failure),
+    attempts: state.model_attempts ?? 0,
+  })
+  writeState(store, { ...state, model_attempts: outcome.attempts, next_action_at: outcome.next_action_at })
+  log?.(`workspace: no model answered at ${step} (${outcome.cause ?? 'unknown cause'}) — retrying in ${outcome.next_action_at - now} ms`)
+  return {
+    action: MODEL_UNAVAILABLE,
+    phase: state.phase,
+    round: state.round,
+    cause: outcome.cause,
+    message: outcome.message,
+    attempts: outcome.attempts,
+    next_action_at: outcome.next_action_at,
+  }
 }
 
 /**

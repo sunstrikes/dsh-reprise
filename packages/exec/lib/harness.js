@@ -677,6 +677,10 @@ export async function landWithCli(options) {
 
   const base = {
     engine,
+    // The exact text the child received. Kept because a landing is a judgement too: an audit that
+    // has the model's answer and not its question cannot tell a terse implementer from a prompt that
+    // never asked for the change.
+    prompt,
     candidate_id: candidateId,
     parent_id: parentId ?? null,
     parent_commit: parentCommit,
@@ -750,6 +754,7 @@ export async function landWithCli(options) {
 
 const RESULT_KEYS = Object.freeze([
   'ok',
+  'prompt',
   'error_class',
   'retryable',
   'conflict',
@@ -829,6 +834,10 @@ export function validateLandResult(value) {
   note(typeof value.conflict === 'boolean', 'conflict must be a strict boolean')
   note(isObject(value.usage), 'usage must be an object even when the engine reported nothing')
   note(typeof value.output === 'string', 'output must be a string (possibly empty)')
+  note(
+    typeof value.prompt === 'string' && value.prompt !== '',
+    'prompt must be the text the child received — a landing nobody can audit is a landing nobody can reproduce',
+  )
 
   if (value.ok === true) {
     note(value.error_class === OK, 'a successful landing must carry error_class "ok"')
