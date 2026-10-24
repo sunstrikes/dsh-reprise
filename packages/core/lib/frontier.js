@@ -22,6 +22,7 @@
  * @module
  */
 
+import { BASELINE_SUBJECT } from './baseline.js'
 import { WORKSPACE_SUBJECT } from './store.js'
 
 /** Where a candidate's materialised row lives. One KV row, so adding a projection needs no migration. */
@@ -29,10 +30,12 @@ export const FRONTIER_CACHE_KEY = 'derived_frontier'
 
 /**
  * Subjects in the event stream that are not candidates. `_workspace` carries workspace-level facts
- * (the stop conclusion), and a derived view that counted it as a candidate would report a phantom
- * round 0 and a phantom "no metric" entry.
+ * (the stop conclusion) and `_baseline` carries the denominator's (its dispatch, its samples, its
+ * freeze). A derived view that counted either as a candidate would report a phantom round 0, a
+ * phantom "no metric" entry, and — the expensive one — a candidate that never terminates, which
+ * keeps every stop rule from ever firing.
  */
-const NOT_A_CANDIDATE = new Set([WORKSPACE_SUBJECT])
+const NOT_A_CANDIDATE = new Set([WORKSPACE_SUBJECT, BASELINE_SUBJECT])
 
 /**
  * Bump when the *reading* of a fact changes — a metric taken from a different field, a status

@@ -31,13 +31,24 @@ export class FakeClock {
   }
 }
 
-/** A stand-in external platform with its own state, so it survives our process dying. */
+/**
+ * A stand-in external platform with its own state, so it survives our process dying.
+ *
+ * `submits` is the call log, and it exists for one assertion that has no side channel: "the baseline
+ * was produced by the executor" is a claim about a call that was made, and no file read can prove it.
+ * A job may carry a `window_series` document, because that is what a real adapter hands back once it
+ * has read the run's samples.
+ */
 export function fakePlatform() {
   const jobs = new Map()
+  const submits = []
   let counter = 0
   return {
     jobs,
-    submit({ submissionId, candidateId }) {
+    submits,
+    submit(request) {
+      const { submissionId, candidateId } = request
+      submits.push(request)
       for (const job of jobs.values()) {
         if (job.submission_id === submissionId) {
           return { job_id: job.job_id, duplicate: true, harness: 'fake', state: job.state }
@@ -54,10 +65,16 @@ export function fakePlatform() {
     poll(jobId) {
       const job = jobs.get(jobId)
       if (job === undefined) return { state: 'lost' }
-      return { state: job.state, metrics: job.metrics, error_class: job.error_class }
+      return { state: job.state, metrics: job.metrics, window_series: job.window_series, error_class: job.error_class }
     },
-    finish(jobId, metrics) {
-      Object.assign(jobs.get(jobId), { state: 'succeeded', metrics })
+    collect(jobId) {
+      const job = jobs.get(jobId)
+      if (job === undefined) return { state: 'lost', artifacts: [] }
+      return { state: job.state, metrics: job.metrics, window_series: job.window_series, error_class: job.error_class, artifacts: [] }
+    },
+    /** Let a job finish, as a real one would: its metric table, and its windowed samples if any. */
+    finish(jobId, metrics, { series } = {}) {
+      Object.assign(jobs.get(jobId), { state: 'succeeded', metrics, ...(series === undefined ? {} : { window_series: series }) })
     },
     fail(jobId, errorClass) {
       Object.assign(jobs.get(jobId), { state: 'failed', error_class: errorClass })

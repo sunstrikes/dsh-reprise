@@ -163,6 +163,51 @@ export function describeRules({ limits, view }) {
 }
 
 /**
+ * Record a workspace-level conclusion: the event first, then the state that absorbs it.
+ *
+ * Exported because the stop rules are not the only thing that can end a workspace. A workspace whose
+ * denominator cannot be produced ends too (see `baseline.js`), and a second writer of
+ * `workspace_stopped` that spelled the payload differently would make the same conclusion read two
+ * ways depending on which writer fired. `status` is present only when the *contract* refused
+ * something — a failed run is a stop with a message and no four-state status at all
+ * (CODING_STANDARDS §2).
+ *
+ * @param {{store: any, clock: {now: () => number}, log?: Function}} ports
+ * @param {{rule: string, message: string, limit?: number, observed?: number, best?: object|null,
+ *          rounds?: object, rules?: object[], status?: string, detail?: object}} decision
+ */
+export function recordStop({ store, clock, log }, decision) {
+  const workspace = store.getState(undefined, 'workspace', {}) ?? {}
+  const at = clock.now()
+  const payload = {
+    rule: decision.rule,
+    limit: decision.limit ?? null,
+    observed: decision.observed ?? null,
+    message: decision.message,
+    best: decision.best ?? null,
+    rounds: decision.rounds ?? { considered: 0, last: [] },
+    rules: decision.rules ?? [],
+    ...(decision.status === undefined ? {} : { status: decision.status }),
+    ...(decision.detail === undefined ? {} : { detail: decision.detail }),
+  }
+  // Facts before state, as everywhere else: the event is the reason, the state is the conclusion.
+  const { local_seq: seq } = store.appendEvent({
+    candidate_id: WORKSPACE_SUBJECT,
+    wall_clock_ms: at,
+    event_type: 'workspace_stopped',
+    payload,
+  })
+  store.setState(undefined, 'workspace', {
+    ...workspace,
+    phase: 'FINALIZE',
+    stopped: { ...payload, at_ms: at, event_seq: seq },
+  })
+  log?.(`FINALIZE: ${decision.rule} — ${decision.message}`)
+
+  return { stopped: true, already: false, at_ms: at, event_seq: seq, ...payload }
+}
+
+/**
  * Decide whether the workspace should finalise now, and record the decision if so.
  *
  * @param {{ store: any, clock: { now: () => number }, config?: any, log?: (message: string, detail?: unknown) => void }} ports
@@ -187,31 +232,17 @@ export function evaluateStop({ store, clock, config, log }) {
   const decision = pickRule({ limits, rounds, view })
   if (decision === undefined) return { stopped: false, view, rounds, limits }
 
-  const at = clock.now()
-  const payload = {
-    rule: decision.rule,
-    limit: decision.limit,
-    observed: decision.observed,
-    message: decision.message,
-    best: view.best ?? null,
-    // Enough history to explain the decision later without replaying the whole stream, bounded so
-    // the payload stays far below the one-event size limit.
-    rounds: { considered: rounds.length, last: rounds.slice(-5) },
-    rules: describeRules({ limits, view }),
-  }
-  // Facts before state, as everywhere else: the event is the reason, the state is the conclusion.
-  const { local_seq: seq } = store.appendEvent({
-    candidate_id: WORKSPACE_SUBJECT,
-    wall_clock_ms: at,
-    event_type: 'workspace_stopped',
-    payload,
-  })
-  store.setState(undefined, 'workspace', {
-    ...workspace,
-    phase: 'FINALIZE',
-    stopped: { ...payload, at_ms: at, event_seq: seq },
-  })
-  log?.(`FINALIZE: ${decision.rule} — ${decision.message}`)
+  const recorded = recordStop(
+    { store, clock, log },
+    {
+      ...decision,
+      best: view.best ?? null,
+      // Enough history to explain the decision later without replaying the whole stream, bounded so
+      // the payload stays far below the one-event size limit.
+      rounds: { considered: rounds.length, last: rounds.slice(-5) },
+      rules: describeRules({ limits, view }),
+    },
+  )
 
-  return { stopped: true, already: false, at_ms: at, event_seq: seq, ...payload, view, rounds, limits }
+  return { ...recorded, view, rounds, limits }
 }
