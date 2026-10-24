@@ -346,16 +346,14 @@ async function land(ports, candidateId, state) {
   // here as facts — not re-deriving them at VERIFY — keeps "which files this candidate changed" the
   // runner's answer rather than something the gate could observe differently a few ticks later.
   const files = Array.isArray(result.files) ? result.files : []
+  const tree = typeof worktreeDir === 'string' ? worktreeDir : undefined
   transition(
     ports,
     candidateId,
     'land_done',
-    { engine: result.engine, files, files_changed: result.files_changed ?? files.length },
+    { engine: result.engine, files, files_changed: result.files_changed ?? files.length, worktree_dir: tree ?? null },
     'BUILD',
-    {
-      files,
-      ...(typeof worktreeDir === 'string' ? { worktree_dir: worktreeDir } : {}),
-    },
+    { files, ...(tree === undefined ? {} : { worktree_dir: tree }) },
   )
   return { candidateId, phase: 'LAND', action: `landed by ${result.engine} -> build` }
 }
@@ -724,9 +722,12 @@ export function foldEvents(store, candidateId) {
       if (state.hypothesis === undefined) state.hypothesis = event.payload?.hypothesis
     }
     if (event.event_type === 'land_done') {
-      // The diff gate two will check: folded back so a crash between the event and the state row
-      // does not leave VERIFY checking an empty file list.
+      // The diff gate two will check, and the tree it lives in: folded back so a crash between the
+      // event and the state row does not leave VERIFY checking an empty file list against nowhere.
       if (!Array.isArray(state.files) && Array.isArray(event.payload?.files)) state.files = event.payload.files
+      if (state.worktree_dir === undefined && typeof event.payload?.worktree_dir === 'string') {
+        state.worktree_dir = event.payload.worktree_dir
+      }
     }
     if (event.event_type === 'candidate_rejected') state.reject_reason = event.payload?.reject_reason
   }

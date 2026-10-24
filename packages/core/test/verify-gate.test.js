@@ -327,6 +327,20 @@ test('a recheck of a tree that moved on is not a conflict — it is why the retr
   store.close()
 })
 
+test('a crash that loses the state row still leaves the gate the diff and the tree to check', async () => {
+  const { ports, store, dir } = setup()
+  await steps(ports, 2) // LAND and BUILD: the facts are on disk, the state is about to be lost
+  const { foldEvents } = await import('../lib/loop.js')
+  store.setState('c1', 'phase', {})
+  store.setAppliedSeq('c1', 0)
+
+  foldEvents(store, 'c1')
+  const rebuilt = store.getState('c1', 'phase')
+  assert.deepEqual(rebuilt.files, ['model/structure.json'], 'the diff git reported is a fact, not state-only')
+  assert.equal(rebuilt.worktree_dir, dir, 'and so is the tree the gate has to read')
+  store.close()
+})
+
 test('every gate conclusion is on the timeline with its attempt, so a dump can say which try failed', async () => {
   const artifacts = fileArtifacts(mkdtempSync(join(tmpdir(), 'reprise-verify-gate-artifacts-')))
   const { ports, store } = setup({
