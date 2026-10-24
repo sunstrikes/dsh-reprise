@@ -345,6 +345,7 @@ shipped code is plain ESM with no build step.
 | `packages/ui` | read-only dashboard: host-side projections over routes, plus a plain-ESM client |
 | `packages/exec-python` | optional proxy-metric bridge (needs torch) — manifest only, no code yet |
 | `examples/feed-structure` | a complete domain pack and a worked scenario: `domain.json` plus the metric contract, priors, adjustable surface, five prompts, executor entry, structural hypotheses and a local metric |
+| `examples/generative-recommenders` | a domain pack for someone else's repository (HSTU in meta-recsys/generative-recommenders): metric contract with a tolerance and a guardrail, cited priors, a verified surface whitelist, five prompts and the job's metric reader — data and prompts only, no kernel change |
 
 Dependency direction is acyclic by package name: `contract` depends on nothing here; `exec` and
 `memory` depend on `contract`; `core` depends on all three. One deliberate exception: `ui` reads
@@ -361,6 +362,7 @@ a *write* handle to the fact plane, and a relative import of the read-only reade
 - [`docs/license-audit.md`](docs/license-audit.md) — every dependency and borrowed idea, against Apache-2.0
 - [`docs/adr/0001-acceptance-is-a-reproduced-public-experiment.md`](docs/adr/0001-acceptance-is-a-reproduced-public-experiment.md) — what "done" means for this project
 - [`examples/feed-structure/README.md`](examples/feed-structure/README.md) — the worked scenario in detail
+- [`examples/generative-recommenders/README.md`](examples/generative-recommenders/README.md) — the second pack, and the human-review checklist it ships with
 - [`CODING_STANDARDS.md`](CODING_STANDARDS.md) — how to review a diff here
 
 <a id="model-experience"></a>

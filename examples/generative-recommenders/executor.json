@@ -1,0 +1,19 @@
+{
+  "kind": "local",
+  "command": [
+    "python3",
+    "run-metrics.py",
+    "python3",
+    "main.py",
+    "--gin_config_file=configs/ml-1m/hstu-sampled-softmax-n128-final.gin",
+    "--master_port={free_port}"
+  ],
+  "root_dir": "jobs",
+  "metrics_required": true,
+  "data": {
+    "prepared_inside_package": ["tmp/ml-1m/sasrec_format.csv", "tmp/processed/ml-1m/"],
+    "why": "The training nodes have no internet and no cross-node filesystem: preprocess_public_data.py downloads the raw MovieLens archive with urlretrieve, and get_reco_dataset() then reads tmp/<prefix>/sasrec_format.csv relative to the job's cwd. The prepared file therefore has to travel inside the job package (or as its own gcs:// package), produced once on a machine that does have network access. A job whose package lacks it fails as a `data` failure in the loader, which is the safe failure: it never reports a number.",
+    "preprocess_on_a_networked_machine": "mkdir -p tmp/ && python3 preprocess_public_data.py"
+  },
+  "note": "How this domain is measured: the repository's own entry point, with the frozen ML-1M config, wrapped by run-metrics.py, which is the only piece that turns the training log into the metric contract's number. Three things are load-bearing. (1) `cwd` is the candidate's worktree, so run-metrics.py must live at the root of the checkout `runner.repo` points at — copy it there from this pack, or commit it to the fork; the pack cannot reach into the worktree any other way. (2) `{free_port}` becomes a free port at run time: two jobs on one node otherwise collide on main.py's `--master_port`, and the cluster does not isolate cards between jobs (see the ticket-14 notes). (3) The metric is the last *full* eval epoch, never a truncated one and never a tensorboard average; that rule lives in the metric contract's `window` and is implemented in run-metrics.py. Nothing here downloads anything: the dataset is prepared before packaging."
+}

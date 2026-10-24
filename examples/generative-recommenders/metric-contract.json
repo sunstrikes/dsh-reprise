@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "name": "generative-recommenders-hr10",
+  "review_status": "pending — priors.json and surface.json need a human read before this pack is trusted (README.md has the checklists)",
+  "primary": "hr@10",
+  "direction": "higher",
+  "objectives": { "hr@10": "up", "ndcg@10": "up" },
+  "minimum_effective_delta": { "hr@10": 0.005, "ndcg@10": 0.004 },
+  "guardrail": {
+    "metric": "ndcg@10",
+    "direction": "higher",
+    "rule": "hr@10 up by more than 0.005 while ndcg@10 is down by more than 0.004 is a re-ranking, not a better model: one or two newly hit targets pushed other hits down the list. Record it as a regression on position and do not spend the next round extrapolating from it."
+  },
+  "role": {
+    "hr@10": "primary — the number the gate compares against the frozen baseline, the axis the ranking's `best` is chosen on, and the first column of the README's published tables",
+    "ndcg@10": "guardrail — ranked on the frontier and read as a constraint: position-sensitive credit for the same hit, so it fails when a change reorders without improving",
+    "hr@50": "diagnostic — recorded so an analysis can say whether a miss was near (11–50) or far; never ranked, because at 50 almost every method is above 0.5 and the metric stops discriminating",
+    "ndcg@50": "diagnostic — same reason, and the pair (hr@50 − hr@10) is the useful derived view: whether the gain came from depth of the list or from the head",
+    "mrr": "diagnostic — the README and train.py log it; it is NDCG@10 with a different weighting and adds no independent axis",
+    "train_seconds": "cost — written by the metric reader; recorded, never optimised",
+    "gpu_hours": "cost — charged by the ledger, never an objective: the loop's budget gate reads it"
+  },
+  "window": {
+    "mode": "last-full-eval-epoch",
+    "why": "train.py evaluates every epoch but truncates an epoch's eval to `partial_eval_num_iters` batches unless `epoch % full_eval_every_n == 0`, and logs 'Truncating epoch N eval to M iters to save cost..' when it does. A truncated number is measured on a different, shuffled subset of the eval loader — incomparable between candidates and incomparable to the README's rows, which are full evals. The ML-1M configs leave `full_eval_every_n` at its default of 1, so every epoch is full there; the Amazon config sets 5, so four of five are not.",
+    "read_from": "the stdout line `rank 0: eval @ epoch N in T s: NDCG@10 ..., NDCG@50 ..., HR@10 ..., HR@50 ..., MRR ...` (train.py, 'eval per epoch'); never the `batch-stat (eval)` lines (one training batch, not the eval set) and never a tensorboard average over epochs",
+    "value_epoch": "the last epoch that was not truncated",
+    "reader": "run-metrics.py",
+    "note": "The window is part of the contract, not a reader detail: a candidate compared on a truncated epoch and a baseline measured on a full one produce a difference that belongs to the loader, and nothing downstream can tell that from a structural gain."
+  },
+  "notes": [
+    "**Why hr@10 is primary and ndcg@10 is the guardrail.** HR@10 answers one question — did the held-out target appear in the top ten — and nothing else, which makes it the cheapest metric to attribute to a structural change. NDCG@10 is that same event weighted by rank, so it can only move when HR@10 moves or when the ordering of hits changes; making it the constraint keeps a re-ranking from being read as a win. Both are 'up'; there is no metric in this contract that is better when lower.",
+    "**Where 0.005 and 0.004 come from.** They are one quarter of the smallest published structural gap on this pack's dataset, rounded to the 1e-3 grid. README 'ML-1M' table: HSTU 0.3097/0.1720 → HSTU-large 0.3294/0.1893, i.e. +0.0197 HR@10 and +0.0173 NDCG@10 for the one structural change the repository publishes end to end (2→8 blocks, 1→2 heads, dqk/dv 50→25 at item_embedding_dim 50). A quarter of the smaller of those, 0.004325, is 0.004; a quarter of the HR@10 gap, 0.004925, is 0.005. Below that, a difference is not worth a GPU hour; at or above it, the change is at least a fifth of the largest lever anyone has published for this repository.",
+    "**The tolerance is calibrated for ml-1m only.** Amazon Books runs an order of magnitude lower (HSTU HR@10 0.0416 in the README), so an absolute 0.005 there would be a 12% relative jump. A run pointed at another dataset must re-derive the floor from that dataset's published gap before the comparison means anything — `minimum_effective_delta` is a field of this pack's contract, not a constant of the loop.",
+    "**The kernel does not read the tolerance yet.** `judge.compareMetric` compares strictly — spec '契约' says how much of a difference counts is a metric-contract question, and the kernel deliberately has no threshold of its own. The loader refuses a malformed tolerance (a zero, a metric the objectives do not rank), so the number here is data a later gate can consume and a human can read, not a value that silently changes a verdict today.",
+    "**Both published tables agree with the direction.** Every metric in README's ML-1M/ML-20M/Amazon tables is higher-better; nothing in this repository reports an error metric as a headline. A domain that did would need another analysis — a correction that lowers a loss is 'down', and that is a second `direction` the kernel refuses to guess.",
+    "The kernel reads `primary`, `direction` and `objectives`; `role`, `window`, `minimum_effective_delta` and `guardrail` are for people, the five prompts and the gate that consumes them later."
+  ]
+}

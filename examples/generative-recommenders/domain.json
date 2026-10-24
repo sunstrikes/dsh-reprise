@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "name": "generative-recommenders",
+  "metric_contract": "metric-contract.json",
+  "priors": "priors.json",
+  "surface": "surface.json",
+  "prompts": "prompts",
+  "executor": "executor.json",
+  "note": "This file is what makes this directory a domain pack. It names the five parts by relative path; the kernel infers nothing from filenames and reads nothing outside this directory, so the whole pack can be copied into another repository unchanged. The domain it describes is https://github.com/meta-recsys/generative-recommenders, which this pack does not contain: `surface` and `priors` name paths inside *that* repository (the one a run points `runner.repo` at), and `packages/core/test/generative-recommenders-pack.test.js` verifies them when a checkout is present."
+}

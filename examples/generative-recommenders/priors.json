@@ -1,0 +1,229 @@
+{
+  "version": 1,
+  "review_status": "pending — every prior below is a claim about someone else's repository; a human must open each `source.file` and §section before a round treats it as a starting belief (README.md has the checklist)",
+  "note": "What a round on generative-recommenders starts from: the knobs a hypothesis may move and the values it may move them to, the beliefs it may assume, and the classes a hypothesis must belong to. Every prior carries the file and section its evidence came from, with the numbers quoted, because ticket 27 compares candidates against the published tables: a claim whose source nobody can open is a rumour, and a rumour in the injection packet is worse than an empty packet. The published numbers are from the repository's own README, not from the paper: where a claim needs the paper it is marked `unverified-in-this-clone` and a human must check it before a round uses it.",
+  "search_space": {
+    "hstu_encoder.num_blocks": { "kind": "depth", "values": [2, 4, 8, 16] },
+    "hstu_encoder.num_heads": { "kind": "attention heads", "values": [1, 2, 4, 8] },
+    "hstu_encoder.dqk": { "kind": "query/key width per head", "values": [8, 16, 25, 32, 50, 64] },
+    "hstu_encoder.dv": { "kind": "value width per head", "values": [8, 16, 25, 32, 50, 64] },
+    "hstu_encoder.linear_dropout_rate": { "kind": "regularisation", "values": [0.0, 0.2, 0.5] },
+    "hstu_encoder.attn_dropout_rate": { "kind": "regularisation", "values": [0.0, 0.1, 0.2] },
+    "hstu_encoder.normalization": { "kind": "attention normalisation", "values": ["rel_bias", "softmax_rel_bias"] },
+    "hstu_encoder.linear_activation": { "kind": "nonlinearity", "values": ["silu", "none"] },
+    "hstu_encoder.concat_ua": { "kind": "output projection", "values": [false, true] },
+    "hstu_encoder.enable_relative_attention_bias": { "kind": "position signal", "values": [true, false] },
+    "train_fn.item_embedding_dim": { "kind": "width", "values": [50, 64, 128, 256] },
+    "train_fn.dropout_rate": { "kind": "regularisation", "values": [0.0, 0.2, 0.5] },
+    "train_fn.user_embedding_norm": { "kind": "output geometry", "values": ["l2_norm", "layer_norm"] },
+    "train_fn.weight_decay": { "kind": "regularisation", "values": [0.0, 0.001, 0.01] },
+    "train_fn.loss_module": { "kind": "training objective", "values": ["SampledSoftmaxLoss", "BCELoss"] },
+    "train_fn.temperature": { "kind": "softmax temperature", "values": [0.05, 0.1, 1.0] },
+    "train_fn.item_l2_norm": { "kind": "similarity geometry", "values": [true, false] }
+  },
+  "priors": [
+    {
+      "statement": "At matched configuration HSTU beats SASRec on every published dataset, so the attention block itself — not tuning — is where this repository's structural gain lives.",
+      "confidence": "high",
+      "class": "attention-geometry",
+      "evidence": "README ML-1M: SASRec HR@10 0.2853 / NDCG@10 0.1603 against HSTU 0.3097 / 0.1720 (+8.6%). ML-20M: 0.2889 / 0.1621 against 0.3273 / 0.1895 (+13.3%). Amazon Books: 0.0306 / 0.0164 against 0.0416 / 0.0227 (+36.4%). The README states the HSTU rows use identical configurations to the SASRec rows, with the SASRec binary cross-entropy loss replaced by the sampled-softmax loss in both.",
+      "source": {
+        "file": "README.md",
+        "section": "## Experiments › ### Public Experiments › #### Verify results. — the ML-1M, ML-20M and Amazon Reviews tables, and the note paragraph printed under them",
+        "quote": "HSTU rows utilize identical configurations as SASRec"
+      }
+    },
+    {
+      "statement": "The one structural change this repository publishes end to end is depth for per-head width at a fixed total attention width: HSTU → HSTU-large is blocks 2→8, heads 1→2 and dqk/dv 50→25 on ML-1M, i.e. num_heads × dqk stays equal to item_embedding_dim (50).",
+      "confidence": "high",
+      "class": "attention-geometry",
+      "evidence": "configs/ml-1m/hstu-sampled-softmax-n128-final.gin: num_blocks 2, num_heads 1, dqk 50, dv 50. configs/ml-1m/hstu-sampled-softmax-n128-large-final.gin: num_blocks 8, num_heads 2, dqk 25, dv 25. Both keep item_embedding_dim 50 and every training hyperparameter identical. The same invariant holds on the other datasets: ML-20M 4 heads × 64 → 8 × 32 at item_embedding_dim 256; Amazon 4 × 16 → 8 × 8 at 64.",
+      "source": {
+        "file": "configs/ml-1m/hstu-sampled-softmax-n128-final.gin (against the -large-final.gin beside it)",
+        "section": "the whole file — the two configs differ only in hstu_encoder.num_blocks, num_heads, dqk and dv",
+        "quote": "hstu_encoder.num_blocks = 2 … hstu_encoder.num_heads = 1 … hstu_encoder.dqk = 50 … hstu_encoder.dv = 50"
+      }
+    },
+    {
+      "statement": "That one structural change is worth about +0.0197 HR@10 and +0.0173 NDCG@10 on ML-1M, which is the calibration unit for 'is this effect worth a round' in this pack's metric contract.",
+      "confidence": "high",
+      "class": "attention-geometry",
+      "evidence": "README ML-1M table: HSTU 0.3097 / 0.1720; HSTU-large 0.3294 / 0.1893. The metric contract's minimum_effective_delta is one quarter of these gaps (0.005 and 0.004), rounded to 1e-3.",
+      "source": {
+        "file": "README.md",
+        "section": "## Experiments › ### Public Experiments › #### Verify results. — ML-1M table, rows HSTU and HSTU-large",
+        "quote": "| HSTU | 0.3097 (+8.6%) | 0.1720 (+7.3%) | … | HSTU-large | **0.3294 (+15.5%)** | **0.1893 (+18.1%)** |"
+      }
+    },
+    {
+      "statement": "No published row varies one knob in isolation on a fixed dataset: within a dataset the two HSTU configs change depth, heads and per-head width together, and item_embedding_dim is constant per dataset (50 on ML-1M, 256 on ML-20M, 64 on Amazon). Prior knowledge of what any single knob does is therefore absent from this repository — those rounds are exploration, not confirmation.",
+      "confidence": "high",
+      "class": "capacity",
+      "evidence": "All twelve .gin files under configs/: item_embedding_dim is 50 in both ml-1m configs, 256 in both ml-20m and ml-3b configs, 64 in both amzn-books configs; dropout_rate, loss_module, num_negatives, sampling_strategy, learning_rate and weight_decay are identical inside each dataset's pair.",
+      "source": {
+        "file": "configs/*/*.gin",
+        "section": "all twelve frozen configs, compared pairwise within each dataset directory",
+        "quote": "train_fn.item_embedding_dim = 50 (ml-1m, both files) / 256 (ml-20m, ml-3b) / 64 (amzn-books)"
+      }
+    },
+    {
+      "statement": "hr@10 and ndcg@10 are not independent: both are driven by the rank of the single held-out target, ndcg weighted by 1/log2(rank+1). A change can raise ndcg@10 while hr@10 is flat only by moving hits up the list, and can raise hr@10 while ndcg@10 falls only by adding hits at low positions — which is why ndcg@10 is the guardrail and not a second primary.",
+      "confidence": "certain (definition, read from the source)",
+      "class": "measurement",
+      "evidence": "eval.py computes `eval_ranks` from the target's position in the top-k ids, then hr@k = (rank <= k) and ndcg@k = where(rank <= k, 1/log2(rank+1), 0). Both are per-example tensors averaged by `_avg` over the eval loader.",
+      "source": {
+        "file": "generative_recommenders/research/data/eval.py",
+        "section": "eval_metrics_v2_from_tensors — the `output` dictionary and the `eval_ranks` computation above it",
+        "quote": "\"hr@10\": (eval_ranks <= 10), \"ndcg@10\": torch.where(eval_ranks <= 10, torch.div(1.0, torch.log2(eval_ranks + 1)), …)"
+      }
+    },
+    {
+      "statement": "The number of sampled negatives moves the scale of the reported metric, so it is not a structural candidate and not a fair lever: the README itself says the comparison slightly favours the methods that used full negatives over the rows that used 128/512 sampled negatives.",
+      "confidence": "high",
+      "class": "measurement",
+      "evidence": "README note under the tables; configs use num_negatives 128 (ml-1m, ml-20m, ml-3b) and 512 (amzn-books), and the config file name encodes it (`hstu-sampled-softmax-n128-final`).",
+      "source": {
+        "file": "README.md",
+        "section": "## Experiments › ### Public Experiments › #### Verify results. — the note paragraph under the three tables",
+        "quote": "note that the comparison slightly favors these two, due to them using full negatives whereas the other rows used 128/512 sampled negatives"
+      }
+    },
+    {
+      "statement": "An epoch's eval is truncated to `partial_eval_num_iters` batches unless the epoch is a full-eval epoch, and a truncated value is not comparable to a full one — it is measured on a different, shuffled subset of the eval loader.",
+      "confidence": "high",
+      "class": "measurement",
+      "evidence": "train.py breaks out of the eval loop after `partial_eval_num_iters` iterations when `full_eval_every_n` does not divide the epoch, logging 'Truncating epoch N eval to M iters to save cost..'; then it logs the epoch's numbers anyway. The ML-1M configs leave full_eval_every_n at its default 1 (never truncated); the Amazon config sets 5 (four epochs in five truncated) and partial_eval_num_iters 64.",
+      "source": {
+        "file": "generative_recommenders/research/trainer/train.py",
+        "section": "train_fn › the per-epoch eval block ('# eval per epoch' through the 'eval @ epoch' log line)",
+        "quote": "Truncating epoch {epoch} eval to {eval_iter + 1} iters to save cost.."
+      }
+    },
+    {
+      "statement": "A capacity hypothesis costs real GPU hours and the README sizes the run at 24 GB of HBM or more for most datasets, which on this pack's cluster means the job must ask for a whole card: the ledger's per-candidate reservation is the real limit, not the model's parameter count.",
+      "confidence": "medium",
+      "class": "capacity",
+      "evidence": "README states a GPU with 24 GB or more HBM should work for most datasets, and the DLRM-v3 section trains on 4 GPUs via torchrun-style env vars. There is no measured GPU-hour figure for ML-1M in this repository.",
+      "source": {
+        "file": "README.md",
+        "section": "## Getting started — the paragraph after the preprocess command; and ## DLRM-v3 › #### Run model training with 4 GPUs",
+        "quote": "A GPU with 24GB or more HBM should work for most datasets."
+      }
+    },
+    {
+      "statement": "The nonlinearity, the relative-attention-bias choice and the U·A concatenation are the architectural decisions the paper argues for, but this repository publishes no ablation of them: every config keeps silu + rel_bias + relative bias enabled, so 'changing one of them is neutral' is unsupported here and must be treated as an open question, not a prior.",
+      "confidence": "low — paper claim, not verifiable in this clone",
+      "class": "nonlinearity",
+      "status": "unverified-in-this-clone",
+      "evidence": "No config sets hstu_encoder.linear_activation / normalization / concat_ua / enable_relative_attention_bias, so the code defaults (silu, rel_bias, False, True) are what every published row used. The ablation that motivates those defaults is in arXiv:2402.17152 (referenced from the README's first line) and is not reproduced in this clone.",
+      "source": {
+        "file": "README.md",
+        "section": "the title paragraph, which cites arXiv:2402.17152 and the ICML'24 paper; the ablation itself is in the paper, not the repository",
+        "quote": "Actions Speak Louder than Words: Trillion-Parameter Sequential Transducers for Generative Recommendations"
+      }
+    }
+  ],
+  "hypothesis_classes": [
+    {
+      "id": "capacity",
+      "description": "let the model represent more functions — more blocks, a wider embedding table, or both",
+      "expected_effect": "the only class with a published end-to-end gain (+0.0197 HR@10 for 2→8 blocks at fixed width); costs GPU hours roughly linearly with blocks",
+      "moves": ["hstu_encoder.num_blocks", "train_fn.item_embedding_dim"]
+    },
+    {
+      "id": "attention-geometry",
+      "description": "change how attention is shaped at a fixed embedding width — heads against per-head width, keeping num_heads × dqk = item_embedding_dim as the published configs do",
+      "expected_effect": "small, easy to confound with capacity; the published large variants halve per-head width to double heads",
+      "moves": ["hstu_encoder.num_heads", "hstu_encoder.dqk", "hstu_encoder.dv"]
+    },
+    {
+      "id": "position-signal",
+      "description": "change what the model knows about position and time — the bucketed relative bias, the learnable positional embedding, or neither",
+      "expected_effect": "unknown from this repository (no ablation published); a negative result here is worth as much as a positive one",
+      "moves": ["hstu_encoder.enable_relative_attention_bias", "hstu_encoder.normalization"]
+    },
+    {
+      "id": "nonlinearity",
+      "description": "change the pointwise nonlinearity or the output projection — silu against none, with or without the u·a concatenation",
+      "expected_effect": "unknown from this repository; a plausible cheap win or a plausible no-op, which is why it is one candidate and not a sweep",
+      "moves": ["hstu_encoder.linear_activation", "hstu_encoder.concat_ua"]
+    },
+    {
+      "id": "regularisation",
+      "description": "constrain the fit — dropout on the positional embedding, dropout inside the HSTU linear and attention paths, weight decay",
+      "expected_effect": "neutral-to-negative on a dataset this small unless the candidate is overfitting; the published ML-1M rows use 0.2/0.2 and no weight decay",
+      "moves": ["train_fn.dropout_rate", "hstu_encoder.linear_dropout_rate", "hstu_encoder.attn_dropout_rate", "train_fn.weight_decay"]
+    },
+    {
+      "id": "output-geometry",
+      "description": "change the space the retrieval happens in — l2-normalised user embedding or layer-norm, l2-normalised item embedding or not, a different softmax temperature",
+      "expected_effect": "may move the ranking without changing what the model learned; the guardrail (ndcg@10) is what tells those two apart",
+      "moves": ["train_fn.user_embedding_norm", "train_fn.item_l2_norm", "train_fn.temperature"]
+    },
+    {
+      "id": "training-objective",
+      "description": "change the loss the model is trained with — SampledSoftmaxLoss against BCELoss",
+      "expected_effect": "the README's own comparison changed the loss for its baselines, so this is a real structural axis, but a loss change also changes what 'converged' means: budget for it as the round's expensive candidate",
+      "moves": ["train_fn.loss_module", "train_fn.temperature"]
+    }
+  ],
+  "constraints": [
+    {
+      "statement": "BCELoss asserts temperature == 1.0, so `loss_module: \"BCELoss\"` with any other temperature crashes at construction — a candidate that cannot start is not a measurement.",
+      "source": { "file": "generative_recommenders/research/trainer/train.py", "section": "train_fn › the loss construction (`elif loss_module == \"BCELoss\"` branch)", "quote": "assert temperature == 1.0" }
+    },
+    {
+      "statement": "`hstu_encoder.linear_config` accepts exactly one value (`uvqk`) and raises otherwise; `normalization` accepts rel_bias / hstu_rel_bias / softmax_rel_bias; `linear_activation` accepts silu / none. Any other value is a crash, not a hypothesis.",
+      "source": { "file": "generative_recommenders/research/modeling/sequential/hstu.py", "section": "SequentialTransductionUnitJagged.__init__ and .forward — the `raise ValueError(f\"Unknown …\")` branches", "quote": "raise ValueError(f\"Unknown normalization method {self._normalization}\")" }
+    },
+    {
+      "statement": "A new `train_fn.*` gin key needs a new keyword argument in train.py, which is forbidden — structure work goes through the gin-configurable encoder factories (`hstu_encoder`, `get_sequential_encoder`) or not at all.",
+      "source": { "file": "generative_recommenders/research/trainer/train.py", "section": "the `@gin.configurable def train_fn(...)` signature at the top of the file", "quote": "@gin.configurable\ndef train_fn(" }
+    },
+    {
+      "statement": "The prepared dataset must exist before the job starts: `preprocess_public_data.py` downloads the raw archive with urlretrieve, and the cluster nodes have no internet and no shared filesystem, so `tmp/ml-1m/sasrec_format.csv` has to travel inside the job package.",
+      "source": { "file": "generative_recommenders/research/data/preprocessor.py", "section": "the preprocessor's download()/preprocess_rating() — the urlretrieve call and the `tmp/{prefix}/sasrec_format.csv` output path", "quote": "urlretrieve(self._download_path, self._saved_name)" }
+    }
+  ],
+  "forbidden_directions": [
+    "Any change outside the adjustable surface: main.py, research/trainer/train.py, research/data/*, requirements.txt, or the other datasets' configs. An adjuster that can edit the evaluation cannot be compared with one that cannot.",
+    "Anything that moves the measurement instead of the model: eval_interval, full_eval_every_n, partial_eval_num_iters, eval_batch_size, save_ckpt_every_n.",
+    "Anything that changes the benchmark: dataset_name, max_sequence_length, num_negatives, sampling_strategy, or the split/sequence construction in research/data.",
+    "Optimizer retuning as a co-change (learning_rate, num_warmup_steps, local_batch_size). A structural gain measured against a baseline with a different learning rate belongs to neither.",
+    "Switching the family (main_module) — that redefines the baseline instead of improving it.",
+    "Numeric-precision switches (enable_tf32) or dependency upgrades: they move the number and cannot be attributed to structure.",
+    "A knob value outside `search_space`, or a combination the `constraints` above say will crash."
+  ],
+  "anti_patterns": [
+    {
+      "pattern": "Reporting a truncated-epoch eval as if it were the metric",
+      "why": "it is measured on a different, shuffled subset of the eval loader, so it is not comparable between candidates or to the README's rows",
+      "source": { "file": "generative_recommenders/research/trainer/train.py", "section": "train_fn › '# eval per epoch'", "quote": "Truncating epoch {epoch} eval to {eval_iter + 1} iters to save cost.." }
+    },
+    {
+      "pattern": "Raising num_negatives to lift the reported metric",
+      "why": "the README says the sampled-negative rows are slightly disadvantaged against full-negative ones, so changing the count changes the scale rather than the model",
+      "source": { "file": "README.md", "section": "### Public Experiments › the note paragraph under the tables", "quote": "the comparison slightly favors these two, due to them using full negatives" }
+    },
+    {
+      "pattern": "Comparing a candidate against a differently-shaped baseline (another dataset, another sequence length, another loss)",
+      "why": "the README's rows are per (dataset, sequence length, negatives) combination; the log directory names them `ml-1m-l200`, so a cross-configuration comparison is a category error",
+      "source": { "file": "configs/ml-1m/hstu-sampled-softmax-n128-final.gin", "section": "the 'Run this as' comment, which pins the log directory to ml-1m-l200", "quote": "logs/ml-1m-l200/" }
+    },
+    {
+      "pattern": "A change gated behind a flag that defaults off, or an encoder branch that never runs",
+      "why": "the measured difference then belongs to the old behaviour, and the round learns nothing while looking successful",
+      "source": { "file": "generative_recommenders/research/modeling/sequential/hstu.py", "section": "HSTU.__init__ — every structural knob is passed straight into the stack it builds, which is how a candidate is expected to work", "quote": "for _ in range(num_blocks)" }
+    },
+    {
+      "pattern": "Explaining a regression by its symptom ('the loss was higher')",
+      "why": "the loss is logged at the same batch size and the same schedule, so it is a symptom of the structure, never the explanation of the metric",
+      "source": { "file": "generative_recommenders/research/trainer/train.py", "section": "the training loop's `losses/ar_loss` writer and the batch-stat log line", "quote": "writer.add_scalar(\"losses/ar_loss\", loss, batch_id)" }
+    },
+    {
+      "pattern": "Reading the tensorboard average (or the batch-stat eval line) as the epoch's metric",
+      "why": "the batch-stat eval is one training batch, and tensorboard keeps every epoch; the contract's number is the last full-eval epoch's line, which `run-metrics.py` is the only reader of",
+      "source": { "file": "generative_recommenders/research/trainer/train.py", "section": "train_fn › the `batch-stat (eval)` log line inside the training loop", "quote": "batch-stat (eval): iter {batch_id}" }
+    }
+  ]
+}
