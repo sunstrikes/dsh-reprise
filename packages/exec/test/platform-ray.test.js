@@ -175,6 +175,27 @@ test('a duplicate submission_id is answered by a read, not by a second job', asy
   assert.equal(done.state, 'succeeded', 'going straight to polling after a duplicate must work')
 })
 
+test('a duplicate still resolves to a pollable reference when the details document carries no job_id', async () => {
+  // Measured on the live cluster: a details document may answer `job_id: null` and still be
+  // addressed by its submission id. Returning null here would make MONITOR_POLL poll nothing.
+  const { metricsDir, fake } = rayWorld()
+  const platform = makePlatform({ fake, metricsDir })
+  const request = { submissionId: 'cand_nullid', candidateId: 'cand_nullid', gpuHours: 1 }
+  fake.script('cand_nullid', { outcome: 'succeeded', metrics: { val_loss: 0.5 }, nullJobId: true })
+
+  const first = await submitJob(platform, request)
+  const second = await submitJob(platform, request)
+
+  assert.equal(second.duplicate, true)
+  assert.equal(second.job_id, 'cand_nullid', 'the submission id is the reference the dashboard resolves when no job_id is reported')
+  assert.equal((await pollJob(platform, second.job_id)).submission_id, 'cand_nullid', 'and it addresses the same job')
+  assert.equal(fake.jobs.size, 1)
+  assert.equal((await pollUntilTerminal(platform, second.job_id)).state, 'succeeded')
+
+  const found = await findJob(platform, 'cand_nullid')
+  assert.equal(found.job_id, 'cand_nullid', 'recovery answers with a reference it can actually poll')
+})
+
 test('a duplicate the dashboard cannot show yet is still one job, on both real Ray shapes', async () => {
   for (const duplicateResponse of ['ray-400', 'plain-409']) {
     const { metricsDir, fake } = rayWorld({ duplicateResponse })

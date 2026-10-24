@@ -229,6 +229,12 @@ export function createRayPlatform({
   /**
    * The job this submission id already owns, if the cluster can still show it.
    *
+   * Measured on the live cluster (Ray 2.59, 2026-10-24): `GET /api/jobs/<submission_id>` answers
+   * **200** for a finished job, and 404 for an id the cluster never accepted — so this read is the
+   * duplicate check, not a guess. The same route also answers for jobs whose details document
+   * reports `job_id: null` (42 of 129 rows had one), and `/api/jobs/<submission_id>/logs` resolves
+   * too, which is why the submission id below is a *usable* job reference rather than a placeholder.
+   *
    * Why a read before the write: a crash-and-retry, or two ticks racing on one candidate, must not
    * re-pack a tree and re-upload it every time, and — the reason the ticket gives — must not produce
    * a second job. The `metadata.candidate_id` check is the same one `find()` makes, so a slug
@@ -241,6 +247,8 @@ export function createRayPlatform({
     const metadataCandidate = details.metadata?.candidate_id
     if (metadataCandidate !== undefined && metadataCandidate !== candidateId) return undefined
     const mapped = JOB_STATUS_STATES[String(details.status ?? '').toUpperCase()]
+    // `job_id` can be null upstream; the submission id is the id the dashboard resolves, so it is a
+    // reference that can be polled, not a missing one.
     return { job_id: details.job_id ?? submissionId, state: mapped ?? 'unknown' }
   }
 

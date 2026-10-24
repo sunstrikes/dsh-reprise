@@ -65,7 +65,11 @@ export function createFakeRay({ onSucceeded, now = () => 1_700_000_000_000, dupl
     // Field list and spelling copied from Ray's JobDetails JSON. `error_type` is always null here,
     // exactly as in OSS Ray: reading it is the bug this fake is built to catch.
     return {
-      job_id: job.job_id,
+      // Real Ray 2.59 answers `job_id: null` on the details route for some submissions (measured on
+      // the live cluster 2026-10-24: 42 of 129 rows in `GET /api/jobs/`). The submission id still
+      // addresses the job, which is why `script.nullJobId` exists: the duplicate path must return a
+      // reference the caller can poll, not a null.
+      job_id: job.script.nullJobId === true ? null : job.job_id,
       submission_id: job.submission_id,
       status: job.status,
       entrypoint: job.entrypoint,

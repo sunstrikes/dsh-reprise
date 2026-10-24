@@ -313,6 +313,18 @@ POSTing. The old `409`/`400 already exists` path is kept for the race where the 
 details route cannot see it yet. Tests count requests rather than read flags: one `POST`, one `PUT`,
 `fake.jobs.size === 1`, `fake.packages.size === 1`.
 
+Measured against the live cluster (Ray 2.59, 2026-10-24), so the read is not an assumption:
+
+| request | answer |
+|---|---|
+| `GET /api/jobs/reprise-probe9-pkg` (finished job) | **200**, full details |
+| `GET /api/jobs/no-such-submission-xyz` | **404** `Job … does not exist` — the pre-check misses, so the submit proceeds |
+| `GET /api/jobs/<submission_id>/logs` | **200** `{"logs": …}` — the log read works by submission id too |
+| `job_id` in a details document | may be **`null`** (42 of 129 listed rows): the submission id is then the id that resolves, so `submit()`/`find()` return it rather than a null |
+
+That last row is why a duplicate can answer with the *submission id* instead of a `raysubmit_…` id:
+it is the reference the dashboard, the logs route and the poller all accept.
+
 #### A run against the measured cluster
 
 ```json
