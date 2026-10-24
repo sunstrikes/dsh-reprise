@@ -186,6 +186,72 @@ function metricContractProblems(value) {
   if (value.role !== undefined && !isObject(value.role)) {
     problems.push('role must be an object of {metric: "<what it is for>"} when present')
   }
+
+  // How much of a difference counts is the contract's question, not the kernel's — `judge.compareMetric`
+  // deliberately has no threshold of its own, so a pack that answers it here is the only place the
+  // answer can live. Two rules make that answer checkable rather than decorative: a tolerance for a
+  // metric nobody ranks, and a tolerance that is zero or negative, both state nothing and are refused.
+  if (value.minimum_effective_delta !== undefined) {
+    const tolerance = value.minimum_effective_delta
+    if (!isObject(tolerance) || Object.keys(tolerance).length === 0) {
+      problems.push(
+        'minimum_effective_delta must be a non-empty object of {metric: <absolute delta>} when present — ' +
+          'a tolerance with no entry says every difference counts',
+      )
+    } else {
+      for (const [name, delta] of Object.entries(tolerance)) {
+        if (typeof delta !== 'number' || !Number.isFinite(delta) || delta <= 0) {
+          problems.push(
+            `minimum_effective_delta.${name} must be a positive finite number (got ${JSON.stringify(delta)}) — ` +
+              'zero makes every difference count and a negative counts the wrong way',
+          )
+        }
+        if (isObject(value.objectives) && value.objectives[name] === undefined) {
+          problems.push(
+            `minimum_effective_delta.${name} names a metric the objectives do not rank ` +
+              `(${Object.keys(value.objectives).join(', ') || 'none'}) — a tolerance for a metric nobody ranks decides nothing`,
+          )
+        }
+      }
+      if (isText(value.primary) && tolerance[value.primary] === undefined) {
+        problems.push(
+          `minimum_effective_delta has no entry for primary ${JSON.stringify(value.primary)} — ` +
+            'the metric the gate compares against the baseline needs the tolerance most',
+        )
+      }
+    }
+  }
+
+  // A guardrail is "the second metric that must not go backwards while the primary improves". Restating
+  // the primary there is the objective twice, and naming a metric the frontier does not carry makes the
+  // guardrail a comment.
+  if (value.guardrail !== undefined) {
+    const guardrail = value.guardrail
+    if (!isObject(guardrail) || !isText(guardrail.metric)) {
+      problems.push('guardrail must be an object naming the metric it protects (guardrail.metric) when present')
+    } else if (isObject(value.objectives) && value.objectives[guardrail.metric] === undefined) {
+      problems.push(
+        `guardrail.metric ${JSON.stringify(guardrail.metric)} is not among objectives ` +
+          `(${Object.keys(value.objectives).join(', ')}) — the frontier cannot rank it, so the guardrail is a comment`,
+      )
+    } else if (isText(value.primary) && guardrail.metric === value.primary) {
+      problems.push(
+        `guardrail.metric is the primary ${JSON.stringify(value.primary)} — a guardrail has to be a second metric, ` +
+          'or it is the objective restated',
+      )
+    } else if (guardrail.direction !== undefined) {
+      const declared = normalise(guardrail.direction)
+      const objective = normalise(value.objectives[guardrail.metric])
+      if (declared === undefined) {
+        problems.push(`guardrail.direction must be "higher" or "lower" (got ${JSON.stringify(guardrail.direction)})`)
+      } else if (objective !== undefined && declared !== objective) {
+        problems.push(
+          `guardrail.direction is ${JSON.stringify(guardrail.direction)} but objectives.${guardrail.metric} is ` +
+            `${JSON.stringify(value.objectives[guardrail.metric])} — two accounts of "better" for one metric`,
+        )
+      }
+    }
+  }
   return problems
 }
 
