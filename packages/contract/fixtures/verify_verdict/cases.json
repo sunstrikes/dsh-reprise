@@ -7,14 +7,28 @@
       "attempt": 1,
       "passed": true,
       "checks": [
-        { "name": "syntax", "result": "pass" },
-        { "name": "allowed_surface", "result": "pass" },
-        { "name": "conflict_markers", "result": "pass" }
+        {
+          "name": "syntax",
+          "result": "pass"
+        },
+        {
+          "name": "allowed_surface",
+          "result": "pass"
+        },
+        {
+          "name": "conflict_markers",
+          "result": "pass"
+        }
       ],
-      "reviewer": { "verdict": "accept", "rationale": "no behaviour change outside the target module" },
+      "reviewer": {
+        "verdict": "accept",
+        "rationale": "no behaviour change outside the target module"
+      },
       "decided_at_ms": 1761091200000,
       "evidence": {
-        "whitelist": ["model/structure.json"],
+        "whitelist": [
+          "model/structure.json"
+        ],
         "files": [
           {
             "path": "model/structure.json",
@@ -34,11 +48,43 @@
       "attempt": 1,
       "passed": false,
       "checks": [
-        { "name": "allowed_surface", "result": "fail" },
-        { "name": "syntax", "result": "pass" },
-        { "name": "conflict_markers", "result": "pass" }
+        {
+          "name": "allowed_surface",
+          "result": "fail"
+        },
+        {
+          "name": "syntax",
+          "result": "pass"
+        },
+        {
+          "name": "conflict_markers",
+          "result": "pass"
+        }
       ],
-      "reviewer": { "verdict": "accept", "rationale": "I see nothing wrong with it" },
+      "reviewer": {
+        "verdict": "accept",
+        "rationale": "I see nothing wrong with it"
+      },
+      "decided_at_ms": 1761091200000
+    }
+  },
+  {
+    "note": "the gate passed while the adversarial review rejected — the review participates in the verdict, so this is a contradiction and not a policy choice",
+    "expect": "conflict",
+    "artifact": {
+      "candidate_id": "c1",
+      "attempt": 1,
+      "passed": true,
+      "checks": [
+        {
+          "name": "allowed_surface",
+          "result": "pass"
+        }
+      ],
+      "reviewer": {
+        "verdict": "reject",
+        "rationale": "silently changes the loss scale"
+      },
       "decided_at_ms": 1761091200000
     }
   },
@@ -49,8 +95,16 @@
       "candidate_id": "c1",
       "attempt": 1,
       "passed": false,
-      "checks": [{ "name": "allowed_surface", "result": "pass" }],
-      "reviewer": { "verdict": "reject", "rationale": "silently changes the loss scale" },
+      "checks": [
+        {
+          "name": "allowed_surface",
+          "result": "pass"
+        }
+      ],
+      "reviewer": {
+        "verdict": "reject",
+        "rationale": "silently changes the loss scale"
+      },
       "decided_at_ms": 1761091200000
     }
   },
@@ -61,8 +115,16 @@
       "candidate_id": "c1",
       "attempt": 2,
       "passed": false,
-      "checks": [{ "name": "allowed_surface", "result": "pass" }],
-      "reviewer": { "verdict": "accept", "rationale": "minimal diff" },
+      "checks": [
+        {
+          "name": "allowed_surface",
+          "result": "pass"
+        }
+      ],
+      "reviewer": {
+        "verdict": "accept",
+        "rationale": "minimal diff"
+      },
       "decided_at_ms": 1761091200000
     }
   },
@@ -73,8 +135,16 @@
       "candidate_id": "c1",
       "attempt": 2,
       "passed": true,
-      "checks": [{ "name": "allowed_surface", "result": "pass" }],
-      "reviewer": { "verdict": "accept", "rationale": "minimal diff" },
+      "checks": [
+        {
+          "name": "allowed_surface",
+          "result": "pass"
+        }
+      ],
+      "reviewer": {
+        "verdict": "accept",
+        "rationale": "minimal diff"
+      },
       "decided_at_ms": 1761091200000
     }
   },
@@ -84,7 +154,12 @@
     "artifact": {
       "candidate_id": "c1",
       "passed": "true",
-      "checks": [{ "name": "static_imports", "result": "pass" }],
+      "checks": [
+        {
+          "name": "static_imports",
+          "result": "pass"
+        }
+      ],
       "decided_at_ms": 1761091200000
     }
   },
@@ -95,10 +170,25 @@
       "candidate_id": "c1",
       "attempt": 1,
       "passed": true,
-      "checks": [{ "name": "allowed_surface", "result": "pass" }],
-      "reviewer": { "verdict": "accept", "rationale": "minimal diff" },
+      "checks": [
+        {
+          "name": "allowed_surface",
+          "result": "pass"
+        }
+      ],
+      "reviewer": {
+        "verdict": "accept",
+        "rationale": "minimal diff"
+      },
       "decided_at_ms": 1761091200000,
-      "evidence": { "files": [{ "path": "model/structure.json", "bytes": 412 }] }
+      "evidence": {
+        "files": [
+          {
+            "path": "model/structure.json",
+            "bytes": 412
+          }
+        ]
+      }
     }
   },
   {
@@ -106,7 +196,67 @@
     "expect": "missing",
     "artifact": {
       "candidate_id": "c1",
-      "checks": [{ "name": "static_imports", "result": "pass" }],
+      "checks": [
+        {
+          "name": "static_imports",
+          "result": "pass"
+        }
+      ],
+      "decided_at_ms": 1761091200000
+    }
+  },
+  {
+    "note": "an attempt number that is not a number: the record is named after it, so the sequence would either collide or lose this attempt",
+    "expect": "invalid",
+    "artifact": {
+      "candidate_id": "c1",
+      "attempt": "two",
+      "passed": true,
+      "checks": [
+        {
+          "name": "allowed_surface",
+          "result": "pass"
+        }
+      ],
+      "reviewer": {
+        "verdict": "accept",
+        "rationale": "minimal diff"
+      },
+      "decided_at_ms": 1761091200000
+    }
+  },
+  {
+    "note": "an attempt number that is not positive: there is no attempt zero, and naming a record after one would overwrite the first try",
+    "expect": "invalid",
+    "artifact": {
+      "candidate_id": "c1",
+      "attempt": 0,
+      "passed": true,
+      "checks": [
+        {
+          "name": "allowed_surface",
+          "result": "pass"
+        }
+      ],
+      "reviewer": {
+        "verdict": "accept",
+        "rationale": "minimal diff"
+      },
+      "decided_at_ms": 1761091200000
+    }
+  },
+  {
+    "note": "a verdict that checked nothing at all: an opinion, whatever it claims to have passed",
+    "expect": "invalid",
+    "artifact": {
+      "candidate_id": "c1",
+      "attempt": 1,
+      "passed": true,
+      "checks": [],
+      "reviewer": {
+        "verdict": "accept",
+        "rationale": "looks fine"
+      },
       "decided_at_ms": 1761091200000
     }
   }

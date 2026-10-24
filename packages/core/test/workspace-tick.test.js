@@ -277,7 +277,7 @@ test('the verdict the gate judged is on disk under the reference the fact plane 
   ports.store.close()
 })
 
-test('dump names the field a refused artifact was missing, so a reader can fix it', async () => {
+test('dump names the field a refused artifact got wrong, so a reader can fix it', async () => {
   const store = Store.open(mkdtempSync(join(tmpdir(), 'reprise-workspace-dump-')))
   const clock = new FakeClock()
   const recorded = recordedModel(store, { verify: { verdict: 'accept', rationale: 'looks fine' } })
