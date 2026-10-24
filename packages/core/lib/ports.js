@@ -30,7 +30,14 @@ import { safeSlug } from '@dsh-reprise/exec'
 import { landWithCli } from '@dsh-reprise/exec/harness'
 import { createClaudeHarness } from '@dsh-reprise/exec/harness/claude'
 import { createDshHarness } from '@dsh-reprise/exec/harness/dsh'
-import { createModelPort, modelCallName } from '@dsh-reprise/exec/model'
+import {
+  MODEL_UNAVAILABLE,
+  buildQuestion,
+  createModelPort,
+  isNoAnswerClass,
+  modelCallName,
+  modelCallRecord,
+} from '@dsh-reprise/exec/model'
 import { createLocalPlatform } from '@dsh-reprise/exec/platform/local'
 import { createRayPlatform } from '@dsh-reprise/exec/platform/ray'
 
@@ -227,13 +234,66 @@ export function createPlatform(config, context) {
 }
 
 /**
+ * File one landing where the audit page can read it: the briefing the implementer was given, and what
+ * it did with it.
+ *
+ * LAND is the fifth call site, and its model is a coding harness rather than a question-answering
+ * port — but the record has the same shape, because a reader asking "what did we ask, and what came
+ * back" should not have to learn two formats. `status: 'unavailable'` means the implementer never
+ * answered (no binary, a timeout, an unreadable stream): that is the same condition the judgement
+ * port reports, and `loop.js` handles both through the same outage path.
+ *
+ * @param {object} artifacts the workspace artifact store
+ * @param {{candidateId: string, round?: number, hypothesis?: string, parentId?: string|null}} request
+ * @param {object} result the harness result (`landWithCli`'s shape)
+ */
+export function recordLandCall(artifacts, request, result) {
+  if (typeof artifacts?.write !== 'function') return undefined
+  const prompt = typeof result?.prompt === 'string' && result.prompt !== '' ? result.prompt : ''
+  if (prompt === '') return undefined
+
+  const question = buildQuestion({
+    call_site: 'land',
+    subject: request.candidateId,
+    prompt,
+    facts: {
+      candidate_id: request.candidateId,
+      round: request.round ?? null,
+      hypothesis: request.hypothesis ?? null,
+      parent_id: request.parentId ?? null,
+      base_ref: result.base_ref ?? null,
+      worktree_dir: request.worktreeDir ?? null,
+    },
+    answer_schema: '{"files": ["path/one", "path/two"]}',
+  })
+  const unanswered = result.ok === false && isNoAnswerClass(result.error_class)
+  return artifacts.write(
+    modelCallName(question),
+    modelCallRecord({
+      question,
+      answer: {
+        engine: result.engine ?? null,
+        files: Array.isArray(result.files) ? result.files : [],
+        files_changed: result.files_changed ?? 0,
+        parent_commit: result.parent_commit ?? null,
+        cross_check: result.cross_check?.status ?? null,
+      },
+      response: typeof result.output === 'string' ? result.output : '',
+      error_class: unanswered ? MODEL_UNAVAILABLE : null,
+      cause: unanswered ? (result.error_class ?? null) : null,
+      message: unanswered ? (result.message ?? null) : null,
+    }),
+  )
+}
+
+/**
  * The candidate implementer, pinned to the runner's worktree.
  *
  * The three kinds differ only in the argv they build: `claude`, `dsh`, or a plain command. The
  * placeholders `{candidate}` and `{worktree}` are substituted so a configuration file can name the
  * files it wants without knowing the ids in advance.
  */
-export function createHarness(config, { runner, launchDir = process.cwd() }) {
+export function createHarness(config, { runner, launchDir = process.cwd(), artifacts } = {}) {
   const candidate = config.candidate
   if (candidate === undefined) return undefined
   if (runner === undefined) {
@@ -249,21 +309,21 @@ export function createHarness(config, { runner, launchDir = process.cwd() }) {
     const adapter = kind === 'claude' ? createClaudeHarness(options) : createDshHarness(options)
     return {
       engine: adapter.engine,
-      land: (request) =>
-        adapter.land({
-          ...request,
-          worktreeDir: runner.worktreeFor(request.candidateId),
-          baseRef: runner.baseRef,
-        }),
+      land: async (request) => {
+        const worked = { ...request, worktreeDir: runner.worktreeFor(request.candidateId), baseRef: runner.baseRef }
+        const result = await adapter.land(worked)
+        recordLandCall(artifacts, worked, result)
+        return result
+      },
     }
   }
 
   return {
     engine: 'command',
-    land: (request) => {
+    async land(request) {
       const worktreeDir = runner.worktreeFor(request.candidateId)
       const argv = absoluteise(candidate.command, launchDir, { candidate: request.candidateId, worktree: worktreeDir })
-      return landWithCli({
+      const result = await landWithCli({
         engine: 'command',
         command: argv[0],
         args: argv.slice(1),
@@ -276,6 +336,8 @@ export function createHarness(config, { runner, launchDir = process.cwd() }) {
         env: { ...process.env, ...(candidate.env ?? {}) },
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
       })
+      recordLandCall(artifacts, { ...request, worktreeDir }, result)
+      return result
     },
   }
 }
@@ -321,7 +383,7 @@ export function portsFromConfig({ config, workspaceDir, store, log = () => {}, l
   const ports = {
     clock: { now: () => Date.now() },
     platform: createPlatform(config, { workspaceDir, runner }),
-    harness: createHarness(config, { runner, launchDir }),
+    harness: createHarness(config, { runner, launchDir, artifacts }),
     baseline,
     artifacts,
     runner,

@@ -23,7 +23,7 @@ import test from 'node:test'
 import { MODEL_UNAVAILABLE, isModelUnavailable } from '@dsh-reprise/exec/model'
 
 import { fileArtifacts } from '../lib/artifacts.js'
-import { createModelFromConfig } from '../lib/ports.js'
+import { createModelFromConfig, recordLandCall } from '../lib/ports.js'
 import { judgeFor } from './support/domain.js'
 
 const AT = 1_761_091_200_000
@@ -127,4 +127,60 @@ test('an outage is filed too — with what the CLI said — so the audit shows w
   assert.equal(stored.cause, 'exit_non_zero')
   assert.match(stored.message, /no credential in this checkout/, 'the operator reads the CLI\'s own words')
   assert.match(stored.prompt, /ROUND_PLAN/, 'and the prompt that failed is kept, which is what a post-mortem needs')
+})
+
+// -------------------------------------------------------------------- LAND
+
+const LANDING_RESULT = (overrides = {}) => ({
+  ok: true,
+  error_class: 'ok',
+  prompt: 'You are the candidate implementer inside an automated model-structure exploration loop.\nCandidate r1-h1, round 1.',
+  engine: 'command',
+  candidate_id: 'r1-h1',
+  parent_id: 'baseline-0',
+  parent_commit: 'aaa1111',
+  base_ref: 'HEAD',
+  files: ['model/embedding.py'],
+  files_changed: 1,
+  cross_check: { status: 'not_reported' },
+  output: 'I widened the table.\n\n```json\n{"files": ["model/embedding.py"]}\n```\n',
+  ...overrides,
+})
+
+test('LAND is the fifth call site: the briefing and what the implementer did are filed the same way', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'reprise-model-call-land-'))
+  const artifacts = fileArtifacts(join(dir, 'artifacts'))
+  const request = { candidateId: 'r1-h1', round: 1, hypothesis: 'widen the embedding table', parentId: 'baseline-0', worktreeDir: '/tmp/wt' }
+
+  const stored = recordLandCall(artifacts, request, LANDING_RESULT())
+
+  const record = JSON.parse(readFileSync(stored.path, 'utf8'))
+  assert.equal(record.call_site, 'land')
+  assert.equal(record.subject, 'r1-h1')
+  assert.equal(record.status, 'answered')
+  assert.match(record.prompt, /candidate implementer/, 'the text the implementer actually received')
+  assert.equal(record.facts.hypothesis, 'widen the embedding table', 'and the hypothesis it was landed for')
+  assert.deepEqual(record.answer.files, ['model/embedding.py'])
+  assert.equal(record.answer.cross_check, 'not_reported')
+  assert.match(record.response, /I widened the table/, 'git decides the diff, but the model\'s words are kept')
+  assert.ok(stored.path.endsWith(join('model_call', 'land', 'r1-h1.json')))
+})
+
+test('LAND: an implementer that never answered is filed as the same closed class', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'reprise-model-call-land-down-'))
+  const artifacts = fileArtifacts(join(dir, 'artifacts'))
+  const request = { candidateId: 'r1-h1', round: 1, hypothesis: 'widen the embedding table', worktreeDir: '/tmp/wt' }
+
+  recordLandCall(
+    artifacts,
+    request,
+    LANDING_RESULT({ ok: false, error_class: 'harness_unavailable', message: 'claude: command not found', files: [], files_changed: 0 }),
+  )
+
+  const record = JSON.parse(readFileSync(join(artifacts.dir, 'model_call', 'land', 'r1-h1.json'), 'utf8'))
+  assert.equal(record.status, 'unavailable')
+  assert.equal(record.error_class, MODEL_UNAVAILABLE, 'one class across all five call sites, LAND included')
+  assert.equal(record.cause, 'harness_unavailable', 'with the finer cause kept for the operator')
+  assert.match(record.message, /command not found/)
+  assert.equal(record.answer.files.length, 0)
 })

@@ -189,7 +189,8 @@ a phase never sits waiting: the outage is recorded once in the ops log
 (`store.ops()` → `model_unavailable`, with the cause beside it) and the phase is retried on a backoff
 (1 min doubling to 1 h).
 
-Every call is also filed where a reader can see the originals: `<workspace>/artifacts/model_call/<call
+Every call is also filed where a reader can see the originals — including LAND's briefing of the
+implementer, which is `model_call/land/<candidate>.json`: `<workspace>/artifacts/model_call/<call
 site>/<subject>[/<ref>].json`, holding `prompt`, `facts`, `answer_schema`, `answer` (the parsed
 object), `response` (the words the model actually returned), and `status` / `error_class` / `cause` /
 `message` when no answer arrived. The record has no timestamp and no counter — its identity is the
