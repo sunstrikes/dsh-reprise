@@ -162,7 +162,7 @@ pack, and a pack missing a part is refused by name at boot instead of running ha
 | `runner.repo` / `runner.dir` | **required with `candidate`** | repo inside the workspace; where worktrees are created |
 | `runner.base_ref` | git default | the commit candidates branch from |
 | `model.command` | **required if `rounds` is set** | every judgement phase reaches a model through this argv |
-| `rounds.metric.name` / `.direction` | the pack's contract | the one metric the round gate optimises; restating it is how a run points at a different objective |
+| `rounds.metric.name` / `.direction` | derived from the metric contract | the one metric the round gate optimises; restating it is how a run points at a different objective, and a restatement that disagrees with `metrics` is warned about |
 | `rounds.metric.contract_ref` | the contract's `name` | pointer to the frozen metric contract |
 | `rounds.max_rounds` / `.candidates_per_round` | `3` / `2` | round workflow shape |
 | `rounds.retry.base_ms` / `.max_ms` / `.max_attempts` | `60000` / `3600000` / `3` | backoff for a refused artifact, then a human |
@@ -171,7 +171,7 @@ pack, and a pack missing a part is refused by name at boot instead of running ha
 | `budget.gpu_hours_limit` | `0` (unlimited) | hard cap; an uncapped remote executor is warned about, every read |
 | `budget.soft_ratio` / `.candidate_gpu_hours` | `0.8` / `0.5` | stop dispatching at this fraction; what a dispatch reserves |
 | `budget.max_runtime_hours` / `.judge_tokens` | `0` (unlimited) / `false` | wall-clock gate; tokens are recorded, never judged |
-| `metrics.primary` / `.objectives` | the pack's contract | recorded at INIT; cross-checked against the round contract |
+| `metrics` | the pack's whole contract | one account of "better" — `primary`, `objectives`, `guardrail`, `minimum_effective_delta`, `window_mode` — resolved by `packages/core/lib/metric-contract.js` for the ranking, the stop rules and the gate; a partial or self-contradictory restatement is refused at boot |
 | `poll.base_ms` / `.max_ms` / `.grace_attempts` | `1000` / `60000` / `2` | job poll backoff |
 | `gate.max_attempts` / `.base_ms` / `.max_ms` | `3` / `1000` / `60000` | how many times gate two may run before a candidate stops, and the backoff between attempts; `1` restores a single shot |
 | `limits.max_wall_ms` / `.max_idle_ms` | `3600000` / `1800000` | per-job wall-clock and silence deadlines |

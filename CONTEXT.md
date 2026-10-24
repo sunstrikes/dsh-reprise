@@ -148,6 +148,12 @@ artifact field, the frontier, or a stop rule — stronger than asking the model 
 Enforced in `packages/core/lib/judge.js` (the five entrances, `compareMetric`, `pickMetric`) and
 `skills.js` (the skill is judgement, the facts are evidence, the answer shape is the wire format).
 
+*Which* number is "better", how large a difference has to be to count, and whether a run is read as the
+mean of its windows or as its last window are resolved once, in `packages/core/lib/metric-contract.js`.
+The ranking, the stop rules and the gate all call it, and when the contract is absent or contradicts
+itself it answers `missing` / `conflict` — the four states of §7 applied to a contract — so no reader
+invents a default.
+
 *Blurred with:* "the model decides". A review that says `accept` over a failed check does not decide
 anything — it produces a `conflict` and the candidate stops.
 
