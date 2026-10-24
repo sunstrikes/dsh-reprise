@@ -90,7 +90,7 @@ const sigmoid = (z) => 1 / (1 + Math.exp(-z))
  * `hidden_units: 0` is plain logistic regression; anything else is a one-hidden-layer MLP. Trained
  * with full-batch gradient descent — deterministic, no shuffling, no learning-rate schedule.
  */
-function train(structure, trainRows) {
+function train(structure, trainRows, { onEpoch } = {}) {
   const crosses = structure.field_crosses === true
   const dims = crosses ? FEATURES + 4 : FEATURES
   const hidden = Math.max(0, Number(structure.hidden_units ?? 0))
@@ -116,7 +116,7 @@ function train(structure, trainRows) {
   const g1 = hidden === 0 ? null : Array.from({ length: hidden }, () => new Array(dims).fill(0))
   const activations = hidden === 0 ? null : new Array(hidden)
 
-  for (let epoch = 0; epoch < epochs; epoch += 1) {
+  function trainEpoch() {
     for (let start = 0; start < data.length; start += batchSize) {
       const batch = data.slice(start, start + batchSize)
       g2.fill(0)
@@ -166,7 +166,7 @@ function train(structure, trainRows) {
     }
   }
 
-  return function predict(categories) {
+  function predict(categories) {
     const x = featurise(categories, structure)
     if (hidden === 0) {
       let logit = b2
@@ -181,6 +181,16 @@ function train(structure, trainRows) {
     }
     return logit
   }
+
+  // One window per epoch: `onEpoch` sees the model as it stands at the end of epoch n, so a caller
+  // can measure the same test split after 1, 2, 3… epochs and report a *series* rather than one
+  // number. The last window is the number this run reports, so a single-metric reader is unchanged.
+  for (let epoch = 0; epoch < epochs; epoch += 1) {
+    trainEpoch()
+    onEpoch?.(epoch + 1, predict)
+  }
+
+  return predict
 }
 
 /** Rank-based AUC with ties handled by average rank — the metric the contract names. */
@@ -211,20 +221,40 @@ function logLoss(scored) {
 
 // ------------------------------------------------------------------ main
 
+/** Score the held-out split with the model as it stands. */
+function evaluate(predict) {
+  return dataset.test.map((row) => {
+    const probability = sigmoid(predict(row.categories))
+    return { label: row.label, score: probability, probability }
+  })
+}
+
+const round6 = (value) => Number(value.toFixed(6))
+
 const structure = JSON.parse(readFileSync(join(HERE, 'model', 'structure.json'), 'utf8'))
 const startedAt = Date.now()
 const dataset = makeDataset(20_261_022)
-const predict = train(structure, dataset.rows)
 
-const scored = dataset.test.map((row) => {
-  const logit = predict(row.categories)
-  const probability = sigmoid(logit)
-  return { label: row.label, score: probability, probability }
+// One row per epoch, in the contract's window shape (`unit: "epoch"`, half-open `[n, n+1)`). The
+// series is what lets a candidate and a baseline be compared over the same intervals instead of by
+// one number each; the last window is the headline metric, so a single-number reader is unchanged.
+const windows = []
+const predict = train(structure, dataset.rows, {
+  onEpoch: (epoch, predictAtEpoch) => {
+    const scored = evaluate(predictAtEpoch)
+    windows.push({
+      index: epoch - 1,
+      start: epoch - 1,
+      end: epoch,
+      metrics: { auc: round6(auc(scored)), logloss: round6(logLoss(scored)) },
+    })
+  },
 })
 
+const last = windows[windows.length - 1].metrics
 const metrics = {
-  auc: Number(auc(scored).toFixed(6)),
-  logloss: Number(logLoss(scored).toFixed(6)),
+  auc: last.auc,
+  logloss: last.logloss,
   train_seconds: Number(((Date.now() - startedAt) / 1000).toFixed(3)),
   parameters: (structure.field_crosses === true ? FEATURES + 4 : FEATURES) * Math.max(1, Number(structure.hidden_units ?? 0) || 1),
 }
@@ -232,4 +262,9 @@ const metrics = {
 const document = `${JSON.stringify({ metrics }, null, 2)}\n`
 const target = process.env.REPRISE_METRICS_PATH
 if (target !== undefined && target !== '') writeFileSync(target, document)
+// The whole series on one line: a log is truncated at its end, so a single line either survived
+// intact or is visibly broken, while one line per window would leave a half series that looks
+// complete. This is the channel the cluster has back to us, and the local executor keeps the same
+// line in `driver.log`.
+process.stdout.write(`REPRISE_WINDOWS ${JSON.stringify({ schema_version: 1, unit: 'epoch', windows })}\n`)
 process.stdout.write(document)
