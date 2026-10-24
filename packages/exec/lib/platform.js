@@ -89,6 +89,32 @@ export function assertPlatform(platform) {
 }
 
 /**
+ * The job id a caller meant.
+ *
+ * `poll()` hands back a plain answer — `{state: 'succeeded', metrics: …}` — and the very next thing a
+ * caller wants is that job's artifacts, so it is normal to call `collect()` with the answer rather
+ * than with an id. Doing so used to interpolate the object into the request path
+ * (`ray does not know job [object Object]`), get a 404, and report **`lost`** for a job that had just
+ * succeeded — the one wrong answer user story 20 is about, and the worst one to hand a restart.
+ *
+ * So: a string is a job id, an object carrying one is the result of the call that just happened, and
+ * anything else is a caller bug that throws. "We were handed nonsense" must never be spelled `lost`.
+ *
+ * @param {string|{job_id?: string}} value
+ * @param {{method?: string}} [options] named so the error says which call was wrong
+ * @returns {string}
+ */
+export function resolveJobId(value, { method = 'collect' } = {}) {
+  if (typeof value === 'string' && value !== '') return value
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    const id = value.job_id
+    if (typeof id === 'string' && id !== '') return id
+    refused(`${method}() was given an object with no usable job_id — pass the job id, or the poll result that carries one`)
+  }
+  refused(`${method}() needs a job id (a string, or a result carrying job_id), got ${value === null ? 'null' : typeof value}`)
+}
+
+/**
  * Validate one poll answer. Enforced here rather than trusted to each implementation because the
  * closed vocabulary is the contract: a `state: 'stopped'` would be silently treated as "still
  * running" by every caller and hang the candidate forever.
@@ -178,13 +204,11 @@ export async function submitJob(platform, request) {
 }
 
 export async function pollJob(platform, jobId) {
-  if (!types.string(jobId)) refused('pollJob needs a job id')
-  return assertPollResult(await platform.poll(jobId))
+  return assertPollResult(await platform.poll(resolveJobId(jobId, { method: 'pollJob' })))
 }
 
 export async function collectJob(platform, jobId) {
-  if (!types.string(jobId)) refused('collectJob needs a job id')
-  return assertCollectResult(await platform.collect(jobId))
+  return assertCollectResult(await platform.collect(resolveJobId(jobId, { method: 'collectJob' })))
 }
 
 export async function findJob(platform, candidateId) {
@@ -193,8 +217,7 @@ export async function findJob(platform, candidateId) {
 }
 
 export async function cancelJob(platform, jobId) {
-  if (!types.string(jobId)) refused('cancelJob needs a job id')
-  return assertCancelResult(await platform.cancel(jobId))
+  return assertCancelResult(await platform.cancel(resolveJobId(jobId, { method: 'cancelJob' })))
 }
 
 // ---------------------------------------------------------------- timeout policy
@@ -494,6 +517,41 @@ export async function runPlatformConformance(t, { name, fresh }) {
       assert.ok(STATES.includes(found.state))
       assert.equal(typeof found.submitted_at_ms, 'number', 'recovery needs to know how old the job is')
       assert.equal(typeof found.deadline_ms, 'number', 'recovery needs the absolute deadline, not a duration')
+    } finally {
+      await harness.close()
+    }
+  })
+
+  await t.test(`${label}: collect reads the same job from an id or from the poll result, and refuses anything else`, async () => {
+    const harness = await open()
+    try {
+      const metrics = { val_loss: 0.25 }
+      harness.script('cand_shape', { outcome: 'succeeded', metrics })
+      const submitted = await submitJob(harness.platform, {
+        submissionId: 'cand_shape',
+        candidateId: 'cand_shape',
+        gpuHours: 0.2,
+      })
+      const done = await pollUntilTerminal(harness.platform, submitted.job_id)
+
+      const byId = assertCollectResult(await collectJob(harness.platform, submitted.job_id))
+      const byPollResult = assertCollectResult(await collectJob(harness.platform, done))
+      const raw = assertCollectResult(await harness.platform.collect(done))
+
+      for (const answer of [byPollResult, raw]) {
+        assert.equal(answer.state, byId.state, 'the poll result and the id are the same job; two answers would be worse than one')
+        assert.deepEqual(answer.metrics, metrics)
+      }
+
+      // A malformed argument is a caller bug. It must never be answered as `lost`: a job we just
+      // watched succeed, reported missing, is what sends a restart to resubmit a finished run.
+      for (const wrong of [undefined, null, 42, {}, { job_id: 7 }, []]) {
+        await assert.rejects(
+          async () => harness.platform.collect(wrong),
+          (error) => error instanceof TypeError,
+          `collect(${JSON.stringify(wrong)}) must throw a TypeError rather than answer with a state`,
+        )
+      }
     } finally {
       await harness.close()
     }

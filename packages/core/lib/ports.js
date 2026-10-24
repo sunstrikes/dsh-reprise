@@ -162,9 +162,32 @@ export function createCommandModel({ command, cwd = process.cwd(), env, timeout_
   }
 }
 
-/** What the executor is asked to run for one candidate: one argv, in the candidate's own worktree. */
+/**
+ * What one job is asked to run for one candidate, expressed in the vocabulary of its executor.
+ *
+ * The two kinds answer different questions and must not share a shape:
+ *
+ *  - `local` runs an argv on *this* machine, so the candidate's worktree is simply its `cwd`: the
+ *    files the job reads are already the files the candidate wrote.
+ *  - `ray` runs on a cluster whose nodes share no filesystem with us, so there is no directory to
+ *    point at. The plan names the tree to **ship** (`worktreeDir` + the runner's `baseRef`) and the
+ *    argv that runs *inside the unpacked package*. Handing a laptop path to a Ray plan would be a
+ *    job that fails on a node with "no such directory" three minutes into a GPU reservation.
+ */
 function planFor(config, { workspaceDir, runner }) {
   const executor = config.executor ?? { kind: 'local' }
+  if ((executor.kind ?? 'local') === 'ray') {
+    return ({ candidateId }) => ({
+      // Runnable inside the unpacked package: relative paths resolve against the candidate's tree,
+      // which is the whole point of shipping it.
+      entrypoint: executor.command,
+      worktreeDir: runner === undefined ? undefined : runner.worktreeFor(candidateId),
+      baseRef: runner?.baseRef,
+      runtimeEnv: { env_vars: { ...(executor.env ?? {}) } },
+      ...(executor.num_gpus === undefined ? {} : { numGpus: executor.num_gpus }),
+      metadata: {},
+    })
+  }
   return ({ candidateId }) => ({
     command: executor.command,
     // The candidate's worktree is the execution directory: the job evaluates the candidate's tree,
@@ -195,7 +218,9 @@ export function createPlatform(config, context) {
   }
   if (executor.kind === 'ray') {
     return createRayPlatform({
-      fetch: globalThis.fetch,
+      // No `fetch`: the dashboard's CSRF guard refuses Node's global fetch for writes (undici sends
+      // `sec-fetch-mode: cors`, which Ray reads as browser traffic). The adapter defaults to
+      // `node:http`; see `packages/exec/lib/ray-http.js`.
       plan,
       baseUrl: executor.base_url,
       metricsDir: resolve(context.workspaceDir, executor.metrics_dir ?? 'metrics'),

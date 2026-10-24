@@ -521,9 +521,23 @@ async function submit(ports, candidateId, state) {
       gpuHours: state.reserved_gpu_hours ?? budget.candidate_gpu_hours,
     })
   } catch (error) {
-    // A refused submission (cluster down, no resources, nothing to run) throws rather than
-    // inventing a job id. Hold the candidate here and try again later — do not reject it: this
-    // is the platform being unavailable, not the candidate being wrong.
+    // Two kinds of throw, and conflating them is a bug in both directions.
+    //
+    // `retryable === false` is the platform saying *this candidate cannot be shipped at all* — a
+    // tree over the package limit, or one whose archive disagrees with the runner's git diff. Waiting
+    // changes nothing about it, so it is a decision: reject the candidate and put the conclusion in
+    // the reason a person reads. Note what is deliberately absent: no `status`. Nothing is malformed
+    // (that would be `invalid`) and no two facts contradict each other in a way we can call
+    // `conflict` — the news is bad and the platform said why, which is not one of the four states
+    // (CODING_STANDARDS §2).
+    if (error?.retryable === false) {
+      return reject(ports, candidateId, 'SUBMIT', {
+        message: [error.conclusion, error.message].filter((part) => typeof part === 'string' && part !== '').join(': '),
+      })
+    }
+
+    // Everything else — cluster down, no resources, nothing to run — is the platform being
+    // unavailable, not the candidate being wrong. Hold the candidate here and try again later.
     const poll = pollConfig(config)
     const delay = Math.min(poll.base_ms * 2 ** Math.min((state.submit_attempts ?? 0) + 1, 10), poll.max_ms)
     const { seq } = emit(store, clock, candidateId, 'submit_refused', {
