@@ -24,7 +24,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync,
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { DEFAULTS, TERMINAL_STATES, safeSlug } from './platform.js'
+import { DEFAULTS, TERMINAL_STATES, resolveJobId, safeSlug } from './platform.js'
 
 const SUPERVISOR = fileURLToPath(new URL('./local-runner.js', import.meta.url))
 const STDERR_CLIP = 2_048
@@ -183,6 +183,12 @@ export function createLocalPlatform({
     }
   }
 
+  /** Every answer about a job names the job, so `collect(pollResult)` can resolve it. */
+  function withId(jobId) {
+    const answer = observe(jobId)
+    return answer.job_id === undefined ? { job_id: jobId, ...answer } : answer
+  }
+
   function artifactsFor(jobId) {
     const directory = dirFor(jobId)
     const artifacts = []
@@ -282,13 +288,16 @@ export function createLocalPlatform({
     },
 
     poll(jobId) {
-      return observe(jobId)
+      return withId(resolveJobId(jobId, { method: 'poll' }))
     },
 
     collect(jobId) {
+      // An id or the poll result that just finished; anything else throws rather than reading as
+      // `lost`. See `resolveJobId` in `platform.js`.
+      jobId = resolveJobId(jobId, { method: 'collect' })
       const record = readJson(recordPath(jobId))
       if (record === undefined) return { state: 'lost', artifacts: [] }
-      const observed = observe(jobId)
+      const observed = withId(jobId)
       const artifacts = artifactsFor(jobId)
       if (!TERMINAL_STATES.includes(observed.state)) {
         return { state: observed.state, metrics: undefined, artifacts }
@@ -323,6 +332,7 @@ export function createLocalPlatform({
     },
 
     async cancel(jobId) {
+      jobId = resolveJobId(jobId, { method: 'cancel' })
       const record = readJson(recordPath(jobId))
       if (record === undefined) return { accepted: false, state_after: 'lost' }
       const before = observe(jobId)

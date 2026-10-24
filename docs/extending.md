@@ -59,14 +59,16 @@ port is JSON in / JSON out and never calls back into the kernel.
 
 ```js
 platform.submit({ submissionId, candidateId, gpuHours }) → { job_id, state?, harness?, deadline_ms?, duplicate? }
-platform.poll(jobId)                                    → { state, metrics?, error_class?, error_detail?, timing? }
-platform.collect(jobId)                                 → { state, metrics?, error_class?, artifacts[] }
+platform.poll(jobId)                                    → { job_id, state, metrics?, error_class?, error_detail?, timing? }
+platform.collect(jobId | pollResult)                    → { state, metrics?, error_class?, artifacts[] }
 platform.find(candidateId)                              → { job_id, state, harness?, submitted_at_ms?, deadline_ms? } | undefined
 platform.cancel(jobId)                                  → { accepted, state_after }
 ```
 
 `submit` / `poll` / `collect` are the job's life. `find` is what makes a restart continue instead of
-resubmitting; `cancel` is what makes a timeout stop the spend. `assertPlatform(impl)` refuses an
+resubmitting; `cancel` is what makes a timeout stop the spend. `collect` takes the job id **or** the poll result that carries one (`resolveJobId()`), because that
+result is what a caller is holding when it wants the artifacts; anything else is a `TypeError`, never
+a `lost`. `assertPlatform(impl)` refuses an
 implementation missing any of the five — call it at construction, so a typo is a startup log line and
 not a candidate stuck at `SUBMIT`.
 

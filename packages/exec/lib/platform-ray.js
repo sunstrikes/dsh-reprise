@@ -35,7 +35,7 @@ import {
   packCandidate,
   packageNameFor,
 } from './archive.js'
-import { DEFAULTS, TERMINAL_STATES, safeSlug } from './platform.js'
+import { DEFAULTS, TERMINAL_STATES, resolveJobId, safeSlug } from './platform.js'
 import { createHttpRequest, isBrowserTraffic } from './ray-http.js'
 
 const CLIP = 2_048
@@ -443,6 +443,15 @@ export function createRayPlatform({
     }
   }
 
+  /**
+   * Every answer about a job names the job. `collect(pollResult)` is the natural next call after a
+   * poll, and it can only resolve an id the poll actually carried.
+   */
+  async function observeWithId(jobRef) {
+    const answer = await observe(jobRef)
+    return answer.job_id === undefined ? { job_id: jobRef, ...answer } : answer
+  }
+
   async function observe(jobRef) {
     const response = await jobDetails(`/api/jobs/${encodeURIComponent(jobRef)}`)
     if (response.status === 404) {
@@ -677,26 +686,29 @@ export function createRayPlatform({
     },
 
     poll(jobId) {
-      return observe(jobId)
+      return observeWithId(resolveJobId(jobId, { method: 'poll' }))
     },
 
     async collect(jobId) {
-      const observed = await observe(jobId)
+      // An id or the poll result that just finished — see `resolveJobId`: interpolating the result
+      // object into the URL is how a job that had just succeeded came back as `lost`.
+      const ref = resolveJobId(jobId, { method: 'collect' })
+      const observed = await observeWithId(ref)
       const artifacts = []
 
       // The metrics file is named after the submission id (that is what the job was told to write
       // to), not after the cluster's job id. Getting this wrong would silently produce "no
       // metrics" for every successful job.
-      const metricsPath = metricsPathFor(observed.submission_id ?? jobId)
+      const metricsPath = metricsPathFor(observed.submission_id ?? ref)
       if (metricsPath !== undefined && existsSync(metricsPath)) {
         artifacts.push({ name: 'metrics.json', uri: `file://${metricsPath}`, bytes: statSync(metricsPath).size })
       }
 
       if (artifactsDir !== undefined) {
-        const logs = await fetchLogs(jobId)
+        const logs = await fetchLogs(ref)
         if (logs !== undefined) {
           mkdirSync(artifactsDir, { recursive: true })
-          const path = join(artifactsDir, `${safeSlug(jobId)}.driver.log`)
+          const path = join(artifactsDir, `${safeSlug(ref)}.driver.log`)
           writeFileSync(path, logs)
           artifacts.push({ name: 'driver.log', uri: `file://${path}`, bytes: Buffer.byteLength(logs) })
         }
@@ -735,6 +747,7 @@ export function createRayPlatform({
     },
 
     async cancel(jobId) {
+      jobId = resolveJobId(jobId, { method: 'cancel' })
       const response = await call('POST', `/api/jobs/${encodeURIComponent(jobId)}/stop`)
       if (response.status === 404) return { accepted: false, state_after: 'lost' }
       if (response.status !== 200) {

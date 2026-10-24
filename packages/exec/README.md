@@ -182,10 +182,18 @@ const canceled = await cancelJob(platform, submitted.job_id)
 | method | input | answer |
 |---|---|---|
 | `submit` | `{submissionId, candidateId, gpuHours}` | `{job_id, state?, harness?, deadline_ms?, duplicate?}` — `deadline_ms` is a **duration** |
-| `poll` | `jobId` | `{state, metrics?, error_class?, error_detail?, timing?}` |
-| `collect` | `jobId` | `{state, metrics?, error_class?, artifacts[]}` — `metrics` only for `succeeded` |
+| `poll` | `jobId` | `{job_id, state, metrics?, error_class?, error_detail?, timing?}` — the answer names its job |
+| `collect` | `jobId` **or the poll result** | `{state, metrics?, error_class?, artifacts[]}` — `metrics` only for `succeeded` |
 | `find` | `candidateId` | `{job_id, state, harness?, submitted_at_ms?, deadline_ms?}` or `undefined`; `deadline_ms` is **absolute** |
 | `cancel` | `jobId` | `{accepted, state_after}` — idempotent, `accepted: false` when already terminal |
+
+`poll()` names the job it is about, and every method that takes a job takes **either the id or the
+poll result** (`resolveJobId()`): calling `collect()` with the answer that just said `succeeded` is
+the natural next step, and doing it used to interpolate the object into the request path
+(`ray does not know job [object Object]`), get a 404, and report `lost` for a job that had just
+finished — the one wrong answer user story 20 is about. Anything that is neither a non-empty string
+nor an object carrying a `job_id` throws a `TypeError`; a malformed argument is a caller bug and is
+**never** spelled `lost`.
 
 `submitJob` / `pollJob` / `collectJob` / `findJob` / `cancelJob` are thin awaited wrappers that also
 **validate the answer** (`assertPlatform`, `assertPollResult`, … in `lib/platform.js`). Use them, not
