@@ -62,6 +62,7 @@ export function createFakeRay({ onSucceeded, now = () => 1_700_000_000_000, dupl
   // `working_dir` names a package it never received would test the wrong half of the contract.
   const packages = new Map()
   const requests = []
+  const listing = []
   let counter = 0
   let clock = now()
 
@@ -225,6 +226,23 @@ export function createFakeRay({ onSucceeded, now = () => 1_700_000_000_000, dupl
       return reply({ logs: job.script.logs ?? '' }, 200)
     }
 
+    if (method === 'GET' && path === '/api/v0/jobs') {
+      // The legacy read-only listing. Measured on Ray 2.59: every job the cluster knows, including
+      // ones this fake never submitted, in the same StateApiResponse envelope as `/api/v0/tasks`.
+      const rows = [...jobs.values(), ...listing].map((job) => ({
+        job_id: job.job_id ?? null,
+        submission_id: job.submission_id,
+        status: job.status,
+        metadata: job.metadata ?? {},
+        start_time: job.start_time ?? null,
+        end_time: job.end_time ?? null,
+      }))
+      return reply(
+        { result: true, msg: '', data: { result: { result: rows, total: rows.length, num_after_truncation: rows.length, partial_failure_warning: '' } } },
+        200,
+      )
+    }
+
     if (method === 'GET' && path === '/api/v0/tasks') {
       const jobId = url.searchParams.get('filter_values') ?? ''
       const job = resolve(jobId)
@@ -280,6 +298,8 @@ export function createFakeRay({ onSucceeded, now = () => 1_700_000_000_000, dupl
     jobs,
     packages,
     requests,
+    /** Rows the listing should carry that this fake did not submit (other teams' work). */
+    listing,
     /** Script a job before it is submitted; the platform's `plan()` runs first, so this is a hook. */
     script(submissionId, spec) {
       scripts.set(submissionId, spec)

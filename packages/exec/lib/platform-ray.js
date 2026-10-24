@@ -332,6 +332,25 @@ export function createRayPlatform({
     return call('GET', path)
   }
 
+  /**
+   * Every job the cluster knows about — the legacy read-only listing (`GET /api/v0/jobs`).
+   *
+   * It is the only way to answer "is one of our jobs still running that the ledger never recorded",
+   * because a listing is the cluster's own state and there is no per-job route for "everything".
+   * Two things about its shape, both measured on Ray 2.59: it arrives in the same StateApiResponse
+   * envelope as `/api/v0/tasks`, and a row's `job_id` may be `null` while `submission_id` is always
+   * there. So the fields this adapter promises are exactly those two, plus `status` and `metadata`
+   * (where our marker travels) — anything else is passed through if present and never required.
+   *
+   * "We could not read it" is an answer: `{ok: false}` with the reason, never an empty list, because
+   * an empty list reads as "nothing of ours is running" to everything downstream.
+   */
+  function listingRows(document) {
+    const rows = document?.data?.result?.result ?? document?.result?.result ?? document?.jobs ?? document
+    if (!Array.isArray(rows)) return rows !== null && typeof rows === 'object' ? [rows] : []
+    return rows.filter((row) => row !== null && typeof row === 'object')
+  }
+
   async function fetchLogs(jobId) {
     const response = await call('GET', `/api/jobs/${encodeURIComponent(jobId)}/logs`)
     if (response.status !== 200) return undefined
@@ -538,7 +557,7 @@ export function createRayPlatform({
   return {
     name,
 
-    async submit({ submissionId, candidateId, gpuHours } = {}) {
+    async submit({ submissionId, candidateId, gpuHours, round } = {}) {
       if (typeof submissionId !== 'string' || submissionId === '') {
         throw new TypeError('submit needs a submissionId — it is the idempotency key')
       }
@@ -558,7 +577,9 @@ export function createRayPlatform({
         }
       }
 
-      const planned = plan({ candidateId, submissionId, gpuHours }) ?? {}
+      // `round` is what the plan needs to write the job's marker (ticket 16): the ledger view matches
+      // our jobs in the cluster's listing by that marker, so it has to reach the submission.
+      const planned = plan({ candidateId, submissionId, gpuHours, round }) ?? {}
       if (planned.entrypoint === undefined) {
         throw new TypeError(`plan(${candidateId}) produced no entrypoint; there is nothing to submit`)
       }
@@ -744,6 +765,23 @@ export function createRayPlatform({
         submitted_at_ms: submittedAt,
         deadline_ms: wallDeadlineFrom(submittedAt),
       }
+    },
+
+    /**
+     * The cluster's whole job listing. Optional capability: `submit`/`poll`/`collect`/`find`/`cancel`
+     * stay the port, and a caller that needs it asks `platform.list` (see `jobs.js` in core, which
+     * turns the answer into "ours / orphan / foreign" — this adapter does not decide that).
+     */
+    async list() {
+      const response = await call('GET', '/api/v0/jobs')
+      if (response.status !== 200) {
+        return {
+          ok: false,
+          status: response.status,
+          message: response.transport_error ?? `the dashboard answered ${response.status} for the job listing`,
+        }
+      }
+      return { ok: true, jobs: listingRows(response.json) }
     },
 
     async cancel(jobId) {
