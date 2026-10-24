@@ -173,6 +173,7 @@ pack, and a pack missing a part is refused by name at boot instead of running ha
 | `budget.max_runtime_hours` / `.judge_tokens` | `0` (unlimited) / `false` | wall-clock gate; tokens are recorded, never judged |
 | `metrics.primary` / `.objectives` | the pack's contract | recorded at INIT; cross-checked against the round contract |
 | `poll.base_ms` / `.max_ms` / `.grace_attempts` | `1000` / `60000` / `2` | job poll backoff |
+| `gate.max_attempts` / `.base_ms` / `.max_ms` | `3` / `1000` / `60000` | how many times gate two may run before a candidate stops, and the backoff between attempts; `1` restores a single shot |
 | `limits.max_wall_ms` / `.max_idle_ms` | `3600000` / `1800000` | per-job wall-clock and silence deadlines |
 
 Validation is `packages/core/lib/config.js` and it runs once at boot. The package exports no `Config`
@@ -317,6 +318,12 @@ shipped code is plain ESM with no build step.
   `round_reflect`. Each call is a separate process with a prompt rendered from a markdown skill plus
   facts as JSON; the answer shape lives in code next to its parser, so a markdown example cannot drift
   away from what the judge accepts.
+- **Gate two consumes a structured verdict, not an opinion.** The candidate's diff is checked by the
+  kernel — syntax, the domain pack's adjustable-surface whitelist, residual conflict markers — and the
+  adversarial review must answer accept or reject; an answer that does not parse is a failure. When the
+  review accepts over a check that failed the record is a `conflict` and the candidate stops. Each
+  attempt is a numbered record carrying the sha256 of the bytes it checked, so it can be recomputed
+  rather than trusted, and a plain "no" is retried on a backoff instead of killing the candidate.
 - **Read-only is structural, not a promise.** Every read opens its own `readOnly` SQLite handle and
   closes it: the tool physically cannot record a fact, two browser windows cannot interfere, and the
   page works with every session closed — it needs the workspace directory and nothing else.

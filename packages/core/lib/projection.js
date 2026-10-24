@@ -29,7 +29,9 @@ const FOUR_STATES = ['ok', 'missing', 'conflict', 'invalid']
 export function summariseEvent(event) {
   const payload = event.payload ?? {}
   const parts = []
-  for (const key of ['phase', 'status', 'verdict', 'reason', 'message', 'reject_reason', 'job_id', 'engine']) {
+  // `attempt` is here because gate two is retried: without it a timeline showing three refusals
+  // cannot say which try failed, and "why did this stop here?" is answered by exactly that.
+  for (const key of ['phase', 'status', 'attempt', 'verdict', 'reason', 'message', 'reject_reason', 'job_id', 'engine']) {
     if (payload[key] !== undefined && payload[key] !== '') parts.push(`${key}=${payload[key]}`)
   }
   if (payload.round !== undefined) parts.push(`round=${payload.round}`)

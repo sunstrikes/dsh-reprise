@@ -17,6 +17,7 @@ import { isBlocking, isTerminal, validateArtifact, validateCandidate } from '@ds
 import { judgeTimeout } from '@dsh-reprise/exec'
 
 import { autoResumeIfClear, budgetOf, canDispatch, evaluate, pause } from './budget.js'
+import { gateSettings, recheckReport } from './gate.js'
 import { consumePending } from './intents.js'
 import { stepWorkspace } from './rounds.js'
 import { evaluateStop } from './stop.js'
@@ -341,40 +342,84 @@ async function land(ports, candidateId, state) {
   )
   ports.crashAt?.('after_binding')
 
+  // The diff git reported, and the tree it lives in, are what gate two checks later. Recording them
+  // here as facts — not re-deriving them at VERIFY — keeps "which files this candidate changed" the
+  // runner's answer rather than something the gate could observe differently a few ticks later.
+  const files = Array.isArray(result.files) ? result.files : []
+  const tree = typeof worktreeDir === 'string' ? worktreeDir : undefined
   transition(
     ports,
     candidateId,
     'land_done',
-    { engine: result.engine, files_changed: result.files_changed ?? 0 },
+    { engine: result.engine, files, files_changed: result.files_changed ?? files.length, worktree_dir: tree ?? null },
     'BUILD',
+    { files, ...(tree === undefined ? {} : { worktree_dir: tree }) },
   )
   return { candidateId, phase: 'LAND', action: `landed by ${result.engine} -> build` }
 }
 
+/**
+ * VERIFY: gate two, from two pieces of evidence to one routing decision.
+ *
+ * The report is the kernel's (`judge.verify` builds it from the worktree through `gate.js`), the
+ * review is the one model call in this phase, and the artifact is the record of both. Then exactly
+ * four things can happen, and keeping them apart is the whole point:
+ *
+ *   both agree to pass      → freeze `verify_gate`, move to SUBMIT_QUEUED (the only way in)
+ *   both agree to fail      → a *plain* failure: retried on a backoff, never given a four-state
+ *                             status, and only the attempt budget ends the candidate
+ *   the two disagree        → the contract returns `conflict`; the candidate stops with both facts
+ *   the artifact is malformed → `invalid` / `missing`, and the candidate stops with that status
+ *
+ * Before a second attempt is asked for, the first attempt's record is recomputed from its own
+ * evidence. That is what "recomputable" buys: a record that cannot be reproduced from the bytes it
+ * claims to have checked is a contradiction (`conflict`), while a tree that simply moved on is
+ * `stale` — and that is precisely why a retry can legitimately pass.
+ */
 async function verify(ports, candidateId, state) {
-  const { store, clock, judge } = ports
+  const { store, clock, judge, log } = ports
+  const gate = gateSettings(ports.config)
+  const now = clock.now()
   const parent = store.binding(candidateId, 'parent_binding')
+  const attempt = (state.gate_attempts ?? 0) + 1
+  const files = Array.isArray(state.files) ? state.files : []
+  const worktreeDir = state.worktree_dir ?? ports.worktreeDir
+  const record = `verify_verdict:${candidateId}:a${attempt}`
 
-  const artifact = await judge.verify({ candidateId, state, parent, now: clock.now() })
+  if (attempt > 1) {
+    const prior = priorRecord(ports, candidateId, attempt - 1)
+    if (prior !== undefined) {
+      const recheck = recheckReport(prior, { worktreeDir })
+      log?.(`${candidateId}: attempt ${attempt - 1} rechecks ${recheck.status}`)
+      if (recheck.status === 'conflict') {
+        return reject(
+          ports,
+          candidateId,
+          'VERIFY',
+          { status: 'conflict', message: `gate attempt ${attempt - 1} ${recheck.message}` },
+          { attempt, attempts: attempt, artifact: `verify_verdict:${candidateId}:a${attempt - 1}` },
+        )
+      }
+    }
+  }
+
+  const artifact = await judge.verify({ candidateId, state, parent, now, files, worktreeDir, attempt })
   const verdict = validateArtifact('verify_verdict', artifact)
 
   if (isBlocking(verdict)) {
     // Fail closed, but say which of the four states it was — that is the whole point of having four.
-    return reject(ports, candidateId, 'VERIFY', verdict, { artifact: `verify_verdict:${candidateId}` })
+    // A contradiction is not retried: re-asking the same two facts cannot resolve which one is right.
+    return reject(ports, candidateId, 'VERIFY', verdict, { attempt, attempts: attempt, artifact: record })
   }
 
   if (artifact.passed !== true) {
-    return reject(
-      ports,
-      candidateId,
-      'VERIFY',
-      { message: 'the verify gate did not pass' },
-      {
-        artifact: `verify_verdict:${candidateId}`,
-        review: artifact.reviewer ?? null,
-        failed_checks: (artifact.checks ?? []).filter((check) => check.result === 'fail').map((check) => check.name),
-      },
-    )
+    return failAttempt(ports, candidateId, {
+      gate,
+      attempt,
+      record,
+      message: `the verify gate did not pass (attempt ${attempt}/${gate.max_attempts}): ${describeGateFailure(artifact)}`,
+      artifact,
+    })
   }
 
   store.freezeBinding(
@@ -383,6 +428,8 @@ async function verify(ports, candidateId, state) {
     {
       parent_id: parent?.parent_id,
       passed: true,
+      attempt,
+      record,
       decided_at_ms: artifact.decided_at_ms,
       checks: artifact.checks?.length ?? 0,
     },
@@ -394,10 +441,72 @@ async function verify(ports, candidateId, state) {
     ports,
     candidateId,
     'gate_result',
-    { phase: 'VERIFY', status: 'ok', passed: true, message: '' },
+    { phase: 'VERIFY', status: 'ok', passed: true, attempt, message: '', artifact: record },
     'SUBMIT_QUEUED',
+    { gate_attempts: attempt },
   )
-  return { candidateId, phase: 'VERIFY', action: 'gate pass -> submit_queued' }
+  return { candidateId, phase: 'VERIFY', action: `gate pass on attempt ${attempt} -> submit_queued` }
+}
+
+/**
+ * The previous attempt's record, read back from the artifact store.
+ *
+ * Absent is honest: a run with no artifact store (a test double, a workspace whose artifacts were
+ * pruned) has nothing to recompute, and inventing one would make the recheck vacuous.
+ */
+function priorRecord(ports, candidateId, attempt) {
+  if (typeof ports.artifacts?.read !== 'function') return undefined
+  return ports.artifacts.read(`verify_verdict:${candidateId}:a${attempt}`)
+}
+
+/** Why the gate said no, in one line: the review's words, or the checks that failed. */
+function describeGateFailure(artifact) {
+  const failed = (artifact.checks ?? []).filter((check) => check.result === 'fail').map((check) => check.name)
+  const review = artifact.reviewer
+  if (failed.length > 0) return `failed checks: ${failed.join(', ')}`
+  if (review?.rationale !== undefined) return `the adversarial review rejected it: ${review.rationale}`
+  return 'the adversarial review rejected it'
+}
+
+/**
+ * A failed attempt that is not (yet) a rejected candidate.
+ *
+ * The distinction the four states exist for: nothing here is malformed, so the event carries no
+ * four-state `status` — it carries the attempt number, the message and the record. Only when the
+ * attempt budget is spent does the candidate stop, and even then the reason is an exhausted limit.
+ */
+function failAttempt(ports, candidateId, { gate, attempt, record, message, artifact }) {
+  const { store, clock } = ports
+  const detail = {
+    phase: 'VERIFY',
+    attempt,
+    attempts: attempt,
+    passed: false,
+    message,
+    artifact: record,
+    review: artifact.reviewer ?? null,
+    failed_checks: (artifact.checks ?? []).filter((check) => check.result === 'fail').map((check) => check.name),
+    next_attempt_in_ms: attempt < gate.max_attempts ? Math.min(gate.base_ms * 2 ** (attempt - 1), gate.max_ms) : null,
+  }
+
+  if (attempt >= gate.max_attempts) {
+    // Out of attempts is an exhausted limit, not a malformed artifact: reject with the message and
+    // no four-state status at all.
+    return reject(ports, candidateId, 'VERIFY', { message }, detail)
+  }
+
+  const delay = detail.next_attempt_in_ms
+  transition(
+    ports,
+    candidateId,
+    'gate_result',
+    { ...detail, status: 'fail' },
+    'VERIFY',
+    // The counter is the only thing state keeps: the attempt's facts are the event and the record,
+    // and a second copy in state would be a second account of the same gate.
+    { gate_attempts: attempt, next_action_at: clock.now() + delay },
+  )
+  return { candidateId, phase: 'VERIFY', action: `gate attempt ${attempt} failed, retry in ${delay}ms` }
 }
 
 async function submit(ports, candidateId, state) {
@@ -593,8 +702,17 @@ export function foldEvents(store, candidateId) {
   const state = { ...(store.getState(candidateId, 'phase', {}) ?? {}) }
   for (const event of pending) {
     if (event.event_type === 'gate_result') {
-      state.phase = event.payload?.status === 'ok' ? 'SUBMIT_QUEUED' : 'REJECTED'
-      if (state.phase === 'REJECTED') state.reject_reason = event.payload?.message
+      // Three outcomes, not two: `ok` is the pass, `fail` is a *retryable* attempt that leaves the
+      // candidate in VERIFY, and anything else is a four-state conclusion that did stop it.
+      const status = event.payload?.status
+      if (status === 'ok') state.phase = 'SUBMIT_QUEUED'
+      else if (status !== 'fail') {
+        state.phase = 'REJECTED'
+        state.reject_reason = event.payload?.message
+      }
+      if (Number.isSafeInteger(event.payload?.attempt)) {
+        state.gate_attempts = Math.max(state.gate_attempts ?? 0, event.payload.attempt)
+      }
       continue
     }
     const phase = PHASE_FROM_EVENT[event.event_type]
@@ -602,6 +720,14 @@ export function foldEvents(store, candidateId) {
     if (event.event_type === 'candidate_created') {
       if (state.round === undefined) state.round = event.payload?.round
       if (state.hypothesis === undefined) state.hypothesis = event.payload?.hypothesis
+    }
+    if (event.event_type === 'land_done') {
+      // The diff gate two will check, and the tree it lives in: folded back so a crash between the
+      // event and the state row does not leave VERIFY checking an empty file list against nowhere.
+      if (!Array.isArray(state.files) && Array.isArray(event.payload?.files)) state.files = event.payload.files
+      if (state.worktree_dir === undefined && typeof event.payload?.worktree_dir === 'string') {
+        state.worktree_dir = event.payload.worktree_dir
+      }
     }
     if (event.event_type === 'candidate_rejected') state.reject_reason = event.payload?.reject_reason
   }
