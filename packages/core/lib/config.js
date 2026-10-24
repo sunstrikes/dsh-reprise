@@ -22,9 +22,11 @@
 
 import { resolve as resolvePath } from 'node:path'
 
+import { MODEL_KINDS } from '@dsh-reprise/exec/model'
+
 import { DomainPackError, executorProblems, loadDomainPack } from './domain.js'
 import { bindingOf, resolveMetricContract } from './metric-contract.js'
-import { configWarnings } from './warnings.js'
+import { configWarnings, modelPortDeclared } from './warnings.js'
 
 /** Five seconds: the cadence ticket 01 measured in the real host (78 beats / 415 s, drift ≤ 3 ms). */
 export const DEFAULT_INTERVAL_MS = 5_000
@@ -119,12 +121,24 @@ export function resolveConfig(raw = {}, { cwd = process.cwd(), loadDomain = load
     }
   }
 
+  // The judgement phases reach a model through one command adapter. `kind` names a shipped CLI
+  // (`dsh --profile headless`, `claude -p`); `command` names a wrapper of your own. One of them must
+  // be there, because "no model port" is a run that stalls at the first round rather than a run that
+  // degrades.
   const model = raw.model
-  if (model !== undefined && (!isObject(model) || !isCommand(model.command))) {
-    problems.push('model.command must be a non-empty argv array — it is how the judgement phases reach a model')
+  if (model !== undefined) {
+    if (!isObject(model)) problems.push('model must be an object with a kind or a command')
+    else if (model.kind === undefined && !isCommand(model.command)) {
+      problems.push('model must name a kind (dsh, claude or command) or a non-empty model.command argv')
+    } else if (model.kind !== undefined && !MODEL_KINDS.includes(model.kind)) {
+      problems.push(`model.kind must be one of ${MODEL_KINDS.join(', ')} (got ${JSON.stringify(model.kind)})`)
+    } else if ((model.kind ?? 'command') === 'command' && !isCommand(model.command)) {
+      problems.push('model.command must be a non-empty argv array when model.kind is command')
+    }
   }
+  const hasModel = isObject(model) && (modelPortDeclared(model) === true)
 
-  if (raw.rounds !== undefined && raw.rounds !== false && (model === undefined || !isCommand(model.command))) {
+  if (raw.rounds !== undefined && raw.rounds !== false && !hasModel) {
     // ROUND_PLAN and ROUND_REFLECT are model entries; without a port the run stalls at the first
     // round and only the log says why. Refusing at boot is the same information, earlier.
     problems.push(

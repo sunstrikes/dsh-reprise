@@ -1,6 +1,6 @@
 # Extending
 
-Three extension points, one page each. All are designed so that adding something does not require
+Four extension points, one page each. All are designed so that adding something does not require
 reading the phase machine, and each is held by a test rather than by a convention.
 
 ---
@@ -89,19 +89,28 @@ port is JSON in / JSON out and never calls back into the kernel.
 
 ```js
 platform.submit({ submissionId, candidateId, gpuHours }) → { job_id, state?, harness?, deadline_ms?, duplicate? }
-platform.poll(jobId)                                    → { state, metrics?, error_class?, error_detail?, timing? }
-platform.collect(jobId)                                 → { state, metrics?, error_class?, artifacts[] }
+platform.poll(jobId)                                    → { job_id, state, metrics?, error_class?, error_detail?, timing? }
+platform.collect(jobId | pollResult)                    → { state, metrics?, error_class?, artifacts[] }
 platform.find(candidateId)                              → { job_id, state, harness?, submitted_at_ms?, deadline_ms? } | undefined
 platform.cancel(jobId)                                  → { accepted, state_after }
 ```
 
 `submit` / `poll` / `collect` are the job's life. `find` is what makes a restart continue instead of
-resubmitting; `cancel` is what makes a timeout stop the spend. `assertPlatform(impl)` refuses an
+resubmitting; `cancel` is what makes a timeout stop the spend. `collect` takes the job id **or** the poll result that carries one (`resolveJobId()`), because that
+result is what a caller is holding when it wants the artifacts; anything else is a `TypeError`, never
+a `lost`. `assertPlatform(impl)` refuses an
 implementation missing any of the five — call it at construction, so a typo is a startup log line and
 not a candidate stuck at `SUBMIT`.
 
 `submit().deadline_ms` is a **duration**; `find().deadline_ms` is **absolute**. That asymmetry is
 load-bearing and documented in `packages/exec/README.md`.
+
+`submit()` has one optional input beyond the port's minimum, and it exists because an execution
+surface may not share a filesystem with you: `plan()` returns `{entrypoint, worktreeDir, baseRef}` and
+the adapter packs `worktreeDir`, uploads it, and points `runtime_env.working_dir` at the package
+(`packages/exec/lib/archive.js`). A plan with no `worktreeDir` ships nothing — that is the shape for a
+surface whose nodes already hold the code. See "The candidate's code travels with the job" in
+`packages/exec/README.md` for the request sequence, the exclusion list, and the two inventory checks.
 
 ## The vocabulary is closed
 
@@ -186,10 +195,71 @@ sees the port.
 ## What we have not verified
 
 There is no real cluster in this repository. Ray is tested by replaying recorded response shapes through
-an injected `fetch`, and the one thing to check first on a real deployment is the metrics mount: if the
+an injected transport (`node:http`, because the dashboard's CSRF guard refuses Node's global `fetch`
+for writes), and the one thing to check first on a real deployment is the metrics mount: if the
 shared directory is not shared, every job fails as `data` rather than reporting a fabricated number.
 That is the safe failure, and it is also the most confusing one to debug, so check it before anything
-else.
+else. On a cluster with **no** shared mount at all, do not configure a metrics directory — a packaged
+job reports through `REPRISE_METRICS {json}` on the driver log, which is the measured return channel.
+
+---
+
+# Reach a model (one page)
+
+The loop consults a model at exactly five call sites — LAND's briefing, VERIFY's adversarial review,
+CAND_ANALYZE, ROUND_PLAN, ROUND_REFLECT — and every one of them goes through
+`packages/exec/lib/model.js`. There is no second way in: a phase does not own a parser, and nothing in
+the kernel spawns a process.
+
+## The wire
+
+One question in, one answer out.
+
+```js
+// what the adapter runs (model.command, or model.kind: 'dsh' | 'claude')
+{ protocol: 'dsh-reprise/model-question@1',
+  call_site: 'verify', subject: 'r1-h2', ref: 'a2',
+  prompt: '<the rendered skill + facts + answer shape>',
+  facts: { /* frozen evidence, JSON */ },
+  answer_schema: '{"verdict": "accept" | "reject", ...}',
+  question_id: '<sha256 of the content above>' }
+```
+
+A `kind: 'command'` wrapper receives that object on stdin and must print **one JSON object** on stdout.
+`kind: 'dsh'` and `kind: 'claude'` invoke the shipped CLIs (`dsh --profile headless --json -`,
+`claude -p --output-format stream-json`) with the *prompt* as their task; the adapter reads the answer
+out of the final stream event, tolerating a fenced block or prose around it.
+
+`question_id` is a digest of the question's content — not a clock, not a counter — which is what makes
+"the same question asked twice" the same question.
+
+## The four ways to get no answer, and the one class they become
+
+`binary_missing`, `exit_non_zero`, `timeout`, `unparseable_answer` — plus `crash`,
+`stream_overflow`, `resource_exhausted` and `port_error` — are all `model_unavailable` with a `cause`
+for the operator. That is the whole contract a caller needs: `isModelUnavailable(error)` is true, no
+artifact was written, no candidate was rejected, and `packages/core/lib/model-failure.js` records one
+`model_unavailable` row in the ops log (`store.ops()`) and retries the phase on a backoff. A phase never
+waits for a model without a deadline (`model.timeout_ms`, default ten minutes).
+
+If you need a sixth engine, add a `kind` to `KINDS` in `packages/exec/lib/model.js` — an argv and a
+stdin renderer — and a case to `packages/exec/test/model.test.js`. Nothing in the kernel changes.
+
+## Where the call is kept
+
+`<workspace>/artifacts/model_call/<call site>/<subject>[/<ref>].json`:
+
+```json
+{ "schema_version": 1, "protocol": "dsh-reprise/model-question@1",
+  "question_id": "…", "call_site": "verify", "subject": "r1-h2", "ref": "a2",
+  "prompt": "…", "facts": { }, "answer_schema": "…",
+  "status": "answered" | "unavailable", "answer": { }, "response": "the model's own words",
+  "error_class": null, "cause": null, "message": null }
+```
+
+No timestamp and no sequence number: the record's identity is the question, so a repeat rewrites the
+same bytes instead of appending a second history. The audit panel (ticket 29) reads these files with
+the workspace directory and nothing else.
 
 ---
 

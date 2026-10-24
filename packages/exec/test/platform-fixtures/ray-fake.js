@@ -1,5 +1,13 @@
 /**
- * A fake Ray dashboard: real URLs, real envelopes, scripted outcomes.
+ * A fake Ray dashboard: real URLs, real envelopes, scripted outcomes, and — since the first live
+ * acceptance run — the dashboard's own CSRF guard.
+ *
+ * The guard is modelled because it is not a detail: `is_browser_request` treats a request as browser
+ * traffic when its `User-Agent` starts with `Mozilla` or any `Referer`/`Origin`/`Sec-Fetch-*` header
+ * is present, and refuses everything but a `GET` with `405 '<METHOD>' method not allowed for browser
+ * traffic`. Node's global `fetch` sends `sec-fetch-mode: cors`, so it is refused here exactly as the
+ * cluster refused it. The transport is `request({method, url, headers, body})` →
+ * `{status, headers, text}`, the same port the adapter takes.
  *
  * This file exists because of one hard fact about Ray OSS 2.4x: `JobDetails.error_type` is a
  * `TODO(aguo)` in the dashboard handler and never populated, while `TaskState.error_type` (from
@@ -49,11 +57,29 @@ export function createFakeRay({ onSucceeded, now = () => 1_700_000_000_000, dupl
   const jobs = new Map()
   const submissionJobs = new Map()
   const scripts = new Map()
+  // The package store, keyed by name: `PUT /api/packages/gcs/<name>.zip` is the only inbound channel
+  // for code on this cluster (no shared filesystem, no internet), so a fake that accepted a job whose
+  // `working_dir` names a package it never received would test the wrong half of the contract.
+  const packages = new Map()
   const requests = []
   let counter = 0
   let clock = now()
 
-  const reply = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: JSON_HEADERS })
+  const reply = (body, status = 200) => ({ status, headers: JSON_HEADERS, text: JSON.stringify(body) })
+
+  /**
+   * The guard, copied from `dashboard/optional_utils.py::is_browser_request` as measured on Ray 2.59:
+   * a browser user agent, or the presence of any of these headers, means "browser", and a browser may
+   * only GET. `Sec-Fetch-*` is the one undici sends on every request.
+   */
+  const looksLikeBrowser = (headers = {}) => {
+    for (const [rawName, value] of Object.entries(headers ?? {})) {
+      const name = rawName.toLowerCase()
+      if (name === 'referer' || name === 'origin' || name.startsWith('sec-fetch-')) return true
+      if (name === 'user-agent' && String(value).startsWith('Mozilla')) return true
+    }
+    return false
+  }
 
   const resolve = (ref) => jobs.get(ref) ?? jobs.get(submissionJobs.get(ref))
 
@@ -61,7 +87,11 @@ export function createFakeRay({ onSucceeded, now = () => 1_700_000_000_000, dupl
     // Field list and spelling copied from Ray's JobDetails JSON. `error_type` is always null here,
     // exactly as in OSS Ray: reading it is the bug this fake is built to catch.
     return {
-      job_id: job.job_id,
+      // Real Ray 2.59 answers `job_id: null` on the details route for some submissions (measured on
+      // the live cluster 2026-10-24: 42 of 129 rows in `GET /api/jobs/`). The submission id still
+      // addresses the job, which is why `script.nullJobId` exists: the duplicate path must return a
+      // reference the caller can poll, not a null.
+      job_id: job.script.nullJobId === true ? null : job.job_id,
       submission_id: job.submission_id,
       status: job.status,
       entrypoint: job.entrypoint,
@@ -112,11 +142,41 @@ export function createFakeRay({ onSucceeded, now = () => 1_700_000_000_000, dupl
     const url = new URL(request.url)
     const method = request.method.toUpperCase()
     const path = url.pathname
-    requests.push({ method, path, search: url.search, body: request.body })
+    requests.push({ method, path, search: url.search, body: request.body, headers: request.headers ?? {} })
+
+    if (method !== 'GET' && looksLikeBrowser(request.headers)) {
+      return reply({ detail: `'${method}' method not allowed for browser traffic.` }, 405)
+    }
+
+    const packageMatch = path.match(/^\/api\/packages\/([^/]+)\/([^/]+)$/)
+    if (method === 'PUT' && packageMatch !== null) {
+      const [, protocol, name] = packageMatch
+      if (protocol !== 'gcs') return reply({ detail: `unknown package protocol ${protocol}` }, 500)
+      if (!name.endsWith('.zip')) return reply({ detail: 'only .zip packages are accepted' }, 400)
+      packages.set(name, Buffer.from(request.body ?? []))
+      return reply({ [name]: `gcs://${name}` }, 200)
+    }
 
     if (method === 'POST' && (path === '/api/jobs/' || path === '/api/jobs')) {
       const body = JSON.parse(request.body ?? '{}')
       const submissionId = body.submission_id
+      // `JobSubmitRequest.__post_init__` (`ray/dashboard/modules/job/common.py`) requires every
+      // metadata value to be a `str` and answers 400 with this TypeError otherwise. The fake was
+      // looser than the cluster for two rounds — a float `gpu_hours` passed here and was refused on
+      // the real head — so the constraint is modelled rather than assumed.
+      for (const [key, value] of Object.entries(body.metadata ?? {})) {
+        if (typeof value !== 'string') {
+          const kind = value === null ? 'NoneType' : Array.isArray(value) ? 'list' : value === true || value === false ? 'bool' : typeof value === 'number' ? (Number.isInteger(value) ? 'int' : 'float') : 'dict'
+          return reply({ detail: `metadata values must be strings, got <class '${kind}'>`, metadata_key: key }, 400)
+        }
+      }
+      // Ray resolves `runtime_env.working_dir` through the package store. A gcs:// URI whose package
+      // was never uploaded fails the job at setup on the real cluster, so it fails the submission here.
+      const workingDir = body.runtime_env?.working_dir
+      if (typeof workingDir === 'string' && workingDir.startsWith('gcs://')) {
+        const name = workingDir.slice('gcs://'.length)
+        if (!packages.has(name)) return reply({ detail: `package ${name} was never uploaded` }, 400)
+      }
       if (submissionJobs.has(submissionId)) {
         // Both shapes are real: OSS Ray answers 400 with this `detail` string from job_manager's
         // `put_info(overwrite=False)`; a newer proxy in front of it answers 409. We handle both.
@@ -195,6 +255,12 @@ export function createFakeRay({ onSucceeded, now = () => 1_700_000_000_000, dupl
       const ref = decodeURIComponent(detailsMatch[1])
       const job = resolve(ref)
       if (job === undefined) return reply({ detail: `Job '${ref}' does not exist` }, 404)
+      // A submission the dashboard cannot answer for yet: user story 15's grace window, made real.
+      // `hideFromDetails` counts down, so the second submit's lookup misses while the POST still knows.
+      if (jobs.has(ref) === false && job.script.hideFromDetails > 0) {
+        job.script.hideFromDetails -= 1
+        return reply({ detail: `Job '${ref}' does not exist` }, 404)
+      }
       if (job.script.disturb === 'vanish' && job.disturbed === false) {
         job.disturbed = true
         return reply({ detail: `Job '${ref}' does not exist` }, 404)
@@ -212,17 +278,14 @@ export function createFakeRay({ onSucceeded, now = () => 1_700_000_000_000, dupl
 
   return {
     jobs,
+    packages,
     requests,
     /** Script a job before it is submitted; the platform's `plan()` runs first, so this is a hook. */
     script(submissionId, spec) {
       scripts.set(submissionId, spec)
     },
     job: (ref) => resolve(ref),
-    fetch: async (input, init = {}) =>
-      handle({
-        url: typeof input === 'string' ? input : input.url,
-        method: init.method ?? 'GET',
-        body: init.body,
-      }),
+    /** The adapter's transport port. No sockets: the fake *is* the wire. */
+    request: async ({ method = 'GET', url, headers, body }) => handle({ url, method, headers, body }),
   }
 }

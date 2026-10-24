@@ -18,6 +18,7 @@ import { judgeTimeout } from '@dsh-reprise/exec'
 
 import { autoResumeIfClear, budgetOf, canDispatch, evaluate, pause } from './budget.js'
 import { gateSettings, recheckReport } from './gate.js'
+import { MODEL_UNAVAILABLE, isModelUnavailable, isOutage, modelFailureOf, recordModelUnavailable } from './model-failure.js'
 import { consumePending } from './intents.js'
 import { stepWorkspace } from './rounds.js'
 import { evaluateStop } from './stop.js'
@@ -100,6 +101,38 @@ function reject(ports, candidateId, phase, verdict, extra = {}) {
     { reject_reason: verdict.message, rejected_at_phase: phase },
   )
   return { candidateId, phase, action: `rejected:${verdict.status}`, message: verdict.message }
+}
+
+/**
+ * No model answered: record it once, back off, and leave the candidate exactly where it is.
+ *
+ * The alternative — what each phase did before — is that an outage becomes a fact about a candidate:
+ * a rejected review, an empty analysis, a failed landing. Those are decisions nobody made, and they
+ * are permanent for a candidate whose only problem was that nobody was home. `model_attempts` is its
+ * own counter so an outage never consumes the gate's attempt budget.
+ */
+function modelOut(ports, candidateId, phase, state, failure) {
+  const { store, clock, log } = ports
+  const outcome = recordModelUnavailable({
+    store,
+    now: clock.now(),
+    step: phase.toLowerCase(),
+    subject: candidateId,
+    failure: modelFailureOf(failure),
+    attempts: state.model_attempts ?? 0,
+  })
+  advance(store, candidateId, phase, { next_action_at: outcome.next_action_at, model_attempts: outcome.attempts })
+  log?.(`${candidateId}: no model answered at ${phase} (${outcome.cause ?? failure?.cause ?? 'unknown cause'}) — ` +
+    `retrying in ${outcome.next_action_at - clock.now()} ms`)
+  return {
+    candidateId,
+    phase,
+    action: MODEL_UNAVAILABLE,
+    cause: outcome.cause,
+    message: outcome.message,
+    attempts: outcome.attempts,
+    next_action_at: outcome.next_action_at,
+  }
 }
 
 // ------------------------------------------------------------- workspace
@@ -317,6 +350,17 @@ async function land(ports, candidateId, state) {
     parentId,
   })
 
+  if (result.ok === false && isOutage(result.error_class)) {
+    // The implementer's model never answered: a missing binary, a timeout, a crash, a reply nobody
+    // could read. That is not this candidate's fault, and rejecting it would spend a landing to learn
+    // that the provider is down. One class for all five call sites, one place that records it.
+    return modelOut(ports, candidateId, 'LAND', state, {
+      error_class: MODEL_UNAVAILABLE,
+      cause: result.error_class ?? null,
+      message: result.message ?? 'the implementer never answered',
+    })
+  }
+
   if (result.ok === false) {
     // A landing that failed on a cross-check is a *conflict*: two accounts of the same edit
     // disagree. Everything else the harness refuses is an invalid artifact, not a contradiction.
@@ -403,7 +447,13 @@ async function verify(ports, candidateId, state) {
     }
   }
 
-  const artifact = await judge.verify({ candidateId, state, parent, now, files, worktreeDir, attempt })
+  let artifact
+  try {
+    artifact = await judge.verify({ candidateId, state, parent, now, files, worktreeDir, attempt })
+  } catch (error) {
+    if (!isModelUnavailable(error)) throw error
+    return modelOut(ports, candidateId, 'VERIFY', state, error)
+  }
   const verdict = validateArtifact('verify_verdict', artifact)
 
   if (isBlocking(verdict)) {
@@ -521,9 +571,23 @@ async function submit(ports, candidateId, state) {
       gpuHours: state.reserved_gpu_hours ?? budget.candidate_gpu_hours,
     })
   } catch (error) {
-    // A refused submission (cluster down, no resources, nothing to run) throws rather than
-    // inventing a job id. Hold the candidate here and try again later — do not reject it: this
-    // is the platform being unavailable, not the candidate being wrong.
+    // Two kinds of throw, and conflating them is a bug in both directions.
+    //
+    // `retryable === false` is the platform saying *this candidate cannot be shipped at all* — a
+    // tree over the package limit, or one whose archive disagrees with the runner's git diff. Waiting
+    // changes nothing about it, so it is a decision: reject the candidate and put the conclusion in
+    // the reason a person reads. Note what is deliberately absent: no `status`. Nothing is malformed
+    // (that would be `invalid`) and no two facts contradict each other in a way we can call
+    // `conflict` — the news is bad and the platform said why, which is not one of the four states
+    // (CODING_STANDARDS §2).
+    if (error?.retryable === false) {
+      return reject(ports, candidateId, 'SUBMIT', {
+        message: [error.conclusion, error.message].filter((part) => typeof part === 'string' && part !== '').join(': '),
+      })
+    }
+
+    // Everything else — cluster down, no resources, nothing to run — is the platform being
+    // unavailable, not the candidate being wrong. Hold the candidate here and try again later.
     const poll = pollConfig(config)
     const delay = Math.min(poll.base_ms * 2 ** Math.min((state.submit_attempts ?? 0) + 1, 10), poll.max_ms)
     const { seq } = emit(store, clock, candidateId, 'submit_refused', {
@@ -650,7 +714,13 @@ async function analyze(ports, candidateId, state) {
     }
   }
 
-  const artifact = await judge.analyze({ candidateId, state, job, collected, now: clock.now() })
+  let artifact
+  try {
+    artifact = await judge.analyze({ candidateId, state, job, collected, now: clock.now() })
+  } catch (error) {
+    if (!isModelUnavailable(error)) throw error
+    return modelOut(ports, candidateId, 'CAND_ANALYZE', state, error)
+  }
   const verdict = validateArtifact('analyze_report', artifact)
   if (isBlocking(verdict)) {
     return reject(ports, candidateId, 'CAND_ANALYZE', verdict, { artifact: `analyze_report:${candidateId}` })

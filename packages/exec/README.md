@@ -170,7 +170,7 @@ implementations — a local subprocess and Ray OSS — pass one conformance suit
 
 ```js
 const platform = createLocalPlatform({ rootDir, plan })          // no cluster, no GPU
-const platform = createRayPlatform({ fetch, plan, baseUrl, metricsDir }) // fetch is injected
+const platform = createRayPlatform({ plan, baseUrl, metricsDir }) // transport: node:http, injectable as `request`
 
 const submitted = await submitJob(platform, { submissionId, candidateId, gpuHours })
 const polled = await pollWithLimits({ platform, job, now: clock.now(), limits })   // poll + timeout policy
@@ -182,10 +182,18 @@ const canceled = await cancelJob(platform, submitted.job_id)
 | method | input | answer |
 |---|---|---|
 | `submit` | `{submissionId, candidateId, gpuHours}` | `{job_id, state?, harness?, deadline_ms?, duplicate?}` — `deadline_ms` is a **duration** |
-| `poll` | `jobId` | `{state, metrics?, error_class?, error_detail?, timing?}` |
-| `collect` | `jobId` | `{state, metrics?, error_class?, artifacts[]}` — `metrics` only for `succeeded` |
+| `poll` | `jobId` | `{job_id, state, metrics?, error_class?, error_detail?, timing?}` — the answer names its job |
+| `collect` | `jobId` **or the poll result** | `{state, metrics?, error_class?, artifacts[]}` — `metrics` only for `succeeded` |
 | `find` | `candidateId` | `{job_id, state, harness?, submitted_at_ms?, deadline_ms?}` or `undefined`; `deadline_ms` is **absolute** |
 | `cancel` | `jobId` | `{accepted, state_after}` — idempotent, `accepted: false` when already terminal |
+
+`poll()` names the job it is about, and every method that takes a job takes **either the id or the
+poll result** (`resolveJobId()`): calling `collect()` with the answer that just said `succeeded` is
+the natural next step, and doing it used to interpolate the object into the request path
+(`ray does not know job [object Object]`), get a 404, and report `lost` for a job that had just
+finished — the one wrong answer user story 20 is about. Anything that is neither a non-empty string
+nor an object carrying a `job_id` throws a `TypeError`; a malformed argument is a caller bug and is
+**never** spelled `lost`.
 
 `submitJob` / `pollJob` / `collectJob` / `findJob` / `cancelJob` are thin awaited wrappers that also
 **validate the answer** (`assertPlatform`, `assertPollResult`, … in `lib/platform.js`). Use them, not
@@ -243,6 +251,151 @@ plain `failed` lets a stop policy confuse "we gave up on it" with "the candidate
 resolve to `{duplicate: true, job_id: <the existing job>}`, and the caller goes straight to polling.
 It never retries onto another cluster: that is how one candidate gets two GPU bills. The kernel
 already records `duplicate` in the `submitted` event and moves to `MONITOR_POLL` either way.
+
+### The submission body is text where Ray says text
+
+`JobSubmitRequest.__post_init__` (`ray/dashboard/modules/job/common.py`) requires **every**
+`metadata` value to be a `str`; anything else is a `TypeError: metadata values must be strings, got
+<class 'float'>` and a `400` before a job exists — and `null` is not a string either. So `submit()`
+normalises the whole object rather than one field (`stringMetadata()`):
+
+| value | what goes on the wire |
+|---|---|
+| `string` | unchanged |
+| number, boolean | `String(value)` — `gpu_hours: 0.1` travels as `"0.1"`, and the ledger and a human both read it |
+| `undefined`, `null` | the **key is omitted**, because Ray accepts a missing key and refuses a `null` one |
+| object, array | throws a `TypeError` naming `metadata.<key>` — there is no faithful text form, and inventing one (JSON in a string) would be a format nothing reads back |
+
+`runtime_env.env_vars` is normalised the same way for the same reason. The fake dashboard implements
+this check (`400 metadata values must be strings, got <class 'float'>`), so a regression cannot pass
+the suite — the fake was looser than the cluster twice (the browser guard, then this), and the second
+time cost a live run.
+
+### The transport is `node:http`, not `fetch` — and that is not a preference
+
+The dashboard has a CSRF / DNS-rebinding guard (`dashboard/optional_utils.py::is_browser_request`):
+a request is **browser traffic** when its `User-Agent` starts with `Mozilla` **or when any
+`Referer` / `Origin` / `Sec-Fetch-*` header is present**, and browser traffic may only `GET`. Node's
+global `fetch` (undici) sends `sec-fetch-mode: cors` on every request, so it cannot write to this
+dashboard at all — `PUT /api/packages/gcs/…` and `POST /api/jobs/` both answer
+`405 '<METHOD>' method not allowed for browser traffic`. Measured on Ray 2.59 on 2026-10-24; the first
+live acceptance run of ticket 15 died on it.
+
+So every call goes over `lib/ray-http.js` — one transport for reads and writes, `node:http`/
+`node:https`, no dependency — with a plain `user-agent` and `Referer`/`Origin`/`Sec-Fetch-*` dropped
+even if a caller supplies them. It is a port: `createRayPlatform({ request })`, where
+
+```js
+request({ method, url, headers, body }) → { status, headers, text }
+```
+
+is what the fake dashboard implements in the tests (the fake also models the guard, so a browser-ish
+header set gets the same 405 the cluster gives). A 405 is never swallowed: the submit throws
+`ray rejected the submission: 405 … browser traffic …` (or the package equivalent) and no job is
+created, so a fixed transport can simply try again. `test/ray-http.test.js` proves the header set on a
+real localhost socket and runs a whole submission against a miniature dashboard that enforces the
+guard.
+
+### The candidate's code travels with the job (Ray)
+
+The nodes have **no shared filesystem** with us and **no internet**, so there is no directory to point
+a job at: the only inbound channel is the Job Submission API. A plan that names a worktree therefore
+makes `submit()` do three things before it writes anything:
+
+```js
+plan: ({ candidateId }) => ({
+  entrypoint: ['python3', 'train.py', '--config', 'config.py'],  // runs *inside* the package
+  worktreeDir: runner.worktreeFor(candidateId),                  // the tree to ship
+  baseRef: runner.baseRef,                                       // the runner's git authority
+  numGpus: 1,                                                    // → entrypoint_num_gpus
+})
+```
+
+1. **Pack** — `packCandidate()` (`lib/archive.js`) zips the whole worktree with the deterministic
+   encoder in `lib/zip.js`, leaving out the plugin's own fact plane (`*.db`, `*.db-wal`, `*.db-shm`,
+   `.mnemon/`, `.git`, `.reprise/` — the list is `FACT_PLANE_EXCLUSIONS`, data with a reason per
+   entry, and it is the only thing that decides what is dropped).
+2. **Upload** — `PUT /api/packages/gcs/<name>.zip`, where
+   `name = reprise-<submission-id-slug>-<sha256 of the archive>.zip`. Flat (a name with a slash
+   matches no route), `.zip` (Ray rejects anything else), content-addressed (two candidates never
+   overwrite each other's package; an unchanged tree never leaves a second object).
+3. **Submit** — `runtime_env.working_dir = "gcs://<name>.zip"` and the entrypoint
+   `<verifier> && <training>`, so the job runs *in the unpacked package* and reads the configuration
+   the candidate edited. `runtime_env.working_dir` belongs to the adapter: a plan that sets it is
+   refused. A packaged job is **not** given `REPRISE_METRICS_PATH` (a laptop path it cannot write);
+   it reports through `REPRISE_METRICS {json}` on the driver log.
+
+**What changed** stays the runner's git answer: `git diff --name-only <baseRef>` plus
+`git ls-files --others --exclude-standard`, run in the candidate worktree, neither touching the index
+(see `collectInventory()`; a test asserts the exact two subcommands and that the index and refs are
+unchanged). Untracked files are the *normal* shape of a structural candidate — a hypothesis that adds
+a module — so they are shipped, named in the receipt (`submit().packaging.untracked`) and named again
+in the manifest inside the package.
+
+The inventory is checked on both sides of the upload, and a disagreement is the contract's
+**`conflict`**, not `invalid`: nothing the candidate produced is malformed, two accounts of it simply
+do not match.
+
+| where | who compares | a mismatch means |
+|---|---|---|
+| before the upload | `compareInventories()` over the archive read back | the packer lost or mangled a path — `PackageRefusedError` with `conclusion: 'inventory_conflict'` |
+| after the unpack (on the node) | `.reprise/verify_inventory.py`, shipped in the package, run by the entrypoint | the tree that arrived is not the tree that was packed — `poll()` returns `state: 'failed', conflict: true, error_class: 'data'`, and the training never started (`&&`) |
+| never | — | an archive over `packaging.maxBytes` (default 64 MiB) or a path the archive cannot carry (a symlink) is `conclusion: 'archive_too_large'` / `'inventory_conflict'`, thrown **before** any upload and any job |
+
+`PackageRefusedError` carries `retryable: false`, because a tree that is too large or disagrees with
+its own diff does not get smaller by waiting. The kernel currently retries any thrown `submit()` with
+backoff (it cannot tell "cluster down" from "this candidate cannot ship"), so the same conclusion is
+re-raised every attempt — loud, but it is the kernel that should consume `retryable`.
+
+**The verifier is a Python file in `packages/exec/lib/`,** because the check has to run *on the node*,
+and `python3` is the one interpreter the measured cluster guarantees (`.scratch/notes/cluster-env.md`);
+there is no `node` on those nodes and no way to get one. It is shipped *inside the package* (never
+executed on the laptop) and invoked only by the entrypoint the adapter builds. The interpreter is
+data: `packaging.verify = { command: ['python3'] }`, and `verify: false` ships a bare tree — the
+in-process read-back in `packCandidate()` still runs, so a caller without a node-side interpreter
+keeps every JS-side guarantee and loses only the post-unpack one. It is tested two ways: the marker
+parser against scripted logs (`platform-package.test.js`), and — where a `python3` exists — by
+unpacking a real package and running the shipped script, which must pass untouched and fail on an
+altered file (the test skips, loudly, on a machine without the interpreter).
+
+**One `submission_id` is one package and one job.** `submit()` first asks the cluster whether it
+already owns that id (`GET /api/jobs/<submission_id>`, matching `metadata.candidate_id` so a slug
+collision cannot adopt a stranger's run) and answers `{duplicate: true}` without packing, uploading or
+POSTing. The old `409`/`400 already exists` path is kept for the race where the job exists but the
+details route cannot see it yet. Tests count requests rather than read flags: one `POST`, one `PUT`,
+`fake.jobs.size === 1`, `fake.packages.size === 1`.
+
+Measured against the live cluster (Ray 2.59, 2026-10-24), so the read is not an assumption:
+
+| request | answer |
+|---|---|
+| `GET /api/jobs/reprise-probe9-pkg` (finished job) | **200**, full details |
+| `GET /api/jobs/no-such-submission-xyz` | **404** `Job … does not exist` — the pre-check misses, so the submit proceeds |
+| `GET /api/jobs/<submission_id>/logs` | **200** `{"logs": …}` — the log read works by submission id too |
+| `job_id` in a details document | may be **`null`** (42 of 129 listed rows): the submission id is then the id that resolves, so `submit()`/`find()` return it rather than a null |
+
+That last row is why a duplicate can answer with the *submission id* instead of a `raysubmit_…` id:
+it is the reference the dashboard, the logs route and the poller all accept.
+
+#### A run against the measured cluster
+
+```json
+{
+  "domain": "examples/feed-structure",
+  "workspace": ".workspace/cluster",
+  "runner": { "repo": "model-repo", "dir": "worktrees", "base_ref": "HEAD" },
+  "executor": {
+    "kind": "ray",
+    "base_url": "http://10.92.7.207:8258",
+    "command": ["python3", "train.py", "--config", "config.json"],
+    "num_gpus": 1
+  },
+  "limits": { "max_wall_ms": 600000, "max_idle_ms": 600000 }
+}
+```
+
+`train.py` must print `REPRISE_METRICS {"metrics":{"auc":0.71}}` — on a cluster with no shared mount,
+the driver log is the return channel, and a job that exits 0 without a marker is a `data` failure.
 
 ### Ray: failure classification reads the task state
 
@@ -302,7 +455,7 @@ published contract, not our private tests.
 ### What is not verified here
 
 - **No real Ray cluster.** The conformance run replays recorded response shapes through the injected
-  `fetch` (JobDetails field names, the state-API `{result, msg, data: {result: {result: [...]}}}`
+  transport (JobDetails field names, the state-API `{result, msg, data: {result: {result: [...]}}}`
   envelope, 404 bodies, `{stopped}`). Whether `TaskState.error_type` is actually written when the
   *driver* dies is unverified here as well — the predecessor's research flags it as `[未做]`, and it
   matters only for driver-level crashes; task-level OOM/traceback is the documented case.

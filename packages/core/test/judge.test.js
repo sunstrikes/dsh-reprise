@@ -21,6 +21,8 @@ import test from 'node:test'
 
 import { validateArtifact } from '@dsh-reprise/contract'
 
+import { MODEL_UNAVAILABLE, isModelUnavailable } from '@dsh-reprise/exec/model'
+
 import { memoryArtifacts } from '../lib/artifacts.js'
 import { defaultStaticChecks } from '../lib/judge.js'
 import { FEED_PROMPTS_DIR, judgeFor } from './support/domain.js'
@@ -198,24 +200,32 @@ test('a model answer full of numbers is not a verdict, and none of its numbers s
   }
 })
 
-test('a model port failure fails closed instead of crashing the tick', async () => {
+test('a model port that throws is "no model answered", and no opinion is recorded', async () => {
+  const artifacts = memoryArtifacts()
   const model = scripted({ verify: new Error('upstream 503') })
-  const artifact = await judgeFor({ model: model.model }).verify(VERIFY_INPUT)
 
-  assert.equal(artifact.passed, false)
-  assert.equal(artifact.reviewer.verdict, 'reject')
-  assert.match(artifact.reviewer.rationale, /could not be obtained.*503/)
-  assert.deepEqual(validateArtifact('verify_verdict', artifact), { status: 'ok', message: '' })
+  await assert.rejects(
+    () => judgeFor({ model: model.model, artifacts }).verify(VERIFY_INPUT),
+    (error) => {
+      assert.ok(isModelUnavailable(error), 'the whole point: an outage is not one call site\'s private problem')
+      assert.equal(error.error_class, MODEL_UNAVAILABLE)
+      assert.match(error.message, /upstream 503/, 'the reason travels with the class, for the operator')
+      return true
+    },
+  )
+  assert.equal(artifacts.read('verify_verdict:c1'), undefined, 'an outage must not become "the review rejected it"')
 })
 
-test('an answer wrapped in prose and a fenced block is still read as the answer', async () => {
-  const model = scripted({
-    verify: 'Looking at this diff, I would accept it.\n\n```json\n{"verdict": "accept", "rationale": "no evaluation changes"}\n```\n',
-  })
-  const artifact = await judgeFor({ model: model.model }).verify(VERIFY_INPUT)
+test('a port that hands back prose has not answered, and the failure is the same closed class', async () => {
+  // Reading the answer out of a CLI's prose is the adapter's job (`@dsh-reprise/exec/model`,
+  // `readAnswer`). By the time a judgement gets here it either has an object or it has nothing —
+  // and "nothing" is one class, not a fifth way to fail.
+  const model = scripted({ verify: 'Looking at this diff, I would accept it.' })
 
-  assert.equal(artifact.reviewer.verdict, 'accept', 'a model that wraps its JSON in prose is normal, not an error')
-  assert.equal(artifact.passed, true)
+  await assert.rejects(
+    () => judgeFor({ model: model.model }).verify(VERIFY_INPUT),
+    (error) => isModelUnavailable(error) && error.cause === 'unparseable_answer',
+  )
 })
 
 // ------------------------------------------------------------- CAND_ANALYZE
@@ -282,13 +292,15 @@ test('a report with no measured metric is missing evidence, so the phase cannot 
   assert.match(verdict.message, /observed/)
 })
 
-test('a model port that never answered the analysis leaves the report incomplete, so the phase cannot advance', async () => {
+test('a model port that never answered the analysis reports the outage, not an empty finding', async () => {
+  const artifacts = memoryArtifacts()
   const model = scripted({ cand_analyze: new Error('rate limited') })
-  const artifact = await judgeWithBaseline(model).analyze(ANALYZE_INPUT)
 
-  const verdict = validateArtifact('analyze_report', artifact)
-  assert.equal(verdict.status, 'missing', 'no root cause was ever produced — that is missing, not malformed')
-  assert.match(verdict.message, /root_cause/)
+  await assert.rejects(
+    () => judgeWithBaseline(model, { artifacts }).analyze(ANALYZE_INPUT),
+    (error) => isModelUnavailable(error) && /rate limited/.test(error.message),
+  )
+  assert.equal(artifacts.read('analyze_report:c1'), undefined, 'no root cause was produced, and nothing claims one')
 })
 
 test('an empty root cause is a malformed report rather than a finding', async () => {

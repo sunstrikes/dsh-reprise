@@ -10,12 +10,14 @@
     "./harness": "./lib/harness.js",
     "./harness/claude": "./lib/harness-claude.js",
     "./harness/dsh": "./lib/harness-dsh.js",
+    "./model": "./lib/model.js",
     "./platform/local": "./lib/platform-local.js",
     "./platform/ray": "./lib/platform-ray.js",
     "./windows": "./lib/window-samples.js",
     "./cli/windows": "./lib/cli/windows.js",
     "./local-runner": "./lib/local-runner.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./archive": "./lib/archive.js"
   },
   "files": [
     "lib",
