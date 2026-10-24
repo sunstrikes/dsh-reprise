@@ -215,7 +215,9 @@ test('the model cannot contribute a check, only the review: an invented check li
 
 test('a review that does not answer accept or reject is a failure, and one failure is not a death', async () => {
   const { ports, store } = setup({
-    answers: ['I think it is fine, but I could not decide.\n\nScore: 0.82'],
+    // An answer that is structured but is not the enum the gate consumes. (A port that returns no
+    // object at all is a different event — a model outage — and is covered by test/model-failure.)
+    answers: [{ verdict: 'probably fine', rationale: 'I think it is fine, but I could not decide', score: 0.82 }],
     gate: { max_attempts: 2 },
   })
   await steps(ports, 3)
