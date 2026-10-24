@@ -34,12 +34,18 @@ defineArtifact({
     checkField(findings, value, 'passed', (input) => typeof input === 'boolean', 'must be a strict boolean')
     checkField(findings, value, 'checks', Array.isArray, 'must be an array')
     checkField(findings, value, 'decided_at_ms', isMilliseconds, 'must be a non-negative safe integer of milliseconds')
-    // Optional so that artifacts written before the gate kept an attempt sequence stay readable: absent
-    // means "the first and only attempt", which is what every one of them was.
-    if (value.attempt !== undefined) {
-      if (!Number.isSafeInteger(value.attempt) || value.attempt <= 0) {
-        findings.invalid.push('attempt must be a positive integer — a gate record without its place in the sequence cannot be recomputed')
-      }
+    // Optional-but-typed, and the typing is load-bearing: `loop.js` names each attempt's record after
+    // this number, so attempt 2 cannot overwrite attempt 1. A string or a zero here would either
+    // collide two records or name none. Absent is allowed only because artifacts written before the
+    // gate kept an attempt sequence must stay readable — every one of them was the first attempt.
+    if ('attempt' in value) {
+      checkField(
+        findings,
+        value,
+        'attempt',
+        (input) => Number.isSafeInteger(input) && input > 0,
+        'must be a positive integer — a gate record without its place in the sequence cannot be recomputed',
+      )
     }
 
     const checks = Array.isArray(value.checks) ? value.checks : []

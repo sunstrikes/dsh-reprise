@@ -379,6 +379,7 @@ a *write* handle to the fact plane, and a relative import of the read-only reade
 
 - [`CONTEXT.md`](CONTEXT.md) — the ten words the code depends on, with the precise meaning it assumes
 - [`docs/extending.md`](docs/extending.md) — add an executor; add an artifact kind
+- [`docs/windowed-samples.md`](docs/windowed-samples.md) — the one-row-per-window sample shape, its two adapters, and the window intersection rule
 - [`docs/license-audit.md`](docs/license-audit.md) — every dependency and borrowed idea, against Apache-2.0
 - [`docs/adr/0001-acceptance-is-a-reproduced-public-experiment.md`](docs/adr/0001-acceptance-is-a-reproduced-public-experiment.md) — what "done" means for this project
 - [`examples/feed-structure/README.md`](examples/feed-structure/README.md) — the worked scenario in detail
