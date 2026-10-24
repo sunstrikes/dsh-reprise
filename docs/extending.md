@@ -154,7 +154,8 @@ sees the port.
 ## What we have not verified
 
 There is no real cluster in this repository. Ray is tested by replaying recorded response shapes through
-an injected `fetch`, and the one thing to check first on a real deployment is the metrics mount: if the
+an injected transport (`node:http`, because the dashboard's CSRF guard refuses Node's global `fetch`
+for writes), and the one thing to check first on a real deployment is the metrics mount: if the
 shared directory is not shared, every job fails as `data` rather than reporting a fabricated number.
 That is the safe failure, and it is also the most confusing one to debug, so check it before anything
 else. On a cluster with **no** shared mount at all, do not configure a metrics directory — a packaged

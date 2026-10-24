@@ -170,7 +170,7 @@ implementations — a local subprocess and Ray OSS — pass one conformance suit
 
 ```js
 const platform = createLocalPlatform({ rootDir, plan })          // no cluster, no GPU
-const platform = createRayPlatform({ fetch, plan, baseUrl, metricsDir }) // fetch is injected
+const platform = createRayPlatform({ plan, baseUrl, metricsDir }) // transport: node:http, injectable as `request`
 
 const submitted = await submitJob(platform, { submissionId, candidateId, gpuHours })
 const polled = await pollWithLimits({ platform, job, now: clock.now(), limits })   // poll + timeout policy
@@ -243,6 +243,31 @@ plain `failed` lets a stop policy confuse "we gave up on it" with "the candidate
 resolve to `{duplicate: true, job_id: <the existing job>}`, and the caller goes straight to polling.
 It never retries onto another cluster: that is how one candidate gets two GPU bills. The kernel
 already records `duplicate` in the `submitted` event and moves to `MONITOR_POLL` either way.
+
+### The transport is `node:http`, not `fetch` — and that is not a preference
+
+The dashboard has a CSRF / DNS-rebinding guard (`dashboard/optional_utils.py::is_browser_request`):
+a request is **browser traffic** when its `User-Agent` starts with `Mozilla` **or when any
+`Referer` / `Origin` / `Sec-Fetch-*` header is present**, and browser traffic may only `GET`. Node's
+global `fetch` (undici) sends `sec-fetch-mode: cors` on every request, so it cannot write to this
+dashboard at all — `PUT /api/packages/gcs/…` and `POST /api/jobs/` both answer
+`405 '<METHOD>' method not allowed for browser traffic`. Measured on Ray 2.59 on 2026-10-24; the first
+live acceptance run of ticket 15 died on it.
+
+So every call goes over `lib/ray-http.js` — one transport for reads and writes, `node:http`/
+`node:https`, no dependency — with a plain `user-agent` and `Referer`/`Origin`/`Sec-Fetch-*` dropped
+even if a caller supplies them. It is a port: `createRayPlatform({ request })`, where
+
+```js
+request({ method, url, headers, body }) → { status, headers, text }
+```
+
+is what the fake dashboard implements in the tests (the fake also models the guard, so a browser-ish
+header set gets the same 405 the cluster gives). A 405 is never swallowed: the submit throws
+`ray rejected the submission: 405 … browser traffic …` (or the package equivalent) and no job is
+created, so a fixed transport can simply try again. `test/ray-http.test.js` proves the header set on a
+real localhost socket and runs a whole submission against a miniature dashboard that enforces the
+guard.
 
 ### The candidate's code travels with the job (Ray)
 
@@ -403,7 +428,7 @@ published contract, not our private tests.
 ### What is not verified here
 
 - **No real Ray cluster.** The conformance run replays recorded response shapes through the injected
-  `fetch` (JobDetails field names, the state-API `{result, msg, data: {result: {result: [...]}}}`
+  transport (JobDetails field names, the state-API `{result, msg, data: {result: {result: [...]}}}`
   envelope, 404 bodies, `{stopped}`). Whether `TaskState.error_type` is actually written when the
   *driver* dies is unverified here as well — the predecessor's research flags it as `[未做]`, and it
   matters only for driver-level crashes; task-level OOM/traceback is the documented case.

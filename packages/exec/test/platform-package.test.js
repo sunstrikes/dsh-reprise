@@ -60,7 +60,7 @@ function packagedWorld(t, { packaging = {}, entrypoint, worktreeDir, metricsDir 
   const fake = createFakeRay()
   const platform = createRayPlatform({
     baseUrl: 'http://ray.fake:8265',
-    fetch: fake.fetch,
+    request: fake.request,
     metricsDir: metricsDir ?? join(runner.root, 'metrics'),
     plan: ({ candidateId }) => ({
       entrypoint: entrypoint ?? ['python3', 'train.py', '--config', 'config.py'],
@@ -181,7 +181,7 @@ test('a change the archive cannot carry is a conflict that names the path, not a
   const fake = createFakeRay()
   const platform = createRayPlatform({
     baseUrl: 'http://ray.fake:8265',
-    fetch: fake.fetch,
+    request: fake.request,
     plan: ({ candidateId }) => ({
       entrypoint: ['python3', 'train.py'],
       worktreeDir: runner.worktreeDir,
@@ -221,7 +221,7 @@ test('a plan that names its own working_dir is refused: the adapter owns what th
   const fake = createFakeRay()
   const platform = createRayPlatform({
     baseUrl: 'http://ray.fake:8265',
-    fetch: fake.fetch,
+    request: fake.request,
     plan: () => ({
       entrypoint: ['python3', 'train.py'],
       worktreeDir: runner.worktreeDir,
@@ -245,7 +245,7 @@ test('a plan that names no worktree ships nothing — the shared-code deployment
   const fake = createFakeRay({ onSucceeded: (job) => writeFileSync(join(metricsDir, `${job.submission_id}.metrics.json`), '{"metrics":{"auc":0.6}}') })
   const platform = createRayPlatform({
     baseUrl: 'http://ray.fake:8265',
-    fetch: fake.fetch,
+    request: fake.request,
     metricsDir,
     plan: () => ({ entrypoint: ['python3', 'train.py'], metadata: {} }),
   })

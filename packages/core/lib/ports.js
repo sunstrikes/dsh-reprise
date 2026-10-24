@@ -218,7 +218,9 @@ export function createPlatform(config, context) {
   }
   if (executor.kind === 'ray') {
     return createRayPlatform({
-      fetch: globalThis.fetch,
+      // No `fetch`: the dashboard's CSRF guard refuses Node's global fetch for writes (undici sends
+      // `sec-fetch-mode: cors`, which Ray reads as browser traffic). The adapter defaults to
+      // `node:http`; see `packages/exec/lib/ray-http.js`.
       plan,
       baseUrl: executor.base_url,
       metricsDir: resolve(context.workspaceDir, executor.metrics_dir ?? 'metrics'),

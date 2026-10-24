@@ -1,5 +1,13 @@
 /**
- * A fake Ray dashboard: real URLs, real envelopes, scripted outcomes.
+ * A fake Ray dashboard: real URLs, real envelopes, scripted outcomes, and — since the first live
+ * acceptance run — the dashboard's own CSRF guard.
+ *
+ * The guard is modelled because it is not a detail: `is_browser_request` treats a request as browser
+ * traffic when its `User-Agent` starts with `Mozilla` or any `Referer`/`Origin`/`Sec-Fetch-*` header
+ * is present, and refuses everything but a `GET` with `405 '<METHOD>' method not allowed for browser
+ * traffic`. Node's global `fetch` sends `sec-fetch-mode: cors`, so it is refused here exactly as the
+ * cluster refused it. The transport is `request({method, url, headers, body})` →
+ * `{status, headers, text}`, the same port the adapter takes.
  *
  * This file exists because of one hard fact about Ray OSS 2.4x: `JobDetails.error_type` is a
  * `TODO(aguo)` in the dashboard handler and never populated, while `TaskState.error_type` (from
@@ -57,7 +65,21 @@ export function createFakeRay({ onSucceeded, now = () => 1_700_000_000_000, dupl
   let counter = 0
   let clock = now()
 
-  const reply = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: JSON_HEADERS })
+  const reply = (body, status = 200) => ({ status, headers: JSON_HEADERS, text: JSON.stringify(body) })
+
+  /**
+   * The guard, copied from `dashboard/optional_utils.py::is_browser_request` as measured on Ray 2.59:
+   * a browser user agent, or the presence of any of these headers, means "browser", and a browser may
+   * only GET. `Sec-Fetch-*` is the one undici sends on every request.
+   */
+  const looksLikeBrowser = (headers = {}) => {
+    for (const [rawName, value] of Object.entries(headers ?? {})) {
+      const name = rawName.toLowerCase()
+      if (name === 'referer' || name === 'origin' || name.startsWith('sec-fetch-')) return true
+      if (name === 'user-agent' && String(value).startsWith('Mozilla')) return true
+    }
+    return false
+  }
 
   const resolve = (ref) => jobs.get(ref) ?? jobs.get(submissionJobs.get(ref))
 
@@ -120,7 +142,11 @@ export function createFakeRay({ onSucceeded, now = () => 1_700_000_000_000, dupl
     const url = new URL(request.url)
     const method = request.method.toUpperCase()
     const path = url.pathname
-    requests.push({ method, path, search: url.search, body: request.body })
+    requests.push({ method, path, search: url.search, body: request.body, headers: request.headers ?? {} })
+
+    if (method !== 'GET' && looksLikeBrowser(request.headers)) {
+      return reply({ detail: `'${method}' method not allowed for browser traffic.` }, 405)
+    }
 
     const packageMatch = path.match(/^\/api\/packages\/([^/]+)\/([^/]+)$/)
     if (method === 'PUT' && packageMatch !== null) {
@@ -249,11 +275,7 @@ export function createFakeRay({ onSucceeded, now = () => 1_700_000_000_000, dupl
       scripts.set(submissionId, spec)
     },
     job: (ref) => resolve(ref),
-    fetch: async (input, init = {}) =>
-      handle({
-        url: typeof input === 'string' ? input : input.url,
-        method: init.method ?? 'GET',
-        body: init.body,
-      }),
+    /** The adapter's transport port. No sockets: the fake *is* the wire. */
+    request: async ({ method = 'GET', url, headers, body }) => handle({ url, method, headers, body }),
   }
 }

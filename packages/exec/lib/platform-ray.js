@@ -1,12 +1,15 @@
 /**
- * The Ray executor: Ray OSS jobs over the dashboard HTTP API, with `fetch` injected.
+ * The Ray executor: Ray OSS jobs over the dashboard HTTP API, with the transport injected.
  *
  * Two things here are not stylistic:
  *
- *  1. **`fetch` is a required port, not `globalThis.fetch`.** There is no Ray cluster on a laptop
- *     and there will not be one in CI, so the only way this file can be tested is against a fake
- *     that replays the shapes the dashboard really returns. An implementation that reaches for the
- *     ambient network cannot be held to its contract.
+ *  1. **The transport is a required port, and it is `node:http`, not `globalThis.fetch`.** There is
+ *     no Ray cluster on a laptop and there will not be one in CI, so the only way this file can be
+ *     tested is against a fake that replays the shapes the dashboard really returns. And `fetch`
+ *     cannot talk to this dashboard at all: undici sends `sec-fetch-mode: cors` on every request,
+ *     Ray's CSRF guard reads that as browser traffic and refuses anything but a `GET` with
+ *     `405 '<METHOD>' method not allowed for browser traffic` (measured 2026-10-24; see
+ *     `lib/ray-http.js`).
  *  2. **Failure classification reads `/api/v0/tasks`, not `JobDetails.error_type`.** In OSS Ray the
  *     job-level `error_type` is a `TODO` in the dashboard handler and is never populated; a
  *     classifier built on it is a classifier that always answers "unknown" while looking
@@ -33,6 +36,7 @@ import {
   packageNameFor,
 } from './archive.js'
 import { DEFAULTS, TERMINAL_STATES, safeSlug } from './platform.js'
+import { createHttpRequest, isBrowserTraffic } from './ray-http.js'
 
 const CLIP = 2_048
 
@@ -132,7 +136,8 @@ const JOB_STATUS_STATES = Object.freeze({
 
 /**
  * @param {{
- *   fetch: typeof globalThis.fetch,
+ *   request?: (request: {method: string, url: string, headers?: object, body?: Buffer}) =>
+ *     Promise<{status: number, headers: object, text: string}>,
  *   plan: (input: {candidateId: string, submissionId: string, gpuHours?: number}) =>
  *     {entrypoint: string[]|string, runtimeEnv?: object, metadata?: object, numGpus?: number},
  *   baseUrl?: string,
@@ -149,7 +154,7 @@ const JOB_STATUS_STATES = Object.freeze({
  *   packed (`false` for a deployment whose nodes already have the code some other way)
  */
 export function createRayPlatform({
-  fetch: fetchImpl,
+  request: requestImpl,
   plan,
   baseUrl = 'http://127.0.0.1:8265',
   metricsDir,
@@ -161,9 +166,10 @@ export function createRayPlatform({
   metricsRequired = true,
   packaging = {},
 } = {}) {
-  const doFetch = fetchImpl ?? globalThis.fetch
-  if (typeof doFetch !== 'function') {
-    throw new TypeError('createRayPlatform needs an injected fetch — there is no cluster in the test suite')
+  // `node:http` by default; injected in every test. See the module header for why it is not `fetch`.
+  const send = requestImpl ?? createHttpRequest()
+  if (typeof send !== 'function') {
+    throw new TypeError('createRayPlatform needs a request() transport — there is no cluster in the test suite')
   }
   if (typeof plan !== 'function') throw new TypeError('createRayPlatform needs a plan() that says what to submit')
 
@@ -184,27 +190,54 @@ export function createRayPlatform({
   const metricsPathFor = (submissionId) =>
     metricsDir === undefined ? undefined : join(metricsDir, `${safeSlug(submissionId)}.metrics.json`)
 
-  async function request(method, path, body) {
-    const init = { method, headers: { accept: 'application/json' } }
+  /**
+   * One call over the transport. A JSON body when the caller hands an object, raw bytes when it hands
+   * a Buffer (the package upload), and a transport failure that comes back as `status: 0` rather than
+   * a throw — "we could not ask" is a legitimate answer for a read, and the writers treat a non-2xx
+   * as a refusal either way.
+   */
+  async function call(method, path, body, extraHeaders = {}) {
+    const headers = { accept: 'application/json', ...extraHeaders }
+    let payload
     if (body !== undefined) {
-      init.headers['content-type'] = 'application/json'
-      init.body = JSON.stringify(body)
+      if (Buffer.isBuffer(body) || body instanceof Uint8Array) payload = Buffer.from(body)
+      else {
+        payload = Buffer.from(JSON.stringify(body), 'utf8')
+        headers['content-type'] = 'application/json'
+      }
     }
     let response
     try {
-      response = await doFetch(`${root}${path}`, init)
+      response = await send({ method, url: `${root}${path}`, headers, body: payload })
     } catch (error) {
       // A dashboard we cannot reach is "we do not know", which is a first-class answer here.
       return { status: 0, json: undefined, text: '', transport_error: String(error) }
     }
-    const text = typeof response.text === 'function' ? await response.text() : ''
+    const text = typeof response?.text === 'string' ? response.text : ''
     let json
     try {
       json = text === '' ? undefined : JSON.parse(text)
     } catch {
       json = undefined
     }
-    return { status: response.status, json, text }
+    return { status: response?.status ?? 0, json, text }
+  }
+
+  /**
+   * A write the dashboard refused, said plainly.
+   *
+   * `405` is not a cluster limit and not a candidate defect: Ray's dashboard answers it when it reads
+   * the request as browser traffic, which on Node means a transport that sends `Sec-Fetch-*` (global
+   * `fetch` does, `node:http` does not). Naming that cause is the difference between a ten-minute fix
+   * and an afternoon — this adapter lost its first live run to that body text.
+   */
+  function refusedWrite(prefix, response) {
+    const detail = clip(response.text) ?? response.transport_error ?? ''
+    const hint =
+      response.status === 405
+        ? ' — the dashboard refused this client as browser traffic; the transport must not send a Mozilla user-agent or any Referer/Origin/Sec-Fetch-* header (node:http does not, global fetch sends sec-fetch-mode: cors)'
+        : ''
+    return new Error(`${prefix}: ${response.status} ${detail}${hint}`.trimEnd())
   }
 
   /**
@@ -212,18 +245,7 @@ export function createRayPlatform({
    * endpoint accepts (`PUT /api/packages/gcs/<name>.zip`); a name with a slash matches no route.
    */
   async function uploadPackage(packageName, bytes) {
-    let response
-    try {
-      response = await doFetch(`${root}/api/packages/gcs/${packageName}`, {
-        method: 'PUT',
-        headers: { 'content-type': 'application/zip', accept: 'application/json' },
-        body: bytes,
-      })
-    } catch (error) {
-      return { status: 0, text: '', transport_error: String(error) }
-    }
-    const text = typeof response.text === 'function' ? await response.text() : ''
-    return { status: response.status, text }
+    return call('PUT', `/api/packages/gcs/${packageName}`, bytes, { 'content-type': 'application/zip' })
   }
 
   /**
@@ -261,11 +283,11 @@ export function createRayPlatform({
   }
 
   function jobDetails(path) {
-    return request('GET', path)
+    return call('GET', path)
   }
 
   async function fetchLogs(jobId) {
-    const response = await request('GET', `/api/jobs/${encodeURIComponent(jobId)}/logs`)
+    const response = await call('GET', `/api/jobs/${encodeURIComponent(jobId)}/logs`)
     if (response.status !== 200) return undefined
     return typeof response.json?.logs === 'string' ? response.json.logs : undefined
   }
@@ -276,7 +298,7 @@ export function createRayPlatform({
    */
   async function taskError(jobId) {
     const query = `filter_keys=job_id&filter_values=${encodeURIComponent(jobId)}&limit=1000`
-    const response = await request('GET', `/api/v0/tasks?${query}`)
+    const response = await call('GET', `/api/v0/tasks?${query}`)
     if (response.status !== 200) return undefined
     const rows = stateApiRows(response.json)
     const typed = rows.find(
@@ -519,9 +541,7 @@ export function createRayPlatform({
         if (uploaded.status !== 200 && uploaded.status !== 201) {
           // Nothing was created, so this stays a plain throw: the caller holds the candidate and
           // retries later, and the tree is packed again when it does.
-          throw new Error(
-            `ray refused the package ${packageName}: ${uploaded.status} ${clip(uploaded.text) ?? uploaded.transport_error ?? ''}`,
-          )
+          throw refusedWrite(`ray refused the package ${packageName}`, uploaded)
         }
 
         ship = {
@@ -566,7 +586,7 @@ export function createRayPlatform({
       }
       if (planned.numGpus !== undefined) body.entrypoint_num_gpus = planned.numGpus
 
-      const response = await request('POST', '/api/jobs/', body)
+      const response = await call('POST', '/api/jobs/', body)
       const alreadyExists =
         response.status === 409 ||
         (response.status === 400 && /already exists/i.test(response.text ?? ''))
@@ -592,7 +612,7 @@ export function createRayPlatform({
       if (response.status !== 200 && response.status !== 201) {
         // Submit failures are not job failures: nothing was created, so this throws and the caller
         // holds the candidate instead of inventing a job id the cluster has never heard of.
-        throw new Error(`ray rejected the submission: ${response.status} ${clip(response.text) ?? response.transport_error ?? ''}`)
+        throw refusedWrite('ray rejected the submission', response)
       }
 
       const jobId = response.json?.job_id ?? submissionId
@@ -665,7 +685,7 @@ export function createRayPlatform({
     },
 
     async cancel(jobId) {
-      const response = await request('POST', `/api/jobs/${encodeURIComponent(jobId)}/stop`)
+      const response = await call('POST', `/api/jobs/${encodeURIComponent(jobId)}/stop`)
       if (response.status === 404) return { accepted: false, state_after: 'lost' }
       if (response.status !== 200) {
         const observed = await observe(jobId)

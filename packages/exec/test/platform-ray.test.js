@@ -44,10 +44,10 @@ function rayWorld({ duplicateResponse } = {}) {
   return { root, metricsDir, fake }
 }
 
-function makePlatform({ fake, metricsDir, fetch: fetchImpl, plan }) {
+function makePlatform({ fake, metricsDir, request, plan }) {
   return createRayPlatform({
     baseUrl: 'http://ray.fake:8265',
-    fetch: fetchImpl ?? fake.fetch,
+    request: request ?? fake.request,
     plan: plan ?? (() => ({ entrypoint: ['python', '-m', 'train'], metadata: {} })),
     metricsDir,
     name: 'ray-test',
@@ -217,15 +217,15 @@ test('a duplicate the dashboard cannot show yet is still one job, on both real R
 test('an unreachable dashboard is unknown, and the job is picked up again when it answers', async () => {
   const { metricsDir, fake } = rayWorld()
   let failures = 0
-  const flaky = async (input, init) => {
+  const flaky = async (request) => {
     // Only the job-details read fails: a dashboard that is briefly down is not a cluster that forgot.
-    if (failures > 0 && String(input).includes('/api/jobs/raysubmit')) {
+    if (failures > 0 && String(request.url).includes('/api/jobs/raysubmit')) {
       failures -= 1
-      throw new TypeError('fetch failed')
+      throw new TypeError('ray transport: connect ECONNREFUSED')
     }
-    return fake.fetch(input, init)
+    return fake.request(request)
   }
-  const platform = makePlatform({ fake, metricsDir, fetch: flaky })
+  const platform = makePlatform({ fake, metricsDir, request: flaky })
   fake.script('cand_flaky', { outcome: 'succeeded', metrics: { val_loss: 0.3 } })
   const submitted = await submitJob(platform, { submissionId: 'cand_flaky', candidateId: 'cand_flaky', gpuHours: 1 })
 
@@ -284,13 +284,13 @@ test('the submitted body carries the idempotency key, the candidate, and where t
 
 test('a rejected submit throws instead of inventing a job id', async () => {
   const { metricsDir, fake } = rayWorld()
-  const rejecting = async (input, init) => {
-    if (init?.method === 'POST') {
-      return new Response(JSON.stringify({ detail: 'no resources available' }), { status: 500 })
+  const rejecting = async (request) => {
+    if (request.method === 'POST') {
+      return { status: 500, headers: {}, text: JSON.stringify({ detail: 'no resources available' }) }
     }
-    return fake.fetch(input, init)
+    return fake.request(request)
   }
-  const platform = makePlatform({ fake, metricsDir, fetch: rejecting })
+  const platform = makePlatform({ fake, metricsDir, request: rejecting })
 
   await assert.rejects(
     () => submitJob(platform, { submissionId: 'cand_reject', candidateId: 'cand_reject', gpuHours: 1 }),
