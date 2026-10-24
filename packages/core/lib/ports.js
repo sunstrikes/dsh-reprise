@@ -34,7 +34,7 @@ import { createLocalPlatform } from '@dsh-reprise/exec/platform/local'
 import { createRayPlatform } from '@dsh-reprise/exec/platform/ray'
 
 import { fileArtifacts } from './artifacts.js'
-import { jobMarker, MARKER_KEY } from './jobs.js'
+import { cudaVisibleDevicesOf, jobMarker, MARKER_KEY } from './jobs.js'
 import { metricFromContract } from './domain.js'
 import { createJudge } from './judge.js'
 import { readRoundsState } from './rounds.js'
@@ -174,16 +174,19 @@ export function createCommandModel({ command, cwd = process.cwd(), env, timeout_
  *    point at. The plan names the tree to **ship** (`worktreeDir` + the runner's `baseRef`) and the
  *    argv that runs *inside the unpacked package*. Handing a laptop path to a Ray plan would be a
  *    job that fails on a node with "no such directory" three minutes into a GPU reservation.
- *
- * Exported so a test can read what a job will say about itself without a cluster; `createPlatform` is
- * the only caller in production.
  */
 export function planForConfig(config, { workspaceDir, runner }) {
   const executor = config.executor ?? { kind: 'local' }
 
-  // Every job of ours carries a **marker**, so it can be recognised again in the cluster's own listing
-  // afterwards (`jobs.js` reads it back). `metadata` is where it goes on Ray, because a listing row's
-  // `job_id` may be null while `submission_id` and `metadata` survive.
+  // Two things every job of ours carries, whichever executor runs it:
+  //
+  //  - the **marker**, so the job can be recognised again in the cluster's own listing afterwards
+  //    (`jobs.js` reads it back). `metadata` is where it goes: on Ray a listing row's `job_id` may be
+  //    null while `submission_id` and `metadata` survive.
+  //  - the **device list**, when that is the run's GPU-exclusivity choice — written by the submission
+  //    itself, because nothing in the cluster does it for us.
+  const devices = cudaVisibleDevicesOf(config)
+
   if ((executor.kind ?? 'local') === 'ray') {
     return ({ candidateId, round }) => ({
       // Runnable inside the unpacked package: relative paths resolve against the candidate's tree,
@@ -191,7 +194,9 @@ export function planForConfig(config, { workspaceDir, runner }) {
       entrypoint: executor.command,
       worktreeDir: runner === undefined ? undefined : runner.worktreeFor(candidateId),
       baseRef: runner?.baseRef,
-      runtimeEnv: { env_vars: { ...(executor.env ?? {}) } },
+      runtimeEnv: {
+        env_vars: { ...(executor.env ?? {}), ...(devices === undefined ? {} : { CUDA_VISIBLE_DEVICES: devices }) },
+      },
       ...(executor.num_gpus === undefined ? {} : { numGpus: executor.num_gpus }),
       metadata: { [MARKER_KEY]: jobMarker({ candidateId, round }) },
     })
@@ -201,9 +206,12 @@ export function planForConfig(config, { workspaceDir, runner }) {
     // The candidate's worktree is the execution directory: the job evaluates the candidate's tree,
     // not the checkout the loop happens to live in.
     cwd: runner === undefined ? (executor.cwd === undefined ? process.cwd() : resolve(workspaceDir, executor.cwd)) : runner.worktreeFor(candidateId),
-    env: { ...(executor.env ?? {}) },
+    env: { ...(executor.env ?? {}), ...(devices === undefined ? {} : { CUDA_VISIBLE_DEVICES: devices }) },
   })
 }
+
+/** The plan `createPlatform` hands the adapter; exported above so a test can read what a job says. */
+const planFor = planForConfig
 
 /**
  * The external-job port. `local` is the laptop path (a subprocess, no GPU, no cluster); `ray` is the
@@ -212,7 +220,7 @@ export function planForConfig(config, { workspaceDir, runner }) {
  */
 export function createPlatform(config, context) {
   const executor = config.executor ?? { kind: 'local' }
-  const plan = planForConfig(config, context)
+  const plan = planFor(config, context)
   const limits = config.limits ?? {}
   const metricsRequired = executor.metrics_required !== false
 

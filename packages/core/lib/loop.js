@@ -19,7 +19,7 @@ import { judgeTimeout } from '@dsh-reprise/exec'
 import { autoResumeIfClear, budgetOf, canDispatch, evaluate, pause } from './budget.js'
 import { gateSettings, recheckReport } from './gate.js'
 import { consumePending } from './intents.js'
-import { jobMarker, outcomeOf } from './jobs.js'
+import { gpuExclusivityOf, jobMarker, outcomeOf } from './jobs.js'
 import { stepWorkspace } from './rounds.js'
 import { evaluateStop } from './stop.js'
 
@@ -249,6 +249,19 @@ async function stepFor(ports, candidateId, state) {
       return verify(ports, candidateId, state)
 
     case 'SUBMIT_QUEUED': {
+      // GPU exclusivity, before money is reserved: with `single_job` our own jobs must never be the
+      // pair sharing the cards, and nothing in the cluster enforces it (measured, ticket 14). Held
+      // here rather than refused, because the other job is ours and will finish.
+      if (gpuExclusivityOf(config) === 'single_job') {
+        const holder = dispatchInFlight(store, candidateId)
+        if (holder !== undefined) {
+          const poll = pollConfig(config)
+          advance(store, candidateId, 'SUBMIT_QUEUED', { next_action_at: now + poll.base_ms })
+          log?.(`${candidateId}: single_job exclusivity — ${holder} is still in flight, holding at SUBMIT_QUEUED`)
+          return { candidateId, phase: 'SUBMIT_QUEUED', action: 'held_by_single_job_gpu' }
+        }
+      }
+
       const permit = canDispatch(store, ports.workspace ?? workspaceState(store, clock, config), config, now)
       if (!permit.ok) {
         // Only NEW dispatch stops. Money already spent on an in-flight candidate is not recoverable
@@ -283,6 +296,28 @@ async function stepFor(ports, candidateId, state) {
     default:
       return { candidateId, phase: state.phase, action: 'noop' }
   }
+}
+
+/**
+ * Is another of our training jobs in flight? Used only when the run declared
+ * `gpu_exclusivity: single_job`, and asked of two facts rather than one:
+ *
+ *  - **another candidate past the queue** (`SUBMIT` or `MONITOR_POLL`) — the window in which we have
+ *    reserved the money but the cluster has not answered yet, so no ledger row exists to see;
+ *  - **a ledger row of ours that is still open** — a job of an earlier run whose candidate is already
+ *    terminal (or gone) but which the cluster may still be running. That row is the only trace of it,
+ *    and dispatching over it is the collision this configuration exists to prevent.
+ *
+ * @returns {string | undefined} the candidate id holding the cards
+ */
+function dispatchInFlight(store, candidateId) {
+  for (const id of store.candidateIds()) {
+    if (id === candidateId) continue
+    const phase = store.getState(id, 'phase')?.phase
+    if (phase === 'SUBMIT' || phase === 'MONITOR_POLL') return id
+  }
+  const open = store.inFlightJobs().filter((job) => job.candidate_id !== candidateId)
+  return open[0]?.candidate_id
 }
 
 // --------------------------------------------------------------- phases

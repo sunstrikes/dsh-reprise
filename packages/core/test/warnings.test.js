@@ -64,8 +64,9 @@ test('the warning is part of the dashboard projection, which is where it renders
   const config = { ...CONTRACT, executor: { kind: 'ray' }, budget: { gpu_hours_limit: 0 } }
   withStore((store) => {
     const page = overview(store, { config })
-    assert.equal(page.warnings.length, 1)
-    assert.equal(page.warnings[0].code, 'no_gpu_hours_limit')
+    const codesOnPage = page.warnings.map((entry) => entry.code)
+    assert.ok(codesOnPage.includes('no_gpu_hours_limit'), `the projection carries it: ${JSON.stringify(codesOnPage)}`)
+    assert.equal(page.warnings.find((entry) => entry.code === 'no_gpu_hours_limit').where, 'dashboard.overview')
     assert.equal(page.spend.limitGpuHours, 0, 'the same page already reports the unlimited budget as 0')
   })
 })

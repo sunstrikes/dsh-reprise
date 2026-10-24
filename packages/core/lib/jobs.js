@@ -248,3 +248,77 @@ export async function reapOrphans({ platform, store, report, jobIds = [], now = 
   }
   return { stopped, refusals }
 }
+
+// ------------------------------------------------------- GPU exclusivity
+
+/**
+ * The two ways a run may claim the cards, and there are exactly two.
+ *
+ * `single_job` — at most one training job of ours is in flight, so nothing we start competes with
+ * anything else we started. `cuda_visible_devices` — every submission pins its own devices, so two
+ * jobs may run as long as they were given disjoint cards.
+ *
+ * They cannot both be true: the first says "we own the node while we run", the second says "we own a
+ * slice of it". A configuration that declares both is refused at boot (`config.js`), and one that
+ * declares neither is warned about by name (`warnings.js`) — the cluster reserves nothing, measured.
+ */
+export const GPU_EXCLUSIVITY = Object.freeze(['single_job', 'cuda_visible_devices'])
+
+/** `0`, `0,1`, `2, 3` — a comma-separated list of device indices, nothing else. */
+const DEVICE_LIST = /^\d+(,\s*\d+)*$/
+
+/** The exclusivity this configuration chose, or `undefined` when it declared neither. */
+export function gpuExclusivityOf(config) {
+  const executor = config?.executor ?? {}
+  if (executor.gpu_exclusivity !== undefined) return executor.gpu_exclusivity
+  // Naming the devices *is* choosing to write them; the mode word is then redundant rather than
+  // required, because two spellings of one decision must not disagree about which one was made.
+  if (executor.cuda_visible_devices !== undefined) return 'cuda_visible_devices'
+  return undefined
+}
+
+/** The devices to write into a submission, when that is the chosen mode. */
+export function cudaVisibleDevicesOf(config) {
+  if (gpuExclusivityOf(config) !== 'cuda_visible_devices') return undefined
+  const devices = config?.executor?.cuda_visible_devices
+  return typeof devices === 'string' ? devices.replace(/\s+/g, '') : undefined
+}
+
+/**
+ * What is wrong with the exclusivity declaration, if anything. Refusals only — the "declared
+ * neither" case is a warning, because it is legal and merely dangerous.
+ *
+ * @param {object} executor the resolved executor entry (run or domain pack)
+ * @returns {string[]} one message per problem, phrased for the person editing the config
+ */
+export function gpuExclusivityProblems(executor) {
+  const problems = []
+  const mode = executor?.gpu_exclusivity
+  const devices = executor?.cuda_visible_devices
+
+  if (mode !== undefined && !GPU_EXCLUSIVITY.includes(mode)) {
+    problems.push(
+      `executor.gpu_exclusivity must be one of ${GPU_EXCLUSIVITY.join(', ')} (got ${JSON.stringify(mode)}) — ` +
+        'either only one training job at a time, or each submission writes its own CUDA_VISIBLE_DEVICES',
+    )
+  }
+  if (devices !== undefined && (typeof devices !== 'string' || !DEVICE_LIST.test(devices))) {
+    problems.push(
+      `executor.cuda_visible_devices must be a comma-separated list of device indices, e.g. "0,1,2,3" ` +
+        `(got ${JSON.stringify(devices)}) — the value is handed to the job verbatim`,
+    )
+  }
+  if (devices !== undefined && mode === 'single_job') {
+    problems.push(
+      'executor declares gpu_exclusivity: single_job and cuda_visible_devices at once — those are two different ' +
+        'claims about who owns the cards; keep one',
+    )
+  }
+  if (mode === 'cuda_visible_devices' && devices === undefined) {
+    problems.push(
+      'executor.gpu_exclusivity is cuda_visible_devices but executor.cuda_visible_devices is not set — the submission ' +
+        'would claim exclusivity and write nothing',
+    )
+  }
+  return problems
+}

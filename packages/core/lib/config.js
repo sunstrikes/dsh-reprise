@@ -23,6 +23,7 @@
 import { resolve as resolvePath } from 'node:path'
 
 import { DomainPackError, executorProblems, loadDomainPack, metricFromContract } from './domain.js'
+import { gpuExclusivityProblems } from './jobs.js'
 import { configWarnings } from './warnings.js'
 
 /** Five seconds: the cadence ticket 01 measured in the real host (78 beats / 415 s, drift ≤ 3 ms). */
@@ -82,6 +83,10 @@ export function resolveConfig(raw = {}, { cwd = process.cwd(), loadDomain = load
     problems.push('executor must be an object with a kind — neither the run nor its domain pack declared one')
   } else {
     problems.push(...executorProblems(executor))
+    // The cluster does not reserve the cards, so "which of the two ways do we own them" is a
+    // configuration decision that has to be made on purpose. Both at once is a contradiction and is
+    // refused here; neither is legal-but-dangerous and is warned about by name in `warnings.js`.
+    if (isObject(executor)) problems.push(...gpuExclusivityProblems(executor))
   }
 
   const candidate = raw.candidate

@@ -104,7 +104,9 @@ test('an uncapped spend on a real executor is a warning the boot log carries, no
     budget: { gpu_hours_limit: 0 },
   })
   assert.equal(resolved.ok, true, 'the shipped default must remain runnable — it must only be loud')
-  assert.deepEqual(resolved.warnings.map((warning) => warning.code), ['no_gpu_hours_limit'])
+  // Two warnings, both about spending a shared cluster without saying how much of it is ours: the
+  // uncapped hours (ticket 13) and the undeclared GPU exclusivity (ticket 16).
+  assert.deepEqual(resolved.warnings.map((warning) => warning.code), ['no_gpu_hours_limit', 'gpu_exclusivity_undeclared'])
 })
 
 test('a nonsensical interval is refused instead of becoming a busy loop', () => {
