@@ -444,3 +444,26 @@ test('a candidate records its samples in the same shape the baseline does, so th
   assert.equal(rounds.baseline.source, 'executor', 'the denominator the pairing uses was measured, not announced')
   ports.store.close()
 })
+
+test('a baseline job that never answers is stopped by its limits, not waited on all night', async () => {
+  const ports = setup({ config: { ...CONFIG, limits: { max_wall_ms: 60_000, max_idle_ms: 60_000 } } })
+  await step(ports) // INIT
+  await step(ports) // BASELINE: submit, and the job stays running
+  const job = runningBaseline(ports.platform)
+
+  // Past the wall-clock ceiling. The job is still "running" as far as the platform knows.
+  ports.clock.advance(61_000)
+  await step(ports)
+
+  const workspace = ports.store.getState(undefined, 'workspace')
+  assert.equal(workspace.phase, 'FINALIZE')
+  assert.equal(workspace.stopped.rule, 'baseline_timeout', 'a denominator that never finished is a reason, not a wait')
+  assert.match(workspace.stopped.message, /wall limit/)
+  assert.equal(workspace.stopped.status, undefined, 'nothing was malformed: an unfinished job carries no four-state status')
+  assert.equal(workspace.stopped.detail.job_id, job.job_id)
+  assert.ok(
+    ports.store.eventsFor(BASELINE_SUBJECT).some((event) => event.event_type === 'baseline_timeout'),
+    'the timeout is a fact about the baseline, not only a workspace conclusion',
+  )
+  ports.store.close()
+})

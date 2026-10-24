@@ -105,7 +105,7 @@ export async function stepBaseline(context, state) {
   }
 
   const job = context.store.jobFor(BASELINE_SUBJECT)
-  if (job === undefined) return dispatch(context)
+  if (job === undefined) return dispatch(context, state)
   return poll(context, job)
 }
 
@@ -116,17 +116,20 @@ export async function stepBaseline(context, state) {
  * may not exist upstream — detectable in the ledger — while submitting first would let a crash hide
  * a job that is really running and really billing.
  */
-async function dispatch(context) {
+async function dispatch(context, state) {
   const { store, clock, platform, config, now, log, crashAt } = context
   const workspace = store.getState(undefined, 'workspace', {}) ?? {}
   const poll = { ...POLL, ...(config?.poll ?? {}) }
+  // A refused submission backs off like any retry: the platform being down must not become a hot loop
+  // in which the workspace asks a dead endpoint once per tick for a night.
+  const retryDelay = Math.min(poll.base_ms * 2 ** Math.min((state?.attempts ?? 0) + 1, 10), poll.max_ms)
 
   const permit = canDispatch(store, workspace, config, now)
   if (!permit.ok) {
     // The baseline is new work, so the soft limit stops it exactly as it stops a candidate: nothing
     // has been spent on it yet, and going past the limit is a decision a human makes.
     log?.(`BASELINE: held by the ${permit.reason} limit ${permit.decision.usedGpuHours}/${permit.decision.gpuLimitHours}`)
-    return { status: 'waiting', action: `baseline held by ${permit.reason} limit`, next_action_at: now + poll.base_ms }
+    return { status: 'waiting', action: `baseline held by ${permit.reason} limit`, next_action_at: now + retryDelay }
   }
 
   // One reservation per baseline, not one per attempt: a refused submission is retried, and reserving
@@ -155,7 +158,7 @@ async function dispatch(context) {
       })
     }
     log?.(`BASELINE: submit refused — ${message}`)
-    return { status: 'waiting', action: 'baseline submit refused, retrying', next_action_at: now + poll.base_ms }
+    return { status: 'waiting', action: 'baseline submit refused, retrying', next_action_at: now + retryDelay }
   }
 
   // The dangerous window: the platform knows about this job and we do not yet. Submission ids are
@@ -252,7 +255,12 @@ async function collect(context, job, answered) {
     }
   }
 
-  settle(store, now, numberOf(collected?.usage?.total_tokens) ?? numberOf(answered?.tokens) ?? 0)
+  // Settle what the job actually used, capped at what was reserved — the same arithmetic a candidate
+  // gets, because a baseline job is not a cheaper kind of job.
+  settle(store, now, {
+    tokens: numberOf(collected?.usage?.total_tokens) ?? numberOf(answered?.tokens) ?? 0,
+    actual: numberOf(collected?.gpu_hours) ?? numberOf(answered?.gpu_hours),
+  })
 
   const metricName = settings.metric.name
   const value = numberOf(collected?.metrics?.[metricName]) ?? numberOf(answered.metrics?.[metricName])
@@ -332,8 +340,14 @@ async function collect(context, job, answered) {
   return { status: 'frozen', baseline, action: 'baseline frozen -> round_plan' }
 }
 
-/** Settle whatever is still in flight for the baseline: the ledger shows it spent, not owed. */
-function settle(store, now, tokens = 0) {
+/**
+ * Settle whatever is still in flight for the baseline: the ledger shows it spent, not owed.
+ *
+ * `actual` is what the job reported it used; it is capped at the reservation the way the candidate
+ * path caps it, so an executor that reports more hours than it was granted cannot spend past a limit
+ * that was already enforced at dispatch.
+ */
+function settle(store, now, { tokens = 0, actual } = {}) {
   const reserved = store.inFlightGpuHours(BASELINE_SUBJECT)
-  if (reserved > 0) store.settle(BASELINE_SUBJECT, reserved, now, tokens)
+  if (reserved > 0) store.settle(BASELINE_SUBJECT, Math.min(numberOf(actual) ?? reserved, reserved), now, tokens)
 }
