@@ -244,6 +244,95 @@ resolve to `{duplicate: true, job_id: <the existing job>}`, and the caller goes 
 It never retries onto another cluster: that is how one candidate gets two GPU bills. The kernel
 already records `duplicate` in the `submitted` event and moves to `MONITOR_POLL` either way.
 
+### The candidate's code travels with the job (Ray)
+
+The nodes have **no shared filesystem** with us and **no internet**, so there is no directory to point
+a job at: the only inbound channel is the Job Submission API. A plan that names a worktree therefore
+makes `submit()` do three things before it writes anything:
+
+```js
+plan: ({ candidateId }) => ({
+  entrypoint: ['python3', 'train.py', '--config', 'config.py'],  // runs *inside* the package
+  worktreeDir: runner.worktreeFor(candidateId),                  // the tree to ship
+  baseRef: runner.baseRef,                                       // the runner's git authority
+  numGpus: 1,                                                    // → entrypoint_num_gpus
+})
+```
+
+1. **Pack** — `packCandidate()` (`lib/archive.js`) zips the whole worktree with the deterministic
+   encoder in `lib/zip.js`, leaving out the plugin's own fact plane (`*.db`, `*.db-wal`, `*.db-shm`,
+   `.mnemon/`, `.git`, `.reprise/` — the list is `FACT_PLANE_EXCLUSIONS`, data with a reason per
+   entry, and it is the only thing that decides what is dropped).
+2. **Upload** — `PUT /api/packages/gcs/<name>.zip`, where
+   `name = reprise-<submission-id-slug>-<sha256 of the archive>.zip`. Flat (a name with a slash
+   matches no route), `.zip` (Ray rejects anything else), content-addressed (two candidates never
+   overwrite each other's package; an unchanged tree never leaves a second object).
+3. **Submit** — `runtime_env.working_dir = "gcs://<name>.zip"` and the entrypoint
+   `<verifier> && <training>`, so the job runs *in the unpacked package* and reads the configuration
+   the candidate edited. `runtime_env.working_dir` belongs to the adapter: a plan that sets it is
+   refused. A packaged job is **not** given `REPRISE_METRICS_PATH` (a laptop path it cannot write);
+   it reports through `REPRISE_METRICS {json}` on the driver log.
+
+**What changed** stays the runner's git answer: `git diff --name-only <baseRef>` plus
+`git ls-files --others --exclude-standard`, run in the candidate worktree, neither touching the index
+(see `collectInventory()`; a test asserts the exact two subcommands and that the index and refs are
+unchanged). Untracked files are the *normal* shape of a structural candidate — a hypothesis that adds
+a module — so they are shipped, named in the receipt (`submit().packaging.untracked`) and named again
+in the manifest inside the package.
+
+The inventory is checked on both sides of the upload, and a disagreement is the contract's
+**`conflict`**, not `invalid`: nothing the candidate produced is malformed, two accounts of it simply
+do not match.
+
+| where | who compares | a mismatch means |
+|---|---|---|
+| before the upload | `compareInventories()` over the archive read back | the packer lost or mangled a path — `PackageRefusedError` with `conclusion: 'inventory_conflict'` |
+| after the unpack (on the node) | `.reprise/verify_inventory.py`, shipped in the package, run by the entrypoint | the tree that arrived is not the tree that was packed — `poll()` returns `state: 'failed', conflict: true, error_class: 'data'`, and the training never started (`&&`) |
+| never | — | an archive over `packaging.maxBytes` (default 64 MiB) or a path the archive cannot carry (a symlink) is `conclusion: 'archive_too_large'` / `'inventory_conflict'`, thrown **before** any upload and any job |
+
+`PackageRefusedError` carries `retryable: false`, because a tree that is too large or disagrees with
+its own diff does not get smaller by waiting. The kernel currently retries any thrown `submit()` with
+backoff (it cannot tell "cluster down" from "this candidate cannot ship"), so the same conclusion is
+re-raised every attempt — loud, but it is the kernel that should consume `retryable`.
+
+**The verifier is a Python file in `packages/exec/lib/`,** because the check has to run *on the node*,
+and `python3` is the one interpreter the measured cluster guarantees (`.scratch/notes/cluster-env.md`);
+there is no `node` on those nodes and no way to get one. It is shipped *inside the package* (never
+executed on the laptop) and invoked only by the entrypoint the adapter builds. The interpreter is
+data: `packaging.verify = { command: ['python3'] }`, and `verify: false` ships a bare tree — the
+in-process read-back in `packCandidate()` still runs, so a caller without a node-side interpreter
+keeps every JS-side guarantee and loses only the post-unpack one. It is tested two ways: the marker
+parser against scripted logs (`platform-package.test.js`), and — where a `python3` exists — by
+unpacking a real package and running the shipped script, which must pass untouched and fail on an
+altered file (the test skips, loudly, on a machine without the interpreter).
+
+**One `submission_id` is one package and one job.** `submit()` first asks the cluster whether it
+already owns that id (`GET /api/jobs/<submission_id>`, matching `metadata.candidate_id` so a slug
+collision cannot adopt a stranger's run) and answers `{duplicate: true}` without packing, uploading or
+POSTing. The old `409`/`400 already exists` path is kept for the race where the job exists but the
+details route cannot see it yet. Tests count requests rather than read flags: one `POST`, one `PUT`,
+`fake.jobs.size === 1`, `fake.packages.size === 1`.
+
+#### A run against the measured cluster
+
+```json
+{
+  "domain": "examples/feed-structure",
+  "workspace": ".workspace/cluster",
+  "runner": { "repo": "model-repo", "dir": "worktrees", "base_ref": "HEAD" },
+  "executor": {
+    "kind": "ray",
+    "base_url": "http://10.92.7.207:8258",
+    "command": ["python3", "train.py", "--config", "config.json"],
+    "num_gpus": 1
+  },
+  "limits": { "max_wall_ms": 600000, "max_idle_ms": 600000 }
+}
+```
+
+`train.py` must print `REPRISE_METRICS {"metrics":{"auc":0.71}}` — on a cluster with no shared mount,
+the driver log is the return channel, and a job that exits 0 without a marker is a `data` failure.
+
 ### Ray: failure classification reads the task state
 
 `JobDetails.error_type` is a `TODO` in OSS Ray and is **never populated** — a classifier built on it

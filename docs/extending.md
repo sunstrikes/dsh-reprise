@@ -73,6 +73,13 @@ not a candidate stuck at `SUBMIT`.
 `submit().deadline_ms` is a **duration**; `find().deadline_ms` is **absolute**. That asymmetry is
 load-bearing and documented in `packages/exec/README.md`.
 
+`submit()` has one optional input beyond the port's minimum, and it exists because an execution
+surface may not share a filesystem with you: `plan()` returns `{entrypoint, worktreeDir, baseRef}` and
+the adapter packs `worktreeDir`, uploads it, and points `runtime_env.working_dir` at the package
+(`packages/exec/lib/archive.js`). A plan with no `worktreeDir` ships nothing — that is the shape for a
+surface whose nodes already hold the code. See "The candidate's code travels with the job" in
+`packages/exec/README.md` for the request sequence, the exclusion list, and the two inventory checks.
+
 ## The vocabulary is closed
 
 | `state` | meaning | terminal |
@@ -150,7 +157,8 @@ There is no real cluster in this repository. Ray is tested by replaying recorded
 an injected `fetch`, and the one thing to check first on a real deployment is the metrics mount: if the
 shared directory is not shared, every job fails as `data` rather than reporting a fabricated number.
 That is the safe failure, and it is also the most confusing one to debug, so check it before anything
-else.
+else. On a cluster with **no** shared mount at all, do not configure a metrics directory — a packaged
+job reports through `REPRISE_METRICS {json}` on the driver log, which is the measured return channel.
 
 ---
 
