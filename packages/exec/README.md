@@ -244,6 +244,25 @@ resolve to `{duplicate: true, job_id: <the existing job>}`, and the caller goes 
 It never retries onto another cluster: that is how one candidate gets two GPU bills. The kernel
 already records `duplicate` in the `submitted` event and moves to `MONITOR_POLL` either way.
 
+### The submission body is text where Ray says text
+
+`JobSubmitRequest.__post_init__` (`ray/dashboard/modules/job/common.py`) requires **every**
+`metadata` value to be a `str`; anything else is a `TypeError: metadata values must be strings, got
+<class 'float'>` and a `400` before a job exists — and `null` is not a string either. So `submit()`
+normalises the whole object rather than one field (`stringMetadata()`):
+
+| value | what goes on the wire |
+|---|---|
+| `string` | unchanged |
+| number, boolean | `String(value)` — `gpu_hours: 0.1` travels as `"0.1"`, and the ledger and a human both read it |
+| `undefined`, `null` | the **key is omitted**, because Ray accepts a missing key and refuses a `null` one |
+| object, array | throws a `TypeError` naming `metadata.<key>` — there is no faithful text form, and inventing one (JSON in a string) would be a format nothing reads back |
+
+`runtime_env.env_vars` is normalised the same way for the same reason. The fake dashboard implements
+this check (`400 metadata values must be strings, got <class 'float'>`), so a regression cannot pass
+the suite — the fake was looser than the cluster twice (the browser guard, then this), and the second
+time cost a live run.
+
 ### The transport is `node:http`, not `fetch` — and that is not a preference
 
 The dashboard has a CSRF / DNS-rebinding guard (`dashboard/optional_utils.py::is_browser_request`):

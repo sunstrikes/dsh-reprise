@@ -125,6 +125,52 @@ function entrypointWithCheck(entrypoint, verify) {
   return `${check} && ${training}`
 }
 
+/**
+ * Ray's `JobSubmitRequest.__post_init__` (`job/common.py`) rejects a submission unless **every**
+ * metadata value is a `str`:
+ *
+ *     TypeError: metadata values must be strings, got <class 'float'>
+ *
+ * and the head turns that into a 400 before any job exists. `gpu_hours: 0.1` was exactly that — the
+ * first live acceptance run got past the package upload and died here.
+ *
+ * So the object is normalised at the seam rather than field by field: numbers and booleans become
+ * their decimal/`true`/`false` text (they round-trip, and the ledger and a human both read them),
+ * `undefined`/`null` are **omitted** (Ray accepts a missing key; it does not accept `null`), and a
+ * value with no faithful text form — an object, an array — is a caller bug that throws *here*, with
+ * the key named, instead of becoming a 400 nobody can trace back to a plan.
+ */
+export function stringMetadata(entries, { owner = 'plan' } = {}) {
+  const out = {}
+  for (const [key, value] of Object.entries(entries ?? {})) {
+    if (value === undefined || value === null) continue
+    if (typeof value === 'string') {
+      out[key] = value
+      continue
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      out[key] = String(value)
+      continue
+    }
+    const shape = Array.isArray(value) ? 'an array' : typeof value === 'object' ? 'an object' : `a ${typeof value}`
+    throw new TypeError(
+      `${owner} metadata.${key} is ${shape}; Ray requires every job metadata value to be a string, ` +
+        'and there is no faithful text form for this one — send a string',
+    )
+  }
+  return out
+}
+
+/** Environment variables as the text the cluster passes to the driver: strings, absent keys dropped. */
+function envVars(declared, metricsPath) {
+  const merged = { ...(declared ?? {}), ...(metricsPath === undefined ? {} : { REPRISE_METRICS_PATH: metricsPath }) }
+  return Object.fromEntries(
+    Object.entries(merged)
+      .filter(([, value]) => value !== undefined && value !== null)
+      .map(([key, value]) => [key, String(value)]),
+  )
+}
+
 /** Job status strings Ray's dashboard can answer with. */
 const JOB_STATUS_STATES = Object.freeze({
   PENDING: 'running',
@@ -572,17 +618,21 @@ export function createRayPlatform({
         runtime_env: {
           ...(planned.runtimeEnv ?? {}),
           ...(ship === undefined ? {} : { working_dir: ship.workingDir }),
-          ...(metricsPath === undefined
+          // `env_vars` is the same hazard as `metadata`: Ray hands these to the driver as strings and
+          // a number from a plan is a 400 at submit time rather than a wrong environment at run time.
+          ...(Object.keys(envVars(planned.runtimeEnv?.env_vars, metricsPath)).length === 0
             ? {}
-            : { env_vars: { ...(planned.runtimeEnv?.env_vars ?? {}), REPRISE_METRICS_PATH: metricsPath } }),
+            : { env_vars: envVars(planned.runtimeEnv?.env_vars, metricsPath) }),
         },
-        metadata: {
+        // Every value here is a string by the time it is serialised: Ray 400s the whole submission
+        // otherwise, and an unknown `gpu_hours` is *omitted* rather than sent as `null`.
+        metadata: stringMetadata({
           ...(planned.metadata ?? {}),
           candidate_id: candidateId,
-          gpu_hours: gpuHours ?? null,
+          gpu_hours: gpuHours,
           submission_id: submissionId,
           ...(ship === undefined ? {} : { package: ship.packageName }),
-        },
+        }),
       }
       if (planned.numGpus !== undefined) body.entrypoint_num_gpus = planned.numGpus
 

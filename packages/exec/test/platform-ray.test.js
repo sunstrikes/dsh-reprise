@@ -275,11 +275,88 @@ test('the submitted body carries the idempotency key, the candidate, and where t
   const body = JSON.parse(post.body)
   assert.equal(body.submission_id, 'cand_body', 'submission_id is the idempotency key; a uuid would make 409s meaningless')
   assert.equal(body.metadata.candidate_id, 'cand_body', 'recovery matches on metadata.candidate_id')
-  assert.equal(body.metadata.gpu_hours, 2.5, 'the ledger and the cluster must agree on what was reserved')
+  assert.equal(
+    body.metadata.gpu_hours,
+    '2.5',
+    'the ledger and the cluster must agree on what was reserved — as text: JobSubmitRequest rejects a float metadata value with a 400',
+  )
   assert.ok(
     String(body.runtime_env.env_vars.REPRISE_METRICS_PATH).startsWith(metricsDir),
     'the job must be told where to write its metrics: Ray has no metrics API to read them from',
   )
+})
+
+test('every metadata value the submission carries is a string, and an unknown gpu_hours is omitted', async () => {
+  const { metricsDir, fake } = rayWorld()
+  const platform = makePlatform({ fake, metricsDir })
+
+  await submitJob(platform, { submissionId: 'cand_meta_a', candidateId: 'cand_meta_a', gpuHours: 0.1 })
+  await submitJob(platform, { submissionId: 'cand_meta_b', candidateId: 'cand_meta_b' })
+
+  const bodies = fake.requests
+    .filter((entry) => entry.method === 'POST' && entry.path === '/api/jobs/')
+    .map((entry) => JSON.parse(entry.body))
+  assert.equal(bodies.length, 2)
+
+  for (const body of bodies) {
+    for (const [key, value] of Object.entries(body.metadata)) {
+      assert.equal(typeof value, 'string', `metadata.${key} is a ${typeof value}; Ray's JobSubmitRequest requires a string and 400s the whole submission otherwise`)
+    }
+  }
+  for (const body of bodies) {
+    for (const [key, value] of Object.entries(body.runtime_env?.env_vars ?? {})) {
+      assert.equal(typeof value, 'string', `env_vars.${key} must be text too: the driver environment is a map of strings`)
+    }
+  }
+  assert.equal(bodies[0].metadata.gpu_hours, '0.1', 'a reservation still reaches the cluster, as text')
+  assert.equal(
+    'gpu_hours' in bodies[1].metadata,
+    false,
+    'an unknown reservation is omitted, not sent as null: null is not a string either, and Ray refuses it',
+  )
+})
+
+test('metadata from the plan is coerced where it can be, and refused where it cannot', async () => {
+  const { metricsDir, fake } = rayWorld()
+  const platform = makePlatform({
+    fake,
+    metricsDir,
+    plan: () => ({ entrypoint: ['python3', '-m', 'train'], metadata: { tier: 3, gpu_class: true, sweep: null } }),
+  })
+
+  await submitJob(platform, { submissionId: 'cand_meta_c', candidateId: 'cand_meta_c', gpuHours: 1 })
+  const body = JSON.parse(fake.requests.find((entry) => entry.method === 'POST' && entry.path === '/api/jobs/').body)
+  assert.equal(body.metadata.tier, '3', 'a number has a faithful text form, so it is sent rather than dropped')
+  assert.equal(body.metadata.gpu_class, 'true')
+  assert.equal('sweep' in body.metadata, false, 'null is omitted, because Ray refuses a null value and a missing key costs nothing')
+
+  const unflattenable = makePlatform({
+    fake,
+    metricsDir,
+    plan: () => ({ entrypoint: ['python3', '-m', 'train'], metadata: { spec: { depth: 3 } } }),
+  })
+  const before = fake.requests.filter((entry) => entry.method === 'POST').length
+  await assert.rejects(
+    () => submitJob(unflattenable, { submissionId: 'cand_meta_d', candidateId: 'cand_meta_d' }),
+    /metadata\.spec is an object.*requires every job metadata value to be a string/,
+    'a value with no faithful text form is a caller bug named at the seam, not a 400 nine seconds later',
+  )
+  assert.equal(fake.requests.filter((entry) => entry.method === 'POST').length, before, 'nothing was submitted')
+})
+
+test('the fake refuses metadata the cluster refuses, so a regression here cannot pass the suite', async () => {
+  const { fake } = rayWorld()
+  for (const value of [0.1, 3, true, null, { nested: 1 }]) {
+    const answer = await fake.request({
+      method: 'POST',
+      url: 'http://ray.fake:8265/api/jobs/',
+      headers: { 'content-type': 'application/json' },
+      body: Buffer.from(JSON.stringify({ submission_id: 'bad-meta', entrypoint: 'true', metadata: { gpu_hours: value } })),
+    })
+    assert.equal(answer.status, 400, `metadata ${JSON.stringify(value)} must be refused: the fake has to be at least as strict as __post_init__`)
+    assert.match(answer.text, /metadata values must be strings/)
+  }
+  assert.equal(fake.jobs.size, 0)
 })
 
 test('a rejected submit throws instead of inventing a job id', async () => {

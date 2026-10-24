@@ -160,6 +160,16 @@ export function createFakeRay({ onSucceeded, now = () => 1_700_000_000_000, dupl
     if (method === 'POST' && (path === '/api/jobs/' || path === '/api/jobs')) {
       const body = JSON.parse(request.body ?? '{}')
       const submissionId = body.submission_id
+      // `JobSubmitRequest.__post_init__` (`ray/dashboard/modules/job/common.py`) requires every
+      // metadata value to be a `str` and answers 400 with this TypeError otherwise. The fake was
+      // looser than the cluster for two rounds — a float `gpu_hours` passed here and was refused on
+      // the real head — so the constraint is modelled rather than assumed.
+      for (const [key, value] of Object.entries(body.metadata ?? {})) {
+        if (typeof value !== 'string') {
+          const kind = value === null ? 'NoneType' : Array.isArray(value) ? 'list' : value === true || value === false ? 'bool' : typeof value === 'number' ? (Number.isInteger(value) ? 'int' : 'float') : 'dict'
+          return reply({ detail: `metadata values must be strings, got <class '${kind}'>`, metadata_key: key }, 400)
+        }
+      }
       // Ray resolves `runtime_env.working_dir` through the package store. A gcs:// URI whose package
       // was never uploaded fails the job at setup on the real cluster, so it fails the submission here.
       const workingDir = body.runtime_env?.working_dir
