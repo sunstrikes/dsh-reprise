@@ -332,6 +332,7 @@ test('the ledger says a job is the baseline, so nothing can dispatch or count it
     state: 'running',
   })
   assert.equal(ports.store.jobFor('r1-h1').kind, 'candidate', 'a row written without a kind is a candidate row')
+  assert.equal(ports.store.jobFor(BASELINE_SUBJECT).state, 'succeeded', 'and the ledger says how the baseline ended')
 
   // The surface a person reads: `dump` says which one is the denominator and which job measured it.
   const dumped = renderDump(ports.store, 'r1-h1')

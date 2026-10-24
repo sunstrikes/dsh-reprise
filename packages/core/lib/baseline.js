@@ -198,6 +198,8 @@ async function poll(context, job) {
       canceled = false
     }
     settle(store, now)
+    // The row says how the job ended, so a reader of the ledger is not told a stopped job is running.
+    store.updateJob(job.job_id, { state: 'failed', error_class: 'canceled' })
     emit(store, clock, 'baseline_timeout', {
       kind: timeout.kind,
       elapsed_ms: timeout.elapsed_ms,
@@ -216,6 +218,7 @@ async function poll(context, job) {
   if (answered.state === 'failed' || answered.state === 'lost') {
     // Settled, not refunded: the hours were spent whether or not the run produced a number.
     settle(store, now)
+    store.updateJob(job.job_id, { state: answered.state, error_class: answered.error_class ?? null })
     emit(store, clock, 'baseline_run_failed', {
       job_id: job.job_id,
       state: answered.state,
@@ -261,6 +264,8 @@ async function collect(context, job, answered) {
     tokens: numberOf(collected?.usage?.total_tokens) ?? numberOf(answered?.tokens) ?? 0,
     actual: numberOf(collected?.gpu_hours) ?? numberOf(answered?.gpu_hours),
   })
+  // The job *did* succeed; what failed below is what it reported, which is a different fact.
+  store.updateJob(job.job_id, { state: 'succeeded' })
 
   const metricName = settings.metric.name
   const value = numberOf(collected?.metrics?.[metricName]) ?? numberOf(answered.metrics?.[metricName])
