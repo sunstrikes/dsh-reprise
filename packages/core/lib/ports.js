@@ -27,9 +27,10 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 
 import { safeSlug } from '@dsh-reprise/exec'
-import { landWithCli, runProcess } from '@dsh-reprise/exec/harness'
+import { landWithCli } from '@dsh-reprise/exec/harness'
 import { createClaudeHarness } from '@dsh-reprise/exec/harness/claude'
 import { createDshHarness } from '@dsh-reprise/exec/harness/dsh'
+import { createModelPort, modelCallName } from '@dsh-reprise/exec/model'
 import { createLocalPlatform } from '@dsh-reprise/exec/platform/local'
 import { createRayPlatform } from '@dsh-reprise/exec/platform/ray'
 
@@ -130,36 +131,30 @@ export function createWorktreeRunner({ repo, dir, base_ref: baseRef = 'HEAD' }, 
 }
 
 /**
- * The model port: one process per judgement, JSON in on stdin, JSON out on stdout.
+ * The model port: one process per judgement, one structured question in, one structured answer out.
  *
- * A command rather than an in-process function because every way of reaching a model this repo can
- * honestly describe is a command (`claude -p`, `dsh --profile headless`), and because a plugin
- * configuration that cannot hold a closure would otherwise need a second, different mechanism. The
- * judge already fails closed when the answer is not a JSON object, so a broken port degrades to a
- * refused artifact instead of a crash.
+ * The adapter itself lives in `@dsh-reprise/exec/model` (it is a CLI's wire format, not a kernel
+ * concern). This function is the wiring decision: where the call's record is filed, and which argv
+ * reaches which engine.
  *
- * @param {{command: string[], cwd?: string, env?: object, timeout_ms?: number}} options
+ * **The record lands in the artifact store**, under `model_call/<call site>/<subject>[/<ref>].json`.
+ * That is the audit trail ticket 29 renders: the prompt a model was given, the words it returned,
+ * and the object those words became. It is an artifact rather than a table row because a reader with
+ * the workspace directory and no database can open it, and because the record is content-addressed —
+ * asking the same question twice rewrites the same bytes instead of appending a second history.
+ *
+ * @param {{model: object, artifacts: object, cwd?: string}} options
  */
-export function createCommandModel({ command, cwd = process.cwd(), env, timeout_ms: timeoutMs = 10 * 60_000, run = runProcess }) {
-  if (!Array.isArray(command) || command.length === 0) {
-    throw new TypeError('createCommandModel needs an argv array')
-  }
-  const [binary, ...args] = command
-
-  return async (request) => {
-    const outcome = await run({
-      command: binary,
-      args,
-      cwd,
-      input: JSON.stringify(request),
-      env: { ...process.env, ...(env ?? {}) },
-      timeoutMs,
-    })
-    if (outcome.code !== 0) {
-      throw new Error(`the model command exited ${outcome.code}: ${(outcome.stderr ?? '').trim().split('\n').slice(-1)[0] ?? ''}`)
-    }
-    return outcome.stdout
-  }
+export function createModelFromConfig({ model, artifacts, cwd = process.cwd() }) {
+  const kind = model.kind ?? 'command'
+  const argv = kind === 'command' ? absoluteise(model.command, cwd) : model.command
+  return createModelPort({
+    kind,
+    command: argv,
+    timeout_ms: model.timeout_ms,
+    env: model.env,
+    record: (call) => artifacts.write(modelCallName(call), call),
+  })
 }
 
 /** What the executor is asked to run for one candidate: one argv, in the candidate's own worktree. */
@@ -315,11 +310,7 @@ export function portsFromConfig({ config, workspaceDir, store, log = () => {}, l
       )
     }
     ports.judge = createJudge({
-      model: createCommandModel({
-        command: absoluteise(config.model.command, launchDir),
-        env: config.model.env,
-        timeout_ms: config.model.timeout_ms,
-      }),
+      model: createModelFromConfig({ model: config.model, artifacts, cwd: launchDir }),
       // The pack declares "better"; a run may restate the metric it optimises for this round, which
       // is the shape `rounds.metric` already had. Prompts and the adjustable surface come from the
       // pack only: there is no second home for them to drift to.

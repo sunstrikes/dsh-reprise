@@ -360,6 +360,12 @@ test('classifyAsk names the cause without inventing a second class', () => {
   assert.equal(classifyAsk({ code: 0, stdout: '{"a":1}' }).error_class, 'ok')
 })
 
+test('a machine out of processes is an outage with its own cause, because retrying in a minute would be wrong', () => {
+  const verdict = classifyAsk({ spawnError: Object.assign(new Error('spawn EAGAIN'), { code: 'EAGAIN' }), stdout: '' })
+  assert.equal(verdict.error_class, MODEL_UNAVAILABLE)
+  assert.equal(verdict.cause, CAUSES.resourceExhausted)
+})
+
 test('every failure is a ModelUnavailable carrying the class, so a caller can branch on one name', async () => {
   const { ask } = port({ mode: 'garbage' })
   const error = await ask(VERIFY_QUESTION).then(

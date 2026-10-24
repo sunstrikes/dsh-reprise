@@ -1,6 +1,6 @@
 # Extending
 
-Three extension points, one page each. All are designed so that adding something does not require
+Four extension points, one page each. All are designed so that adding something does not require
 reading the phase machine, and each is held by a test rather than by a convention.
 
 ---
@@ -163,6 +163,65 @@ an injected `fetch`, and the one thing to check first on a real deployment is th
 shared directory is not shared, every job fails as `data` rather than reporting a fabricated number.
 That is the safe failure, and it is also the most confusing one to debug, so check it before anything
 else.
+
+---
+
+# Reach a model (one page)
+
+The loop consults a model at exactly five call sites — LAND's briefing, VERIFY's adversarial review,
+CAND_ANALYZE, ROUND_PLAN, ROUND_REFLECT — and every one of them goes through
+`packages/exec/lib/model.js`. There is no second way in: a phase does not own a parser, and nothing in
+the kernel spawns a process.
+
+## The wire
+
+One question in, one answer out.
+
+```js
+// what the adapter runs (model.command, or model.kind: 'dsh' | 'claude')
+{ protocol: 'dsh-reprise/model-question@1',
+  call_site: 'verify', subject: 'r1-h2', ref: 'a2',
+  prompt: '<the rendered skill + facts + answer shape>',
+  facts: { /* frozen evidence, JSON */ },
+  answer_schema: '{"verdict": "accept" | "reject", ...}',
+  question_id: '<sha256 of the content above>' }
+```
+
+A `kind: 'command'` wrapper receives that object on stdin and must print **one JSON object** on stdout.
+`kind: 'dsh'` and `kind: 'claude'` invoke the shipped CLIs (`dsh --profile headless --json -`,
+`claude -p --output-format stream-json`) with the *prompt* as their task; the adapter reads the answer
+out of the final stream event, tolerating a fenced block or prose around it.
+
+`question_id` is a digest of the question's content — not a clock, not a counter — which is what makes
+"the same question asked twice" the same question.
+
+## The four ways to get no answer, and the one class they become
+
+`binary_missing`, `exit_non_zero`, `timeout`, `unparseable_answer` — plus `crash`,
+`stream_overflow`, `resource_exhausted` and `port_error` — are all `model_unavailable` with a `cause`
+for the operator. That is the whole contract a caller needs: `isModelUnavailable(error)` is true, no
+artifact was written, no candidate was rejected, and `packages/core/lib/model-failure.js` records one
+`model_unavailable` row in the ops log (`store.ops()`) and retries the phase on a backoff. A phase never
+waits for a model without a deadline (`model.timeout_ms`, default ten minutes).
+
+If you need a sixth engine, add a `kind` to `KINDS` in `packages/exec/lib/model.js` — an argv and a
+stdin renderer — and a case to `packages/exec/test/model.test.js`. Nothing in the kernel changes.
+
+## Where the call is kept
+
+`<workspace>/artifacts/model_call/<call site>/<subject>[/<ref>].json`:
+
+```json
+{ "schema_version": 1, "protocol": "dsh-reprise/model-question@1",
+  "question_id": "…", "call_site": "verify", "subject": "r1-h2", "ref": "a2",
+  "prompt": "…", "facts": { }, "answer_schema": "…",
+  "status": "answered" | "unavailable", "answer": { }, "response": "the model's own words",
+  "error_class": null, "cause": null, "message": null }
+```
+
+No timestamp and no sequence number: the record's identity is the question, so a repeat rewrites the
+same bytes instead of appending a second history. The audit panel (ticket 29) reads these files with
+the workspace directory and nothing else.
 
 ---
 

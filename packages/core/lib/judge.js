@@ -15,6 +15,14 @@
  * it: there is no code path from a model-supplied number into an artifact field, the frontier or
  * the stop rule. That is stronger than "the model is asked not to score".
  *
+ * **One question, one answer, or one closed failure.** Every entry below asks through the model
+ * port with a structured question (`buildQuestion`) and receives a structured answer; the prose a
+ * model wraps it in is the adapter's problem (`@dsh-reprise/exec/model`), not this file's. When no
+ * answer arrives — a missing binary, a non-zero exit, a timeout, an unparseable reply — the entry
+ * rejects with `ModelUnavailable`, whose one class is `model_unavailable`. Every judgement point
+ * therefore fails the same way, and none of them turns an outage into "the review said reject" or
+ * "the analysis found nothing".
+ *
  * **The judge records opinions; the contract decides.** VERIFY is a hybrid phase: the L1 static
  * checks are deterministic facts computed by the kernel, and the adversarial review is a model that
  * participates in the verdict. The judge does not silently merge them. When they disagree — the
@@ -26,6 +34,7 @@
  */
 
 import { isNonEmptyString, isPlainObject } from '@dsh-reprise/contract'
+import { CAUSES, ModelUnavailable, asModelUnavailable, buildQuestion } from '@dsh-reprise/exec/model'
 
 import { staticReport } from './gate.js'
 import { loadSkill, loadSkills, renderPrompt } from './skills.js'
@@ -49,39 +58,6 @@ const VERDICTS = Object.freeze(['improved', 'regressed', 'inconclusive'])
 // ---------------------------------------------------------------- helpers
 
 const describe = (error) => (error instanceof Error ? error.message : String(error))
-
-/**
- * Read the model's answer as a JSON object, tolerating the prose models put around it.
- *
- * A fenced block and a "last JSON object in the text" pass are both here because both shapes are
- * what a real harness produces. What is *not* tolerated is a number where an object was asked for:
- * that returns `undefined`, and the call site fails closed.
- *
- * @param {unknown} raw
- * @returns {Record<string, unknown> | undefined}
- */
-export function parseAnswer(raw) {
-  if (isPlainObject(raw)) return raw
-  if (typeof raw !== 'string') return undefined
-  const text = raw.trim()
-  if (text === '') return undefined
-
-  const attempts = [text]
-  for (const match of text.matchAll(/```(?:json)?[ \t]*\r?\n([\s\S]*?)```/g)) attempts.push(match[1].trim())
-  const open = text.indexOf('{')
-  const close = text.lastIndexOf('}')
-  if (open >= 0 && close > open) attempts.push(text.slice(open, close + 1))
-
-  for (const attempt of attempts) {
-    try {
-      const parsed = JSON.parse(attempt)
-      if (isPlainObject(parsed)) return parsed
-    } catch {
-      // Try the next shape; a model that wrapped its JSON in prose is normal, not an error.
-    }
-  }
-  return undefined
-}
 
 const asString = (value) => (isNonEmptyString(value) ? value.trim() : undefined)
 
@@ -162,7 +138,7 @@ export function compareMetric(observed, baseline, direction = 'higher') {
  * answering a domain question, and the answer would look exactly like a configured one.
  *
  * @param {{
- *   model: (request: { call_site: string, prompt: string, facts: object, answer_schema: string }) => Promise<unknown>,
+ *   model: (question: object) => Promise<object>,
  *   skillsDir: string,
  *   metric: { name: string, direction?: 'higher' | 'lower' | 'up' | 'down', contract_ref?: string },
  *   surface?: { files?: string[], keys?: string[], symbols?: string[] },
@@ -240,11 +216,17 @@ export function createJudge({
    * One request to the model, rendered from the skill on disk right now — so editing markdown
    * changes the very next prompt without a rebuild.
    *
-   * A model port that throws is not allowed to kill the tick: the workspace may be hours into a run
-   * and an upstream 503 must not take the loop down. Each call site fails closed instead, and says
-   * why in its artifact.
+   * The question is built by the same function every caller uses (`buildQuestion`), which is what
+   * gives each call a content-addressed id and lets the adapter file the prompt and the answer side
+   * by side. `subject` and `ref` are the kernel's identifiers — the candidate a judgement is about,
+   * and the place in an attempt sequence — because an audit reader has to be able to file the record
+   * next to the artifact it explains.
+   *
+   * Everything that is not a structured answer becomes `ModelUnavailable` and travels out of the
+   * entry: an outage must not be recorded as an opinion (the review "rejecting", the analysis
+   * "finding nothing"), because then a candidate dies of a broken provider.
    */
-  const ask = async (callSite, facts) => {
+  const ask = async (callSite, facts, ref = null) => {
     const skill = loadSkill(skillsDir, callSite)
     const answerSchema = ANSWER_SHAPES[callSite]
 
@@ -257,17 +239,39 @@ export function createJudge({
       injection = { lines: [`(the injection packet could not be built: ${describe(error)})`] }
     }
     const prompt = renderPrompt(skill, { facts, answer: answerSchema, packet: injection?.lines ?? [] })
-    let raw
+    const question = buildQuestion({
+      call_site: callSite,
+      subject: subjectOf(facts),
+      ref,
+      prompt,
+      facts,
+      answer_schema: answerSchema,
+    })
+
+    let answer
     try {
-      raw = await model({ call_site: callSite, prompt, facts, answer_schema: answerSchema })
+      answer = await model(question)
     } catch (error) {
-      return { answer: undefined, prompt, problem: `the model port failed: ${describe(error)}` }
+      throw asModelUnavailable(error, { question })
     }
-    const answer = parseAnswer(raw)
-    if (answer === undefined) {
-      return { answer: undefined, prompt, problem: 'the model did not return a JSON object' }
+    if (!isPlainObject(answer)) {
+      // A port that hands back anything other than an object has not answered. This is the same
+      // closed class as an unreadable CLI reply: the call site cannot tell them apart, and it must
+      // not have to.
+      throw new ModelUnavailable({
+        cause: CAUSES.unparseableAnswer,
+        message: 'the model port returned no structured answer',
+        question,
+      })
     }
     return { answer, prompt }
+  }
+
+  /** What a judgement is about, as the audit record names it: a candidate, or a round. */
+  const subjectOf = (facts) => {
+    if (isNonEmptyString(facts?.candidate_id)) return facts.candidate_id
+    if (Number.isSafeInteger(facts?.round)) return `round-${facts.round}`
+    return null
   }
 
   const baselineValue = async () => {
@@ -279,10 +283,7 @@ export function createJudge({
   }
 
   /** The adversarial review, normalised into the one enum the gate consumes. */
-  const reviewOf = (answer, problem) => {
-    if (problem !== undefined) {
-      return { verdict: 'reject', rationale: `the adversarial review could not be obtained: ${problem}`, concerns: [] }
-    }
+  const reviewOf = (answer) => {
     const raw = answer.verdict
     const verdict = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
     const rationale = asString(answer.rationale)
@@ -356,8 +357,8 @@ export function createJudge({
         },
         l1_checks: checks,
       }
-      const { answer, problem } = await ask('verify', facts)
-      const reviewer = reviewOf(answer, problem)
+      const { answer } = await ask('verify', facts, `a${attemptNumber}`)
+      const reviewer = reviewOf(answer)
       return persist(
         'verify_verdict',
         candidateId,
@@ -410,7 +411,7 @@ export function createJudge({
       // Kept as the model wrote it, not coerced: an absent root cause is `missing` (nothing was
       // produced) and an empty one is `invalid` (something was produced that is not a finding).
       // Collapsing both into `undefined` here would undo the distinction the contract exists for.
-      const rootCause = typeof answer?.root_cause === 'string' ? answer.root_cause.trim() : undefined
+      const rootCause = typeof answer.root_cause === 'string' ? answer.root_cause.trim() : undefined
 
       return persist('analyze_report', candidateId, {
         candidate_id: candidateId,
@@ -432,7 +433,7 @@ export function createJudge({
      */
     async plan({ round, facts } = {}) {
       const { answer } = await ask('round_plan', { ...facts, round })
-      const raw = Array.isArray(answer?.hypotheses) ? answer.hypotheses : []
+      const raw = Array.isArray(answer.hypotheses) ? answer.hypotheses : []
       const hypotheses = raw.map((hypothesis, index) => {
         if (!isPlainObject(hypothesis)) return hypothesis
         return {
@@ -455,7 +456,7 @@ export function createJudge({
      */
     async reflect({ round, facts, now } = {}) {
       const { answer } = await ask('round_reflect', { ...facts, round })
-      const lessons = Array.isArray(answer?.lessons)
+      const lessons = Array.isArray(answer.lessons)
         ? answer.lessons.map((lesson) =>
             isPlainObject(lesson)
               ? { statement: typeof lesson.statement === 'string' ? lesson.statement.trim() : undefined, evidence: asString(lesson.evidence) }
@@ -465,9 +466,9 @@ export function createJudge({
 
       return {
         round,
-        summary: typeof answer?.summary === 'string' ? answer.summary.trim() : undefined,
+        summary: typeof answer.summary === 'string' ? answer.summary.trim() : undefined,
         lessons,
-        next_round_focus: asStringList(answer?.next_round_focus),
+        next_round_focus: asStringList(answer.next_round_focus),
         at_ms: now,
       }
     },

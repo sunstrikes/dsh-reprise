@@ -75,6 +75,10 @@ export const CAUSES = Object.freeze({
   unparseableAnswer: 'unparseable_answer',
   crash: 'crash',
   streamOverflow: 'stream_overflow',
+  // The machine, not the provider: the OS would not give us a process to start (`EAGAIN`, out of
+  // file descriptors, out of memory). Same condition — no answer — but the retry is seconds, not a
+  // minute, because the cause is local and it clears on its own.
+  resourceExhausted: 'resource_exhausted',
   // The port itself failed before a process existed: a wrapper that threw, a configuration with no
   // argv, an error a caller passed through. Same condition, different plumbing.
   portError: 'port_error',
@@ -256,6 +260,9 @@ export function classifyAsk({
     if (spawnError.code === 'ENOENT') {
       return unavailable(CAUSES.binaryMissing, `the model command is not installed: ${reason}`)
     }
+    if (RESOURCE_CODES.has(spawnError.code)) {
+      return unavailable(CAUSES.resourceExhausted, `the model command could not be started — no process to run it in: ${reason}`)
+    }
     return unavailable(CAUSES.crash, `the model command could not be started: ${reason}`)
   }
   if (signal !== null && signal !== undefined) {
@@ -276,6 +283,9 @@ export function classifyAsk({
   }
   return { error_class: OK, cause: null, message: '' }
 }
+
+/** Operating-system refusals that mean "try again shortly" rather than "this will never work". */
+const RESOURCE_CODES = new Set(['EAGAIN', 'EMFILE', 'ENFILE', 'ENOMEM', 'EBUSY'])
 
 /** Thrown when no answer arrived. Carries the class, the cause and what the CLI actually said. */
 export class ModelUnavailable extends Error {
