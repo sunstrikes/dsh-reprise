@@ -88,7 +88,30 @@ test('a candidate implementer without a runner is refused: LAND would throw a Ty
 test('a round workflow with no model port is refused at boot — ROUND_PLAN has nobody to ask', () => {
   const resolved = resolve({ workspace: 'w', executor: LOCAL, rounds: { metric: { name: 'auc', direction: 'higher' } } })
   assert.equal(resolved.ok, false)
-  assert.match(resolved.problem, /model\.command/)
+  assert.match(resolved.problem, /model\.(command|kind)/)
+})
+
+test('a model port can name a shipped CLI instead of a command, so a headless run needs no wrapper script', () => {
+  const resolved = resolve({
+    workspace: 'w',
+    executor: LOCAL,
+    rounds: { max_rounds: 1 },
+    // `dsh --profile headless --json -` is the shipped headless app: the adapter knows the argv, and
+    // the run does not have to keep a copy of it in a configuration file.
+    model: { kind: 'dsh', timeout_ms: 120000 },
+  })
+  assert.equal(resolved.ok, true, resolved.problems?.join('; '))
+  assert.equal(resolved.config.model.kind, 'dsh')
+})
+
+test('a model port that names neither a kind nor a command is refused, and so is an unknown kind', () => {
+  const empty = resolve({ workspace: 'w', executor: LOCAL, rounds: { max_rounds: 1 }, model: {} })
+  assert.equal(empty.ok, false)
+  assert.match(empty.problem, /model must name a kind/)
+
+  const unknown = resolve({ workspace: 'w', executor: LOCAL, rounds: { max_rounds: 1 }, model: { kind: 'gpt5' } })
+  assert.equal(unknown.ok, false)
+  assert.match(unknown.problem, /model\.kind must be one of/)
 })
 
 test('a candidate-only workspace needs no model port: proposals alone are a legitimate run', () => {

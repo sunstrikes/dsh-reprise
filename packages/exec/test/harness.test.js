@@ -354,6 +354,7 @@ test('the prompt states the isolation rules the port cannot enforce for the mode
 test('the conformance contract rejects results the kernel must never receive', () => {
   const good = {
     ok: true,
+    prompt: 'land candidate cand-1',
     error_class: 'ok',
     retryable: false,
     conflict: false,
@@ -385,6 +386,7 @@ test('the conformance contract rejects results the kernel must never receive', (
     [{ cross_check: { status: 'mismatch' } }, 'a mismatch may not ride along on a successful landing'],
     [{ parent_commit: 'not-a-sha' }, 'parent_commit must be a git object id, or the identity chain cannot be walked'],
     [{ error_class: 'made_up' }, 'an undeclared class would silently fall through the kernel\'s switch'],
+    [{ prompt: '' }, 'a result with no prompt cannot be filed next to the answer it produced'],
     [{ ok: false, error_class: 'cross_check_mismatch', conflict: false, message: 'x' }, 'a mismatch is a conflict state, never an invalid artifact'],
   ]
   for (const [patch, why] of rejected) {

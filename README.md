@@ -161,7 +161,9 @@ pack, and a pack missing a part is refused by name at boot instead of running ha
 | `candidate.command` | **required for `command`** | argv; `{candidate}` and `{worktree}` are substituted |
 | `runner.repo` / `runner.dir` | **required with `candidate`** | repo inside the workspace; where worktrees are created |
 | `runner.base_ref` | git default | the commit candidates branch from |
-| `model.command` | **required if `rounds` is set** | every judgement phase reaches a model through this argv |
+| `model.kind` | `'command'` | how a judgement reaches a model: `dsh` (`dsh --profile headless --json -`), `claude` (`claude -p --output-format stream-json`), or `command` for a wrapper of your own |
+| `model.command` | **required for `kind: command`** | the wrapper's argv: one JSON question on stdin, one JSON answer (a JSON object) on stdout |
+| `model.timeout_ms` | `600000` | how long one judgement may take before it is killed — a phase never waits for a model without a deadline |
 | `rounds.metric.name` / `.direction` | the pack's contract | the one metric the round gate optimises; restating it is how a run points at a different objective |
 | `rounds.metric.contract_ref` | the contract's `name` | pointer to the frozen metric contract |
 | `rounds.max_rounds` / `.candidates_per_round` | `3` / `2` | round workflow shape |
@@ -175,6 +177,25 @@ pack, and a pack missing a part is refused by name at boot instead of running ha
 | `poll.base_ms` / `.max_ms` / `.grace_attempts` | `1000` / `60000` / `2` | job poll backoff |
 | `gate.max_attempts` / `.base_ms` / `.max_ms` | `3` / `1000` / `60000` | how many times gate two may run before a candidate stops, and the backoff between attempts; `1` restores a single shot |
 | `limits.max_wall_ms` / `.max_idle_ms` | `3600000` / `1800000` | per-job wall-clock and silence deadlines |
+
+One of `model.kind` and `model.command` must be there when `rounds` is set; the five call sites are the
+only places a model is consulted, and they all go through this one adapter —
+[`packages/exec/lib/model.js`](packages/exec/lib/model.js). It sends one structured question
+(`{protocol, call_site, subject, prompt, facts, answer_schema, question_id}`), accepts one JSON object
+back (a bare object, a stream's final message, or a fenced block inside prose), and reports **one**
+failure class — `model_unavailable` — for all four ways of getting no answer: a missing binary, a
+non-zero exit, a timeout, an unreadable reply. A judgement never becomes "the review said reject" and
+a phase never sits waiting: the outage is recorded once in the ops log
+(`store.ops()` → `model_unavailable`, with the cause beside it) and the phase is retried on a backoff
+(1 min doubling to 1 h).
+
+Every call is also filed where a reader can see the originals — including LAND's briefing of the
+implementer, which is `model_call/land/<candidate>.json`: `<workspace>/artifacts/model_call/<call
+site>/<subject>[/<ref>].json`, holding `prompt`, `facts`, `answer_schema`, `answer` (the parsed
+object), `response` (the words the model actually returned), and `status` / `error_class` / `cause` /
+`message` when no answer arrived. The record has no timestamp and no counter — its identity is the
+question's own `question_id` — so asking the same question twice rewrites the same bytes instead of
+appending a second history. That is the record the audit panel (ticket 29) reads.
 
 Validation is `packages/core/lib/config.js` and it runs once at boot. The package exports no `Config`
 object, so the host holds no schema for the row: a bad config is a log line, never a boot failure. Two
