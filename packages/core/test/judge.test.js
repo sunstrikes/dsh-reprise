@@ -14,13 +14,14 @@
  *    disagreement a human needs to see.
  */
 import assert from 'node:assert/strict'
-import { cpSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
 import { validateArtifact } from '@dsh-reprise/contract'
 
+import { memoryArtifacts } from '../lib/artifacts.js'
 import { defaultStaticChecks } from '../lib/judge.js'
 import { FEED_PROMPTS_DIR, judgeFor } from './support/domain.js'
 
@@ -69,12 +70,72 @@ test('an accepting adversarial review yields a contract-valid verdict, with the 
   assert.ok(artifact.checks.length >= 2, 'a verdict with no checks is an opinion')
   assert.deepEqual(
     artifact.checks.map((check) => check.name),
-    defaultStaticChecks(VERIFY_INPUT).map((check) => check.name),
-    'the L1 checks are the kernel\'s, not the model\'s',
+    [...defaultStaticChecks(VERIFY_INPUT).map((check) => check.name), 'syntax', 'allowed_surface', 'conflict_markers'],
+    'the checks are the kernel\'s — its own metadata facts plus gate two\'s static report — not the model\'s',
   )
   assert.deepEqual(model.sites(), ['verify'], 'one model call, at one call site')
   assert.match(model.calls[0].prompt, /VERIFY — adversarial review/, 'the prompt is the markdown skill')
   assert.equal(model.calls[0].facts.candidate_id, 'c1')
+})
+
+test('the report travels to the review as evidence, and the record keeps the bytes it checked', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'reprise-judge-worktree-'))
+  mkdirSync(join(dir, 'model'), { recursive: true })
+  writeFileSync(join(dir, 'model/structure.json'), '{"hidden_units": 64}\n', 'utf8')
+
+  const model = scripted({ verify: { verdict: 'accept', rationale: 'knob only' } })
+  const judge = judgeFor({ model: model.model, surface: { files: ['model/structure.json'] } })
+  const artifact = await judge.verify({
+    ...VERIFY_INPUT,
+    files: ['model/structure.json'],
+    worktreeDir: dir,
+    attempt: 2,
+  })
+
+  assert.equal(artifact.attempt, 2, 'the gate record carries its place in the attempt sequence')
+  assert.deepEqual(
+    model.calls[0].facts.static_report.checks.map((check) => `${check.name}:${check.result}`),
+    ['syntax:pass', 'allowed_surface:pass', 'conflict_markers:pass'],
+    'the adversarial review reasons from the kernel\'s report, it does not produce it',
+  )
+  assert.deepEqual(artifact.evidence.whitelist, ['model/structure.json'])
+  assert.equal(artifact.evidence.files.length, 1)
+  assert.match(artifact.evidence.files[0].digest, /^[0-9a-f]{64}$/, 'evidence that cannot be re-read cannot be recomputed')
+  assert.deepEqual(validateArtifact('verify_verdict', artifact), { status: 'ok', message: '' })
+})
+
+test('a change outside the adjustable surface is a failed check, so the gate cannot pass it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'reprise-judge-surface-'))
+  mkdirSync(join(dir, 'model'), { recursive: true })
+  writeFileSync(join(dir, 'model/structure.json'), '{"hidden_units": 64}\n', 'utf8')
+  writeFileSync(join(dir, 'model/evaluate.py'), 'print("moved the split")\n', 'utf8')
+
+  const model = scripted({ verify: { verdict: 'accept', rationale: 'looks fine to me' } })
+  const judge = judgeFor({ model: model.model, surface: { files: ['model/structure.json'] } })
+  const artifact = await judge.verify({
+    ...VERIFY_INPUT,
+    files: ['model/evaluate.py', 'model/structure.json'],
+    worktreeDir: dir,
+  })
+
+  assert.equal(artifact.checks.find((check) => check.name === 'allowed_surface').result, 'fail')
+  assert.equal(artifact.passed, false)
+  const verdict = validateArtifact('verify_verdict', artifact)
+  assert.equal(verdict.status, 'conflict', 'the review accepted over a fact that failed — neither wins')
+  assert.match(verdict.message, /accepted while 1 check\(s\) failed/)
+})
+
+test('attempt 2 is recorded under its own reference, so attempt 1 can still be recomputed', async () => {
+  const artifacts = memoryArtifacts()
+  const model = scripted({ verify: { verdict: 'accept', rationale: 'knob only' } })
+  const judge = judgeFor({ model: model.model, artifacts })
+
+  await judge.verify({ ...VERIFY_INPUT, attempt: 1 })
+  await judge.verify({ ...VERIFY_INPUT, attempt: 2 })
+
+  assert.equal(artifacts.read('verify_verdict:c1:a1').attempt, 1, 'the first attempt is not overwritten by the second')
+  assert.equal(artifacts.read('verify_verdict:c1:a2').attempt, 2)
+  assert.equal(artifacts.read('verify_verdict:c1').attempt, 2, 'and the plain reference still names the latest record')
 })
 
 test('the model cannot contribute the checks — only the review', async () => {

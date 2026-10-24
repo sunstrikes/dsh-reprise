@@ -27,6 +27,7 @@
 
 import { isNonEmptyString, isPlainObject } from '@dsh-reprise/contract'
 
+import { staticReport } from './gate.js'
 import { loadSkill, loadSkills, renderPrompt } from './skills.js'
 
 // Registers `round_reflect` and `land_hypothesis` with the contract as a side effect of importing.
@@ -169,6 +170,8 @@ export function compareMetric(observed, baseline, direction = 'higher') {
  *   staticChecks?: (input: object) => { name: string, result: 'pass' | 'fail' }[],
  *   artifacts?: { write: (name: string, value: unknown) => unknown },
  *   packet?: (request: { call_site: string, facts: object }) => { lines?: string[], digest?: string } | undefined,
+ *   readFile?: (path: string) => string,
+ *   parsers?: Record<string, (content: string, context: { path: string }) => void>,
  * }} options
  */
 export function createJudge({
@@ -180,6 +183,8 @@ export function createJudge({
   staticChecks = defaultStaticChecks,
   artifacts,
   packet,
+  readFile,
+  parsers,
 } = {}) {
   if (typeof model !== 'function') {
     throw new TypeError(
@@ -221,10 +226,13 @@ export function createJudge({
       : undefined
   const surfaceFacts = allowedSurface === undefined ? {} : { allowed_surface: allowedSurface }
 
-  const persist = (kind, candidateId, artifact) => {
+  const persist = (kind, candidateId, artifact, ref = undefined) => {
     if (typeof artifacts?.write !== 'function') return artifact
     // The reference the fact plane records (`verify_verdict:<id>`) resolves to this name.
     artifacts.write(`${kind}:${candidateId}`, artifact)
+    // A gate attempt keeps its own reference as well: attempt 2 must not overwrite the record of
+    // attempt 1, or "one failed attempt is not permanent" would have nothing to recompute against.
+    if (ref !== undefined) artifacts.write(`${kind}:${candidateId}:${ref}`, artifact)
     return artifact
   }
 
@@ -297,32 +305,78 @@ export function createJudge({
 
   return {
     /**
-     * VERIFY: L1 checks (kernel) + adversarial review (model), recorded side by side.
+     * VERIFY: the kernel's static report + the model's adversarial review, recorded side by side.
      *
-     * `passed` is the review's answer, not a merge of the two opinions. The contract is the referee:
-     * a pass that contradicts a failed check comes back as `conflict`, and the candidate stops with
-     * both facts preserved.
+     * The two pieces of evidence have different owners and neither is merged into the other:
+     *
+     *   - `checks` is the report `gate.js` computed from the candidate's worktree — syntax, the
+     *     adjustable-surface whitelist and residual conflict markers. A model cannot add, drop or
+     *     reword one: anything it sends named `checks` is ignored below.
+     *   - `reviewer` is the one thing the model is asked for. `passed` is the gate's *claim* about the
+     *     two, `reviewer.verdict === 'accept'` **and** no check failed.
+     *
+     * The contract is then the referee. When the review accepts over a check that failed, the claim
+     * cannot follow from the evidence, `validateArtifact` returns `conflict`, and the loop stops the
+     * candidate with both facts preserved. A unanimous "no" is not a conflict: that candidate simply
+     * failed its gate.
+     *
+     * `attempt` is the gate record's place in the sequence. It is the kernel's number, not the
+     * model's, and it is what lets attempt 2 be recorded without erasing attempt 1.
      */
-    async verify({ candidateId, state, parent, now, files } = {}) {
-      const checks = staticChecks({ candidateId, state, parent, files })
+    async verify({ candidateId, state, parent, now, files, worktreeDir, attempt } = {}) {
+      const attemptNumber = Number.isSafeInteger(attempt) && attempt > 0 ? attempt : 1
+      const changed = Array.isArray(files) ? files : []
+
+      const report = staticReport({
+        candidateId,
+        files: changed,
+        worktreeDir,
+        surface: allowedSurface,
+        readFile,
+        parsers,
+      })
+      // The deeper checks a phase worker (or a test) contributes stay additive: they arrive through
+      // the same list, so the contract's rule — evidence that disagrees with the review is a conflict
+      // — covers them without a second mechanism.
+      const checks = [...staticChecks({ candidateId, state, parent, files: changed }), ...report.checks]
+      const checksOk = checks.length > 0 && checks.every((check) => check.result === 'pass')
+
       const facts = {
         candidate_id: candidateId,
         round: state?.round ?? null,
         hypothesis: state?.hypothesis ?? null,
         parent_binding: parent === undefined ? null : { parent_id: parent.parent_id ?? null, parent_commit: parent.parent_commit ?? null },
-        files: Array.isArray(files) ? files : [],
+        files: changed,
         ...surfaceFacts,
+        attempt: attemptNumber,
+        static_report: {
+          ready_to_submit: report.ready_to_submit,
+          checks: report.checks,
+          unchecked: report.unchecked,
+        },
         l1_checks: checks,
       }
       const { answer, problem } = await ask('verify', facts)
       const reviewer = reviewOf(answer, problem)
-      return persist('verify_verdict', candidateId, {
-        candidate_id: candidateId,
-        passed: reviewer.verdict === 'accept',
-        checks,
-        reviewer,
-        decided_at_ms: now,
-      })
+      return persist(
+        'verify_verdict',
+        candidateId,
+        {
+          candidate_id: candidateId,
+          attempt: attemptNumber,
+          passed: reviewer.verdict === 'accept' && checksOk,
+          checks,
+          reviewer,
+          decided_at_ms: now,
+          // What the checks ran over, so this record can be recomputed rather than trusted.
+          evidence: {
+            whitelist: report.whitelist,
+            files: report.files,
+            unchecked: report.unchecked,
+          },
+        },
+        `a${attemptNumber}`,
+      )
     },
 
     /**
