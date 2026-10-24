@@ -13,7 +13,8 @@
     "./platform/local": "./lib/platform-local.js",
     "./platform/ray": "./lib/platform-ray.js",
     "./local-runner": "./lib/local-runner.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./archive": "./lib/archive.js"
   },
   "files": [
     "lib",
