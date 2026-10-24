@@ -1,0 +1,65 @@
+[
+  {
+    "note": "a clean series: two windows, an ordinal each, half-open bounds, and a metrics table per window — the shape every comparison later pairs on",
+    "expect": "ok",
+    "artifact": {
+      "schema_version": 1,
+      "unit": "step",
+      "windows": [
+        { "index": 0, "start": 0, "end": 10, "metrics": { "metric_a": 1.5, "metric_b": 0.25 } },
+        { "index": 1, "start": 10, "end": 20, "metrics": { "metric_a": 1.25, "metric_b": 0.3 } }
+      ]
+    }
+  },
+  {
+    "note": "no windows at all — an adapter that could not find one must report a data failure, and a kernel that accepted this would score a run that measured nothing",
+    "expect": "invalid",
+    "artifact": {
+      "schema_version": 1,
+      "unit": "step",
+      "windows": []
+    }
+  },
+  {
+    "note": "a metric that is not a finite number — a parser that turns a missing value into NaN or a string hands the comparison a number it must never compare",
+    "expect": "invalid",
+    "artifact": {
+      "schema_version": 1,
+      "unit": "step",
+      "windows": [{ "index": 0, "start": 0, "end": 10, "metrics": { "metric_a": 1e999 } }]
+    }
+  },
+  {
+    "note": "a window with no ordinal: without it there is no row to name in a message, and \"the third window\" becomes an array position a reader cannot verify",
+    "expect": "missing",
+    "artifact": {
+      "schema_version": 1,
+      "unit": "step",
+      "windows": [{ "start": 0, "end": 10, "metrics": { "metric_a": 1.5 } }]
+    }
+  },
+  {
+    "note": "the same window reported twice with different numbers — two accounts of one interval, which is the fact plane disagreeing with itself, not a malformed document",
+    "expect": "conflict",
+    "artifact": {
+      "schema_version": 1,
+      "unit": "step",
+      "windows": [
+        { "index": 0, "start": 0, "end": 10, "metrics": { "metric_a": 1.5 } },
+        { "index": 1, "start": 0, "end": 10, "metrics": { "metric_a": 1.6 } }
+      ]
+    }
+  },
+  {
+    "note": "the same window reported twice with identical numbers — one row per window is the shape's promise, so a duplicate is malformed rather than an extra measurement",
+    "expect": "invalid",
+    "artifact": {
+      "schema_version": 1,
+      "unit": "step",
+      "windows": [
+        { "index": 0, "start": 0, "end": 10, "metrics": { "metric_a": 1.5 } },
+        { "index": 1, "start": 0, "end": 10, "metrics": { "metric_a": 1.5 } }
+      ]
+    }
+  }
+]
