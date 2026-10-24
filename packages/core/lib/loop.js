@@ -19,6 +19,7 @@ import { judgeTimeout } from '@dsh-reprise/exec'
 import { autoResumeIfClear, budgetOf, canDispatch, evaluate, pause } from './budget.js'
 import { gateSettings, recheckReport } from './gate.js'
 import { consumePending } from './intents.js'
+import { jobMarker, outcomeOf } from './jobs.js'
 import { stepWorkspace } from './rounds.js'
 import { evaluateStop } from './stop.js'
 
@@ -512,6 +513,11 @@ function failAttempt(ports, candidateId, { gate, attempt, record, message, artif
 async function submit(ports, candidateId, state) {
   const { store, clock, platform, config } = ports
   const budget = budgetOf(ports.workspace ?? workspaceState(store, clock, config), config)
+  // The marker is what makes this job findable in the cluster's own listing afterwards. It is built
+  // here, from facts the kernel owns (which candidate, which round), and handed to the executor so
+  // that the plan and the ledger row cannot end up naming two different jobs.
+  const round = state.round
+  const marker = jobMarker({ candidateId, round })
 
   let submitted
   try {
@@ -519,6 +525,9 @@ async function submit(ports, candidateId, state) {
       submissionId: candidateId,
       candidateId,
       gpuHours: state.reserved_gpu_hours ?? budget.candidate_gpu_hours,
+      // The round reaches the plan, which is where the job's marker is built: the plan and the
+      // ledger row then name the same job by construction.
+      round,
     })
   } catch (error) {
     // Two kinds of throw, and conflating them is a bug in both directions.
@@ -560,6 +569,8 @@ async function submit(ports, candidateId, state) {
     next_poll_at_ms: 0,
     state: submitted.state ?? 'running',
     attempts: 0,
+    round,
+    marker,
   })
 
   transition(
@@ -599,6 +610,9 @@ async function monitor(ports, candidateId, state) {
     } catch {
       canceled = false
     }
+    // We stopped it, so the ledger records a cancelled job — the same rule as an external stop,
+    // because the causal fact is "someone ended it", not "the candidate broke".
+    store.updateJob(job.job_id, { outcome: 'canceled', error_class: 'canceled' })
     transition(
       ports,
       candidateId,
@@ -618,6 +632,7 @@ async function monitor(ports, candidateId, state) {
   }
 
   if (polled.state === 'succeeded') {
+    store.updateJob(job.job_id, { state: 'succeeded', outcome: 'succeeded' })
     transition(
       ports,
       candidateId,
@@ -630,15 +645,19 @@ async function monitor(ports, candidateId, state) {
   }
 
   if (polled.state === 'failed' || polled.state === 'lost') {
-    // No four-state status: nothing was malformed, the job simply did not produce a result. The
-    // platform's error class is the diagnosis, and cancel() is a different class again.
-    return reject(
-      ports,
-      candidateId,
-      'MONITOR_POLL',
-      { message: `job ${polled.state}: ${polled.error_class ?? 'no error class'}` },
-      { job_id: job.job_id, error_class: polled.error_class ?? null },
-    )
+    // No four-state status: nothing was malformed, the job simply did not produce a result.
+    //
+    // The outcome is the ledger's own word, not the platform's: a job somebody stopped is
+    // `canceled` and a job that broke is `failed`, and they stay two different rows so that "which
+    // jobs failed" never answers with a stop. Both are recorded; only one is a candidate defect.
+    const outcome = outcomeOf(polled)
+    store.updateJob(job.job_id, { state: polled.state, error_class: polled.error_class ?? null, outcome })
+    const message =
+      outcome === 'canceled'
+        ? 'the job was stopped, and not by us: an external stop says nothing about the candidate\u2019s code, ' +
+          'so this candidate produced no measurement rather than a bad one'
+        : `job ${polled.state}: ${polled.error_class ?? 'no error class'}`
+    return reject(ports, candidateId, 'MONITOR_POLL', { message }, { job_id: job.job_id, error_class: polled.error_class ?? null, outcome })
   }
 
   // Still running, or not visible upstream yet: back off, never spin.
@@ -786,6 +805,10 @@ export async function reconcile(ports) {
         next_poll_at_ms: 0,
         state: remote.state ?? 'running',
         attempts: 0,
+        // The adopted row carries the same identity the plan put on the job, so the ledger view can
+        // match it in the cluster's listing even though we never saw the submit answer.
+        round: state.round,
+        marker: state.round === undefined ? null : jobMarker({ candidateId, round: state.round }),
       })
       const { seq } = emit(store, clock, candidateId, 'job_adopted_on_recovery', {
         job_id: remote.job_id,
@@ -797,7 +820,15 @@ export async function reconcile(ports) {
     }
 
     if (remote !== undefined && local !== undefined && remote.state !== local.state) {
-      store.updateJob(local.job_id, { state: remote.state })
+      // `find()` answers a state and nothing else, so `failed` here cannot tell an external stop from
+      // a break. Recording the outcome now would invent `failed` for a job an operator stopped, so a
+      // failed correction leaves the outcome unset and the next poll — which asks the question that
+      // can — records which of the two it was.
+      const correctedOutcome = remote.state === 'failed' ? undefined : outcomeOf(remote)
+      store.updateJob(local.job_id, {
+        state: remote.state,
+        ...(correctedOutcome === undefined ? {} : { outcome: correctedOutcome }),
+      })
       const corrected = emit(store, clock, candidateId, 'job_state_corrected', { job_id: local.job_id, from: local.state, to: remote.state })
       // Folded into state here and now: applied_seq means "no event is waiting to be folded",
       // so an event that changed nothing still counts as folded.

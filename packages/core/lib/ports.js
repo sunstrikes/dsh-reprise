@@ -34,6 +34,7 @@ import { createLocalPlatform } from '@dsh-reprise/exec/platform/local'
 import { createRayPlatform } from '@dsh-reprise/exec/platform/ray'
 
 import { fileArtifacts } from './artifacts.js'
+import { jobMarker, MARKER_KEY } from './jobs.js'
 import { metricFromContract } from './domain.js'
 import { createJudge } from './judge.js'
 import { readRoundsState } from './rounds.js'
@@ -173,11 +174,18 @@ export function createCommandModel({ command, cwd = process.cwd(), env, timeout_
  *    point at. The plan names the tree to **ship** (`worktreeDir` + the runner's `baseRef`) and the
  *    argv that runs *inside the unpacked package*. Handing a laptop path to a Ray plan would be a
  *    job that fails on a node with "no such directory" three minutes into a GPU reservation.
+ *
+ * Exported so a test can read what a job will say about itself without a cluster; `createPlatform` is
+ * the only caller in production.
  */
-function planFor(config, { workspaceDir, runner }) {
+export function planForConfig(config, { workspaceDir, runner }) {
   const executor = config.executor ?? { kind: 'local' }
+
+  // Every job of ours carries a **marker**, so it can be recognised again in the cluster's own listing
+  // afterwards (`jobs.js` reads it back). `metadata` is where it goes on Ray, because a listing row's
+  // `job_id` may be null while `submission_id` and `metadata` survive.
   if ((executor.kind ?? 'local') === 'ray') {
-    return ({ candidateId }) => ({
+    return ({ candidateId, round }) => ({
       // Runnable inside the unpacked package: relative paths resolve against the candidate's tree,
       // which is the whole point of shipping it.
       entrypoint: executor.command,
@@ -185,10 +193,10 @@ function planFor(config, { workspaceDir, runner }) {
       baseRef: runner?.baseRef,
       runtimeEnv: { env_vars: { ...(executor.env ?? {}) } },
       ...(executor.num_gpus === undefined ? {} : { numGpus: executor.num_gpus }),
-      metadata: {},
+      metadata: { [MARKER_KEY]: jobMarker({ candidateId, round }) },
     })
   }
-  return ({ candidateId }) => ({
+  return ({ candidateId, round }) => ({
     command: executor.command,
     // The candidate's worktree is the execution directory: the job evaluates the candidate's tree,
     // not the checkout the loop happens to live in.
@@ -204,7 +212,7 @@ function planFor(config, { workspaceDir, runner }) {
  */
 export function createPlatform(config, context) {
   const executor = config.executor ?? { kind: 'local' }
-  const plan = planFor(config, context)
+  const plan = planForConfig(config, context)
   const limits = config.limits ?? {}
   const metricsRequired = executor.metrics_required !== false
 

@@ -195,6 +195,7 @@ afterwards, so editing the patch mid-run changes nothing the dashboard reports.
 | CLI | `node packages/core/lib/cli/run.js --workspace <dir> --config <file>` | the same wiring the host ticks, driven by a loop; exit 0 conclusion, 1 no comparable metric, 2 usage, 3 timeout |
 | CLI | `node packages/core/lib/cli/dump.js --candidate <id>` | timeline, every gate verdict, identity bindings, frontier position, and why the run stopped |
 | CLI | `node packages/core/lib/cli/intents.js place <kind>` / `list` | human intents (`proposal`, `grant`, `anchor`, `pause`, `resume`, `approval`, `experience`) written into `<workspace>/pending/` |
+| CLI | `node packages/core/lib/cli/jobs.js list` / `reap --job <id>` | the cluster job ledger: our jobs as the cluster lists them, the orphans (our marker, no ledger row), and the only way an orphan is ever stopped |
 | Skills | `<domain>/prompts/{land,verify,cand-analyze,round-plan,round-reflect}/SKILL.md` | what the model is told at each of the five call sites; markdown on disk, part of the domain pack, read fresh on every call — **not** DSH skills and not registered as such |
 
 The bundle provides no service and emits no event: it consumes `timer`, `connection` and `tools`.

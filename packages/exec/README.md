@@ -186,6 +186,7 @@ const canceled = await cancelJob(platform, submitted.job_id)
 | `collect` | `jobId` **or the poll result** | `{state, metrics?, error_class?, artifacts[]}` — `metrics` only for `succeeded` |
 | `find` | `candidateId` | `{job_id, state, harness?, submitted_at_ms?, deadline_ms?}` or `undefined`; `deadline_ms` is **absolute** |
 | `cancel` | `jobId` | `{accepted, state_after}` — idempotent, `accepted: false` when already terminal |
+| `list` *(optional)* | — | `{ok: true, jobs: [...]}` or `{ok: false, message}` — the cluster's whole job listing, rows with `job_id: null` kept |
 
 `poll()` names the job it is about, and every method that takes a job takes **either the id or the
 poll result** (`resolveJobId()`): calling `collect()` with the answer that just said `succeeded` is
@@ -194,6 +195,12 @@ the natural next step, and doing it used to interpolate the object into the requ
 finished — the one wrong answer user story 20 is about. Anything that is neither a non-empty string
 nor an object carrying a `job_id` throws a `TypeError`; a malformed argument is a caller bug and is
 **never** spelled `lost`.
+
+`list()` is not part of the port: the phase machine never needs it. It is the Ray adapter's answer to
+"which jobs does the cluster think are running", and the only source that can tell an **orphan** — a
+job carrying this run's marker (`metadata.marker`, `reprise:candidate=<id>:round=<n>`) with no ledger
+row — apart from somebody else's work. `packages/core/lib/jobs.js` turns it into that view, and only
+an explicit `jobs reap --job <id>` ever stops anything.
 
 `submitJob` / `pollJob` / `collectJob` / `findJob` / `cancelJob` are thin awaited wrappers that also
 **validate the answer** (`assertPlatform`, `assertPollResult`, … in `lib/platform.js`). Use them, not

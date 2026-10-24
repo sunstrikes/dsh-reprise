@@ -119,6 +119,22 @@ const MIGRATIONS = [
     detail TEXT    NOT NULL
   );
   `,
+
+  // 2 — the job ledger becomes a ledger of identities and outcomes (ticket 16).
+  //
+  // `round` and `marker` say *which* job of ours this is, from the cluster's own listing: the round
+  // it was submitted in and the string that travels in the job's `metadata`. `outcome` is the
+  // terminal conclusion, and it exists as its own column so that a job somebody stopped and a job
+  // that broke are two different rows in this table — `state: 'failed'` plus
+  // `error_class: 'canceled'` is the platform's vocabulary, not ours to re-derive at every reader.
+  `
+  ALTER TABLE jobs ADD COLUMN round INTEGER;
+  ALTER TABLE jobs ADD COLUMN marker TEXT;
+  ALTER TABLE jobs ADD COLUMN outcome TEXT;
+
+  CREATE INDEX jobs_by_marker ON jobs (marker);
+  CREATE INDEX jobs_by_outcome ON jobs (outcome, state);
+  `,
 ]
 
 export class PayloadTooLargeError extends Error {
@@ -358,8 +374,9 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO jobs (job_id, candidate_id, submission_id, harness, submitted_at_ms, deadline_ms,
-                           last_polled_at_ms, next_poll_at_ms, state, error_class, attempts)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                           last_polled_at_ms, next_poll_at_ms, state, error_class, attempts,
+                           round, marker, outcome)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         job.job_id,
@@ -373,11 +390,14 @@ export class Store {
         job.state,
         job.error_class ?? null,
         job.attempts ?? 0,
+        job.round ?? null,
+        job.marker ?? null,
+        job.outcome ?? null,
       )
   }
 
   updateJob(jobId, patch) {
-    const allowed = ['last_polled_at_ms', 'next_poll_at_ms', 'state', 'error_class', 'attempts']
+    const allowed = ['last_polled_at_ms', 'next_poll_at_ms', 'state', 'error_class', 'attempts', 'outcome']
     const fields = Object.keys(patch).filter((key) => allowed.includes(key))
     if (fields.length === 0) return
     const assignments = fields.map((field) => `${field} = ?`).join(', ')
@@ -398,6 +418,24 @@ export class Store {
 
   jobsInState(state) {
     return this.db.prepare('SELECT * FROM jobs WHERE state = ? ORDER BY submitted_at_ms ASC').all(state)
+  }
+
+  /** Every job this workspace ever recorded, oldest first — the ledger side of the ledger view. */
+  allJobs() {
+    return this.db.prepare('SELECT * FROM jobs ORDER BY submitted_at_ms ASC, job_id ASC').all()
+  }
+
+  /**
+   * Jobs that may still be running on the cluster.
+   *
+   * `unknown` counts: "we could not find out" is not evidence that a job finished, and dispatching a
+   * second training job because the dashboard was down is exactly the collision the exclusivity
+   * configuration exists to prevent.
+   */
+  inFlightJobs() {
+    return this.db
+      .prepare("SELECT * FROM jobs WHERE outcome IS NULL AND state IN ('running', 'unknown') ORDER BY submitted_at_ms ASC")
+      .all()
   }
 
   // ---------------------------------------------------------------- ledger
