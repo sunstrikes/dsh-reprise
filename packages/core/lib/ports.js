@@ -15,9 +15,10 @@
  *   - **No port invents judgement.** With no `model.command` there is no judge at all rather than a
  *     stand-in that answers "probably fine" — the configuration layer refuses that combination
  *     before a tick happens (see `config.js`).
- *   - **`baseline` is a file the run writes once.** BASELINE freezes evidence the run already
- *     produced; reading it from `<workspace>/baseline.json` keeps it a fact (git-able, diff-able)
- *     instead of a number remembered in config.
+ *   - **The baseline is measured by the executor, not read from a file.** The BASELINE phase submits
+ *     its own job through the same port (see `baseline.js`). The `baseline.json` port below survives
+ *     only as the source for a workspace whose baseline was measured before the loop could do it,
+ *     and for a run with no executor port at all — never as the normal way to obtain a denominator.
  *
  * @module
  */
@@ -34,6 +35,7 @@ import { createLocalPlatform } from '@dsh-reprise/exec/platform/local'
 import { createRayPlatform } from '@dsh-reprise/exec/platform/ray'
 
 import { fileArtifacts } from './artifacts.js'
+import { BASELINE_SUBJECT } from './baseline.js'
 import { metricFromContract } from './domain.js'
 import { createJudge } from './judge.js'
 import { readRoundsState } from './rounds.js'
@@ -163,7 +165,7 @@ export function createCommandModel({ command, cwd = process.cwd(), env, timeout_
 }
 
 /**
- * What one job is asked to run for one candidate, expressed in the vocabulary of its executor.
+ * What one job is asked to run for one subject, expressed in the vocabulary of its executor.
  *
  * The two kinds answer different questions and must not share a shape:
  *
@@ -173,26 +175,48 @@ export function createCommandModel({ command, cwd = process.cwd(), env, timeout_
  *    point at. The plan names the tree to **ship** (`worktreeDir` + the runner's `baseRef`) and the
  *    argv that runs *inside the unpacked package*. Handing a laptop path to a Ray plan would be a
  *    job that fails on a node with "no such directory" three minutes into a GPU reservation.
+ *
+ * **The baseline is a subject too**, and its plan differs in exactly one respect: there is no
+ * candidate worktree. The baseline measures the tree the candidates branch *from*, so it runs in the
+ * runner's repository at the runner's base ref — the untouched base tree — rather than in a worktree
+ * some candidate has already edited. Everything else (the argv, the GPU count, the environment) is
+ * the same as a candidate's, because the whole point is that the denominator is measured by the same
+ * executor run as the numerator.
+ *
+ * The plan is chosen by `candidateId`, which is what the platform port passes in; the reserved
+ * baseline subject is the only id that means "the base tree". Ticket 16's cluster marker reads the
+ * same distinction from `metadata.kind`, set here so the cluster listing says it too.
  */
 function planFor(config, { workspaceDir, runner }) {
   const executor = config.executor ?? { kind: 'local' }
+  const isBaseline = (candidateId) => candidateId === BASELINE_SUBJECT
+
   if ((executor.kind ?? 'local') === 'ray') {
     return ({ candidateId }) => ({
-      // Runnable inside the unpacked package: relative paths resolve against the candidate's tree,
-      // which is the whole point of shipping it.
+      // Runnable inside the unpacked package: relative paths resolve against the shipped tree, which
+      // is the whole point of shipping it. For the baseline that tree is the base ref, unmodified.
       entrypoint: executor.command,
-      worktreeDir: runner === undefined ? undefined : runner.worktreeFor(candidateId),
+      worktreeDir: runner === undefined ? undefined : isBaseline(candidateId) ? runner.repoDir : runner.worktreeFor(candidateId),
       baseRef: runner?.baseRef,
       runtimeEnv: { env_vars: { ...(executor.env ?? {}) } },
       ...(executor.num_gpus === undefined ? {} : { numGpus: executor.num_gpus }),
-      metadata: {},
+      metadata: isBaseline(candidateId) ? { kind: 'baseline' } : {},
     })
   }
+
   return ({ candidateId }) => ({
     command: executor.command,
     // The candidate's worktree is the execution directory: the job evaluates the candidate's tree,
-    // not the checkout the loop happens to live in.
-    cwd: runner === undefined ? (executor.cwd === undefined ? process.cwd() : resolve(workspaceDir, executor.cwd)) : runner.worktreeFor(candidateId),
+    // not the checkout the loop happens to live in. The baseline has no worktree by definition, so it
+    // runs in the repository the worktrees branch from — the same tree, unedited.
+    cwd:
+      runner === undefined
+        ? executor.cwd === undefined
+          ? process.cwd()
+          : resolve(workspaceDir, executor.cwd)
+        : isBaseline(candidateId)
+          ? runner.repoDir
+          : runner.worktreeFor(candidateId),
     env: { ...(executor.env ?? {}) },
   })
 }

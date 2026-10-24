@@ -119,6 +119,16 @@ const MIGRATIONS = [
     detail TEXT    NOT NULL
   );
   `,
+  // 2 — the ledger says what kind of job a row is
+  //
+  // A baseline job and a candidate job are both real jobs: both reserve budget, both are polled,
+  // both can fail. They differ in *what they are for*, and a ledger that cannot say so invites the
+  // two failures ticket 16 exists for — a baseline counted as a candidate (dispatched twice) and a
+  // candidate mistaken for the denominator. `candidate_id` already separates them by accident; this
+  // column says it on purpose, and is where the cluster marker work hangs its own vocabulary.
+  `
+  ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'candidate';
+  `,
 ]
 
 export class PayloadTooLargeError extends Error {
@@ -354,12 +364,18 @@ export class Store {
 
   // ------------------------------------------------------------ job ledger
 
+  /**
+   * Record a job.
+   *
+   * `kind` is `'candidate'` unless the caller says otherwise — a baseline job is the only other
+   * kind today, and it is a job in every other respect (budget, polling, timeouts, failure).
+   */
   putJob(job) {
     this.db
       .prepare(
         `INSERT INTO jobs (job_id, candidate_id, submission_id, harness, submitted_at_ms, deadline_ms,
-                           last_polled_at_ms, next_poll_at_ms, state, error_class, attempts)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                           last_polled_at_ms, next_poll_at_ms, state, error_class, attempts, kind)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         job.job_id,
@@ -373,6 +389,7 @@ export class Store {
         job.state,
         job.error_class ?? null,
         job.attempts ?? 0,
+        job.kind ?? 'candidate',
       )
   }
 

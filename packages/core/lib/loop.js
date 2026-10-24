@@ -18,6 +18,7 @@ import { judgeTimeout } from '@dsh-reprise/exec'
 
 import { autoResumeIfClear, budgetOf, canDispatch, evaluate, pause } from './budget.js'
 import { gateSettings, recheckReport } from './gate.js'
+import { recordWindowSamples, seriesOf } from './samples.js'
 import { consumePending } from './intents.js'
 import { stepWorkspace } from './rounds.js'
 import { evaluateStop } from './stop.js'
@@ -664,10 +665,18 @@ async function analyze(ports, candidateId, state) {
     }
   }
 
+  // The run's windowed samples, recorded before the report is validated: what this run measured is a
+  // fact about the run whether or not the analysis written about it is acceptable. Same recorder,
+  // same artifact, same event as the baseline's — that identity is what makes pairing possible.
+  const samples = recordCandidateSamples(ports, candidateId, job, collected)
+
   const artifact = await judge.analyze({ candidateId, state, job, collected, now: clock.now() })
   const verdict = validateArtifact('analyze_report', artifact)
   if (isBlocking(verdict)) {
-    return reject(ports, candidateId, 'CAND_ANALYZE', verdict, { artifact: `analyze_report:${candidateId}` })
+    return reject(ports, candidateId, 'CAND_ANALYZE', verdict, {
+      artifact: `analyze_report:${candidateId}`,
+      ...(samples === undefined ? {} : { window_series: samples.artifact }),
+    })
   }
 
   const reserved = store.inFlightGpuHours(candidateId)
@@ -684,10 +693,49 @@ async function analyze(ports, candidateId, state) {
       root_cause: artifact.root_cause,
       gpu_hours: reserved,
       artifacts: collected?.artifacts ?? [],
+      ...(samples === undefined ? {} : { window_series: samples.artifact }),
     },
     'DONE',
+    samples === undefined ? {} : { window_series: samples },
   )
   return { candidateId, phase: 'CAND_ANALYZE', action: `settled ${reserved}h -> done` }
+}
+
+/**
+ * Record a candidate's windowed samples, if its executor reported any.
+ *
+ * A candidate without samples is not a failure here: the run still has a metric, and the *baseline*
+ * is the subject that cannot proceed without evidence a candidate can be paired against. What is
+ * refused is silence about an unusable series — a run whose samples do not satisfy the contract gets
+ * a fact saying so, because "no samples" and "samples that break the shape" are different answers.
+ */
+function recordCandidateSamples(ports, candidateId, job, collected) {
+  if (collected === undefined || job === undefined) return undefined
+
+  const samples = seriesOf(collected)
+  if (samples.status !== 'ok') {
+    if (samples.status !== 'missing') {
+      ports.store.appendEvent({
+        candidate_id: candidateId,
+        wall_clock_ms: ports.clock.now(),
+        event_type: 'window_samples_unusable',
+        payload: { job_id: job.job_id, status: samples.status, source: samples.source, message: samples.message },
+      })
+    }
+    return undefined
+  }
+
+  return recordWindowSamples(
+    { store: ports.store, clock: ports.clock, artifacts: ports.artifacts },
+    {
+      subject: candidateId,
+      subjectKind: 'candidate',
+      jobId: job.job_id,
+      series: samples.series,
+      source: samples.source,
+      metric: null,
+    },
+  )
 }
 
 // ------------------------------------------------------------ reconcile
