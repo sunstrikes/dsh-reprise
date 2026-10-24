@@ -153,11 +153,36 @@ test('a job stopped outside our process is canceled, not a code failure', async 
   assert.equal(done.error_class, 'canceled')
 })
 
-test('a duplicate submission_id is resolved to the existing job on both real Ray shapes', async () => {
+test('a duplicate submission_id is answered by a read, not by a second job', async () => {
+  const { metricsDir, fake } = rayWorld()
+  const platform = makePlatform({ fake, metricsDir })
+  const request = { submissionId: 'cand_twice', candidateId: 'cand_twice', gpuHours: 1 }
+  fake.script('cand_twice', { outcome: 'succeeded', metrics: { val_loss: 0.5 } })
+
+  const first = await submitJob(platform, request)
+  const second = await submitJob(platform, request)
+
+  assert.equal(second.duplicate, true, 'the caller must be told it was a duplicate')
+  assert.equal(second.job_id, first.job_id, 'same submission_id means the same job')
+  assert.equal(fake.jobs.size, 1, 'a duplicate must never create a second job')
+  assert.equal(
+    fake.requests.filter((entry) => entry.method === 'POST' && entry.path === '/api/jobs/').length,
+    1,
+    'a submission id the cluster already owns is resolved without writing: no second POST, no second GPU bill',
+  )
+
+  const done = await pollUntilTerminal(platform, second.job_id)
+  assert.equal(done.state, 'succeeded', 'going straight to polling after a duplicate must work')
+})
+
+test('a duplicate the dashboard cannot show yet is still one job, on both real Ray shapes', async () => {
   for (const duplicateResponse of ['ray-400', 'plain-409']) {
     const { metricsDir, fake } = rayWorld({ duplicateResponse })
     const platform = makePlatform({ fake, metricsDir })
-    const request = { submissionId: 'cand_twice', candidateId: 'cand_twice', gpuHours: 1 }
+    const request = { submissionId: 'cand_race', candidateId: 'cand_race', gpuHours: 1 }
+    // The grace window: the job exists, the details route cannot see it yet, so the pre-check misses
+    // and the POST is the one that finds out. Ray answers 400 `already exists` (OSS) or 409 (a proxy).
+    fake.script('cand_race', { outcome: 'succeeded', metrics: { val_loss: 0.5 }, hideFromDetails: 1 })
 
     const first = await submitJob(platform, request)
     const second = await submitJob(platform, request)
@@ -165,11 +190,6 @@ test('a duplicate submission_id is resolved to the existing job on both real Ray
     assert.equal(second.duplicate, true, `${duplicateResponse}: the caller must be told it was a duplicate`)
     assert.equal(second.job_id, first.job_id, `${duplicateResponse}: same submission_id means the same job`)
     assert.equal(fake.jobs.size, 1, `${duplicateResponse}: a duplicate must never create a second job`)
-    assert.equal(
-      fake.requests.filter((entry) => entry.method === 'POST' && entry.path === '/api/jobs/').length,
-      2,
-      'the second submit is one POST that resolves the existing job — not a retry onto another cluster',
-    )
   }
 })
 

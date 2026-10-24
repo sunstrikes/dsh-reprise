@@ -49,6 +49,10 @@ export function createFakeRay({ onSucceeded, now = () => 1_700_000_000_000, dupl
   const jobs = new Map()
   const submissionJobs = new Map()
   const scripts = new Map()
+  // The package store, keyed by name: `PUT /api/packages/gcs/<name>.zip` is the only inbound channel
+  // for code on this cluster (no shared filesystem, no internet), so a fake that accepted a job whose
+  // `working_dir` names a package it never received would test the wrong half of the contract.
+  const packages = new Map()
   const requests = []
   let counter = 0
   let clock = now()
@@ -114,9 +118,25 @@ export function createFakeRay({ onSucceeded, now = () => 1_700_000_000_000, dupl
     const path = url.pathname
     requests.push({ method, path, search: url.search, body: request.body })
 
+    const packageMatch = path.match(/^\/api\/packages\/([^/]+)\/([^/]+)$/)
+    if (method === 'PUT' && packageMatch !== null) {
+      const [, protocol, name] = packageMatch
+      if (protocol !== 'gcs') return reply({ detail: `unknown package protocol ${protocol}` }, 500)
+      if (!name.endsWith('.zip')) return reply({ detail: 'only .zip packages are accepted' }, 400)
+      packages.set(name, Buffer.from(request.body ?? []))
+      return reply({ [name]: `gcs://${name}` }, 200)
+    }
+
     if (method === 'POST' && (path === '/api/jobs/' || path === '/api/jobs')) {
       const body = JSON.parse(request.body ?? '{}')
       const submissionId = body.submission_id
+      // Ray resolves `runtime_env.working_dir` through the package store. A gcs:// URI whose package
+      // was never uploaded fails the job at setup on the real cluster, so it fails the submission here.
+      const workingDir = body.runtime_env?.working_dir
+      if (typeof workingDir === 'string' && workingDir.startsWith('gcs://')) {
+        const name = workingDir.slice('gcs://'.length)
+        if (!packages.has(name)) return reply({ detail: `package ${name} was never uploaded` }, 400)
+      }
       if (submissionJobs.has(submissionId)) {
         // Both shapes are real: OSS Ray answers 400 with this `detail` string from job_manager's
         // `put_info(overwrite=False)`; a newer proxy in front of it answers 409. We handle both.
@@ -195,6 +215,12 @@ export function createFakeRay({ onSucceeded, now = () => 1_700_000_000_000, dupl
       const ref = decodeURIComponent(detailsMatch[1])
       const job = resolve(ref)
       if (job === undefined) return reply({ detail: `Job '${ref}' does not exist` }, 404)
+      // A submission the dashboard cannot answer for yet: user story 15's grace window, made real.
+      // `hideFromDetails` counts down, so the second submit's lookup misses while the POST still knows.
+      if (jobs.has(ref) === false && job.script.hideFromDetails > 0) {
+        job.script.hideFromDetails -= 1
+        return reply({ detail: `Job '${ref}' does not exist` }, 404)
+      }
       if (job.script.disturb === 'vanish' && job.disturbed === false) {
         job.disturbed = true
         return reply({ detail: `Job '${ref}' does not exist` }, 404)
@@ -212,6 +238,7 @@ export function createFakeRay({ onSucceeded, now = () => 1_700_000_000_000, dupl
 
   return {
     jobs,
+    packages,
     requests,
     /** Script a job before it is submitted; the platform's `plan()` runs first, so this is a hook. */
     script(submissionId, spec) {
