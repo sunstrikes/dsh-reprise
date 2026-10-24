@@ -26,7 +26,7 @@ five call sites. None of it is code. A pack is a directory with a manifest that 
 
 | Part | What it must contain | Read by |
 |---|---|---|
-| `metric_contract` | `name`, `primary`, `direction` (`higher`/`lower`), `objectives` ({metric: `up`/`down`}); `role` optional | the judge, the frontier, `rounds.metric` when the run does not restate it |
+| `metric_contract` | `name`, `primary`, `direction` (`higher`/`lower`), `objectives` ({metric: `up`/`down`}); optional `role`, `minimum_effective_delta` ({metric: positive delta}), `guardrail` ({`metric`: a ranked metric other than the primary}) | the judge, the frontier, `rounds.metric` when the run does not restate it |
 | `priors` | `search_space`, `priors[]`, `hypothesis_classes[]` (each with an `id`) | the round planner's facts; the injection packet's search space |
 | `surface` | `files[]` (the path whitelist a candidate's diff is checked against), optional `keys[]` and `symbols[]` | the LAND/VERIFY facts as `allowed_surface`; gate two (ticket 24) |
 | `prompts` | `prompts/{land,verify,cand-analyze,round-plan,round-reflect}/SKILL.md`, non-empty | every model call site, re-read per call |
@@ -41,11 +41,23 @@ Rules the loader (`packages/core/lib/domain.js`) enforces, all of them loud:
    named. The quiet version of that failure is a model prompted with nothing, which answers anyway.
 3. **A pack is self-contained** — every part must resolve inside the pack directory, so copying the
    directory (into another repository, or an example) preserves its meaning.
+4. **How much of a difference counts is the contract's answer, not the kernel's.** `judge.compareMetric`
+   compares strictly on purpose, so a pack that wants a tolerance declares `minimum_effective_delta` —
+   and the loader then refuses one that is zero, negative, or keyed by a metric the `objectives` do not
+   rank, and a `guardrail` that restates the primary. A tolerance nobody ranks is a comment; a
+   tolerance of zero says every difference counts.
 
 Point a run at it with `domain: /path/to/the/directory`. Nothing in `packages/` changes; if a second
 pack needs a kernel edit to work, the seam is leaking. `packages/core/test/fixtures/config-only-domain`
 is a full pack that is only configuration, and `packages/core/test/domain.test.js` loads it to hold
 that line.
+
+`examples/generative-recommenders` is a second worked pack, and the harder case: its domain is someone
+else's repository, so `surface.files` names paths inside *that* checkout and every whitelisted gin key
+and source symbol carries a verified `file` + evidence string
+(`packages/core/test/generative-recommenders-pack.test.js` re-checks them against a clone). Its README
+also carries the list of decisions a human has to review — the priors and the whitelist are a domain
+expert's call, and no test can make it.
 
 ---
 
