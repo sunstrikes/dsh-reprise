@@ -231,7 +231,7 @@ const ANALYZE_INPUT = {
 const judgeWithBaseline = (model, extra = {}) =>
   judgeFor({
     model: model.model,
-    metric: { name: 'auc', direction: 'higher' },
+    metricContract: { primary: 'auc', direction: 'higher', objectives: { auc: 'up' } },
     baseline: 0.7012,
     ...extra,
   })
@@ -317,7 +317,9 @@ test('the metric contract decides which reported number counts, not the model', 
   const model = scripted({ cand_analyze: { root_cause: 'noise' } })
   const judge = judgeFor({
     model: model.model,
-    metric: { name: 'ndcg@10', direction: 'higher' },
+    // A contract that ranks two metrics and names the other one primary: the resolution decides which
+    // reported number counts, and no reader falls back to "the first numeric key".
+    metricContract: { primary: 'ndcg@10', direction: 'higher', objectives: { auc: 'up', 'ndcg@10': 'up' } },
     baseline: 0.3,
   })
   const artifact = await judge.analyze({
@@ -373,7 +375,10 @@ test('a round plan is contract-valid, and its identity fields come from code rat
       ],
     },
   })
-  const judge = judgeFor({ model: model.model, metric: { name: 'auc', contract_ref: 'metric-contract.json' } })
+  const judge = judgeFor({
+    model: model.model,
+    metricContract: { name: 'metric-contract.json', primary: 'auc', direction: 'higher', objectives: { auc: 'up' } },
+  })
   const artifact = await judge.plan({ round: 2, facts: PLAN_FACTS })
 
   assert.deepEqual(validateArtifact('candidate_plan', artifact), { status: 'ok', message: '' })
@@ -468,7 +473,10 @@ test('a reflection whose lessons are all empty strings is malformed, not merely 
 
 test('the LAND entry freezes the hypothesis it will implement and briefs the implementer from the skill', async () => {
   const model = scripted({})
-  const judge = judgeFor({ model: model.model, metric: { name: 'auc', contract_ref: 'metric-contract.json' } })
+  const judge = judgeFor({
+    model: model.model,
+    metricContract: { name: 'metric-contract.json', primary: 'auc', direction: 'higher', objectives: { auc: 'up' } },
+  })
   const { artifact, prompt } = await judge.land({
     candidateId: 'r1-h1',
     round: 1,

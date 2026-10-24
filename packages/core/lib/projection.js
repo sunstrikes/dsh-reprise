@@ -140,7 +140,9 @@ export function overview(store, { config } = {}) {
       members: rows.frontier,
       size: rows.frontier.length,
     },
-    metricContract: { ok: rows.contract.ok, error: rows.contract.error },
+    // `status` is the four-state name (`ok` / `missing` / `invalid` / `conflict`); `error` is the
+    // sentence. Both are carried so a reader can switch on the name instead of pattern-matching prose.
+    metricContract: { ok: rows.contract.ok, status: rows.contract.status, error: rows.contract.error },
     // What the run owes the person reading the page: an uncapped spend on a real executor, a metric
     // contract that disagrees with itself, a round workflow with no model port. Carried by the
     // projection (not by a component) so the dashboard and the injection packet cannot disagree
@@ -316,7 +318,7 @@ export function conclusion(store, { config } = {}) {
     stopped: stopRecord(workspace),
     best,
     objectives: rows.contract.objectives,
-    metricContract: { ok: rows.contract.ok, error: rows.contract.error },
+    metricContract: { ok: rows.contract.ok, status: rows.contract.status, error: rows.contract.error },
     frontier: { members: rows.frontier, size: rows.frontier.length },
     incomplete: rows.incomplete,
     rounds: history.length,

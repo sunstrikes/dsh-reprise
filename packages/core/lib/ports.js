@@ -34,7 +34,6 @@ import { createLocalPlatform } from '@dsh-reprise/exec/platform/local'
 import { createRayPlatform } from '@dsh-reprise/exec/platform/ray'
 
 import { fileArtifacts } from './artifacts.js'
-import { metricFromContract } from './domain.js'
 import { createJudge } from './judge.js'
 import { readRoundsState } from './rounds.js'
 
@@ -320,10 +319,11 @@ export function portsFromConfig({ config, workspaceDir, store, log = () => {}, l
         env: config.model.env,
         timeout_ms: config.model.timeout_ms,
       }),
-      // The pack declares "better"; a run may restate the metric it optimises for this round, which
-      // is the shape `rounds.metric` already had. Prompts and the adjustable surface come from the
-      // pack only: there is no second home for them to drift to.
-      metric: { ...metricFromContract(pack.metricContract), ...(config.rounds?.metric ?? {}) },
+      // The one contract the run recorded, resolved inside the judge (`metric-contract.js`). It is
+      // the same object the ranking and the stop rules read, so "improved" means one thing. A caller
+      // that built ports without going through `resolveConfig` still gets the pack's own contract —
+      // never a binding, and never nothing.
+      metricContract: config.metrics ?? pack.metricContract,
       baseline: () => baseline.read()?.value,
       skillsDir: pack.promptsDir,
       surface: pack.surface,

@@ -10,10 +10,12 @@
  * Two decisions are visible everywhere in this file:
  *
  * **Numbers belong to the kernel.** Metrics come from the monitor, the comparison comes from the
- * metric contract, and the verdict (`improved` / `regressed` / `inconclusive`) is arithmetic done
- * here. The model is asked for prose and for one enum. If it returns a score anyway, nothing reads
- * it: there is no code path from a model-supplied number into an artifact field, the frontier or
- * the stop rule. That is stronger than "the model is asked not to score".
+ * metric contract — resolved once in `metric-contract.js`, so "which metric counts" and "how large a
+ * difference counts" are answered in one place for this gate, the ranking and the stop rules — and
+ * the verdict (`improved` / `regressed` / `inconclusive`) is arithmetic done here. The model is asked
+ * for prose and for one enum. If it returns a score anyway, nothing reads it: there is no code path
+ * from a model-supplied number into an artifact field, the frontier or the stop rule. That is
+ * stronger than "the model is asked not to score".
  *
  * **The judge records opinions; the contract decides.** VERIFY is a hybrid phase: the L1 static
  * checks are deterministic facts computed by the kernel, and the adversarial review is a model that
@@ -28,6 +30,7 @@
 import { isNonEmptyString, isPlainObject } from '@dsh-reprise/contract'
 
 import { staticReport } from './gate.js'
+import { JUDGE_DIRECTION, NoMetricContractError, metricRule, resolveMetricContract } from './metric-contract.js'
 import { loadSkill, loadSkills, renderPrompt } from './skills.js'
 
 // Registers `round_reflect` and `land_hypothesis` with the contract as a side effect of importing.
@@ -122,34 +125,45 @@ export function defaultStaticChecks({ state, parent } = {}) {
 const finite = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : undefined)
 
 /**
- * Which reported number is the primary metric. The metric contract names it; if it does not name
- * one, the first numeric key in sorted order is used so the choice is at least reproducible.
+ * The number the contract's metric reports, or nothing.
+ *
+ * There is deliberately no fallback: picking "the first numeric key in sorted order" when the named
+ * metric is absent is the kernel choosing a metric, and it makes a run that measured nothing look like
+ * a run that improved on something. A missing number is `inconclusive` (`compareMetric`), which a
+ * candidate can be rejected by and a stop rule can read as "no evidence".
  *
  * @returns {{ metric: string, value: number } | undefined}
  */
 export function pickMetric(metrics, name) {
-  if (!isPlainObject(metrics)) return undefined
+  if (!isPlainObject(metrics) || typeof name !== 'string') return undefined
   const named = finite(metrics[name])
-  if (named !== undefined) return { metric: name, value: named }
-  const fallback = Object.keys(metrics)
-    .filter((key) => finite(metrics[key]) !== undefined)
-    .sort()[0]
-  return fallback === undefined ? undefined : { metric: fallback, value: metrics[fallback] }
+  return named === undefined ? undefined : { metric: name, value: named }
 }
 
 /**
- * Compare against the frozen baseline. No tolerance band: how much of a difference counts is a
- * metric-contract question, and inventing a threshold here would be the kernel deciding a domain
- * question. No comparable baseline means `inconclusive`, never a guess.
+ * Compare against the frozen baseline.
+ *
+ * `minimumDelta` is the contract's minimum effective delta for this metric (0 when it declares none):
+ * a move smaller than it is not a difference, so the answer is `inconclusive` — "the data cannot tell
+ * these two apart" — rather than an improvement the next round extrapolates from. A move of exactly
+ * the tolerance counts, because a "minimum effective" delta is the least difference that is effective.
+ *
+ * The threshold is a parameter and never a constant here: how much of a difference counts is a
+ * metric-contract question, and a number compiled into this file would be the kernel deciding it.
+ * No comparable baseline means `inconclusive`, never a guess.
  *
  * @param {{ value: number } | undefined} observed
  * @param {number | undefined} baseline
  * @param {'higher' | 'lower'} direction
+ * @param {number} [minimumDelta] the contract's tolerance for this metric
  */
-export function compareMetric(observed, baseline, direction = 'higher') {
+export function compareMetric(observed, baseline, direction = 'higher', minimumDelta = 0) {
   if (observed === undefined || baseline === undefined) return 'inconclusive'
-  if (observed.value === baseline) return 'inconclusive'
-  const better = direction === 'lower' ? observed.value < baseline : observed.value > baseline
+  const difference = observed.value - baseline
+  if (difference === 0) return 'inconclusive'
+  const tolerance = typeof minimumDelta === 'number' && Number.isFinite(minimumDelta) && minimumDelta > 0 ? minimumDelta : 0
+  if (Math.abs(difference) < tolerance) return 'inconclusive'
+  const better = direction === 'lower' ? difference < 0 : difference > 0
   return better ? 'improved' : 'regressed'
 }
 
@@ -164,7 +178,7 @@ export function compareMetric(observed, baseline, direction = 'higher') {
  * @param {{
  *   model: (request: { call_site: string, prompt: string, facts: object, answer_schema: string }) => Promise<unknown>,
  *   skillsDir: string,
- *   metric: { name: string, direction?: 'higher' | 'lower' | 'up' | 'down', contract_ref?: string },
+ *   metricContract: object,
  *   surface?: { files?: string[], keys?: string[], symbols?: string[] },
  *   baseline?: number | { value: number } | (() => number | { value: number } | undefined | Promise<number | { value: number } | undefined>),
  *   staticChecks?: (input: object) => { name: string, result: 'pass' | 'fail' }[],
@@ -177,7 +191,7 @@ export function compareMetric(observed, baseline, direction = 'higher') {
 export function createJudge({
   model,
   skillsDir,
-  metric = {},
+  metricContract,
   surface,
   baseline,
   staticChecks = defaultStaticChecks,
@@ -197,20 +211,32 @@ export function createJudge({
       'a judge needs skillsDir — the five prompts are the domain pack\'s, and the kernel ships none (see domain.js)',
     )
   }
-  if (!isPlainObject(metric) || !isNonEmptyString(metric.name)) {
-    throw new TypeError(
-      'a judge needs the metric contract\'s primary metric (metric.name) — the domain pack declares it, and the kernel has no default',
-    )
+  // Fail at construction, not mid-round: a missing skill produces a prompt with no instructions, and a
+  // model without instructions still answers — the same is true of a judge with no metric contract,
+  // which would answer about a metric it invented. The refusal names the same status the ranking and
+  // the stop rules report (`missing` / `conflict`), so a workspace that cannot decide says one thing.
+  const contract = resolveMetricContract(metricContract)
+  if (!contract.ok) throw new NoMetricContractError(contract)
+  const primary = metricRule(contract, contract.primary)
+  if (primary === undefined) {
+    // Unreachable while `resolveMetricContract` keeps its own invariant (an `ok` contract ranks its
+    // primary); kept so a future resolution change fails with a name instead of a TypeError.
+    throw new NoMetricContractError({
+      status: 'missing',
+      message: `the primary ${JSON.stringify(contract.primary)} is not among the ranked objectives`,
+    })
   }
 
-  // Fail at construction, not mid-round: a missing skill produces a prompt with no instructions,
-  // and a model without instructions still answers.
   loadSkills(skillsDir)
 
-  const metricContract = Object.freeze({
-    name: metric.name,
-    direction: metric.direction === 'lower' || metric.direction === 'down' ? 'lower' : 'higher',
-    contractRef: isNonEmptyString(metric.contract_ref) ? metric.contract_ref : metric.name,
+  // The judge's own vocabulary for a direction (`higher` / `lower`), derived once from the resolution.
+  const metricContractFacts = Object.freeze({
+    name: contract.primary,
+    direction: JUDGE_DIRECTION[primary.direction],
+    contract_ref: contract.ref,
+    minimum_effective_delta: primary.minimum_effective_delta,
+    window: primary.window,
+    guardrails: contract.guardrails.map((guardrail) => guardrail.name),
   })
 
   // The adjustable surface, as the model sees it: which files, knobs and symbols a candidate may
@@ -305,6 +331,12 @@ export function createJudge({
 
   return {
     /**
+     * The contract this judge decides with — the same resolved object the ranking and the stop rules
+     * read, exposed so a caller (or a dump) can print what "improved" meant without a second lookup.
+     */
+    contract,
+
+    /**
      * VERIFY: the kernel's static report + the model's adversarial review, recorded side by side.
      *
      * The two pieces of evidence have different owners and neither is merged into the other:
@@ -392,15 +424,17 @@ export function createJudge({
       // submit-poll time, only on collect, or both — and an analysis that silently reasoned from an
       // empty object would produce a confident report about nothing.
       const metrics = [collected?.metrics, state?.metrics, job?.metrics].find(isPlainObject) ?? {}
-      const observed = pickMetric(metrics, metricContract.name)
+      const observed = pickMetric(metrics, contract.primary)
       const frozenBaseline = await baselineValue()
-      const verdict = compareMetric(observed, frozenBaseline, metricContract.direction)
+      // The tolerance is the contract's, for this metric: a move it does not consider a difference is
+      // `inconclusive`, so a candidate cannot be admitted on noise.
+      const verdict = compareMetric(observed, frozenBaseline, metricContractFacts.direction, primary.minimum_effective_delta)
 
       const facts = {
         candidate_id: candidateId,
         round: state?.round ?? null,
         hypothesis: state?.hypothesis ?? null,
-        metric_contract: { name: metricContract.name, direction: metricContract.direction, contract_ref: metricContract.contractRef },
+        metric_contract: { ...metricContractFacts },
         observed: observed ?? null,
         baseline: frozenBaseline ?? null,
         verdict,
@@ -444,7 +478,7 @@ export function createJudge({
       return {
         round,
         hypotheses,
-        metric_contract_ref: metricContract.contractRef,
+        metric_contract_ref: metricContractFacts.contract_ref,
       }
     },
 
@@ -487,7 +521,7 @@ export function createJudge({
         hypothesis_id: hypothesis?.id ?? null,
         statement,
         expected_files: Array.isArray(hypothesis?.expected_files) ? hypothesis.expected_files : [],
-        metric_contract_ref: metricContract.contractRef,
+        metric_contract_ref: metricContractFacts.contract_ref,
         frozen_at_ms: now,
       }
       const prompt = renderPrompt(skill, {
@@ -495,7 +529,7 @@ export function createJudge({
           candidate_id: candidateId,
           round,
           hypothesis: { id: hypothesis?.id ?? null, statement: statement ?? null, expected_files: hypothesis?.expected_files ?? [] },
-          metric_contract: { name: metricContract.name, direction: metricContract.direction, contract_ref: metricContract.contractRef },
+          metric_contract: { ...metricContractFacts },
           ...surfaceFacts,
         },
         answer: ANSWER_SHAPES.land,

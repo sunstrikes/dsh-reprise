@@ -22,7 +22,8 @@
 
 import { resolve as resolvePath } from 'node:path'
 
-import { DomainPackError, executorProblems, loadDomainPack, metricFromContract } from './domain.js'
+import { DomainPackError, executorProblems, loadDomainPack } from './domain.js'
+import { bindingOf, resolveMetricContract } from './metric-contract.js'
 import { configWarnings } from './warnings.js'
 
 /** Five seconds: the cadence ticket 01 measured in the real host (78 beats / 415 s, drift ≤ 3 ms). */
@@ -84,6 +85,20 @@ export function resolveConfig(raw = {}, { cwd = process.cwd(), loadDomain = load
     problems.push(...executorProblems(executor))
   }
 
+  // The metric contract: the run's own restatement, or the pack's. One resolver reads it — the same
+  // one the ranking, the stop rules and the gate call — so a contract that is absent or contradicts
+  // itself is refused here, at boot, rather than being reinterpreted differently by three readers later.
+  const metricContract = raw.metrics ?? pack?.metricContract
+  let metricResolution
+  if (metricContract === undefined) {
+    problems.push(
+      'metrics: no metric contract — the run declares none and its domain pack supplies none, so nothing says which metric decides "better"',
+    )
+  } else {
+    metricResolution = resolveMetricContract(metricContract)
+    for (const problem of metricResolution.problems) problems.push(`metrics: ${problem.message}`)
+  }
+
   const candidate = raw.candidate
   if (candidate !== undefined) {
     if (!isObject(candidate)) problems.push('candidate must be an object with a kind')
@@ -127,25 +142,23 @@ export function resolveConfig(raw = {}, { cwd = process.cwd(), loadDomain = load
 
   const config = {
     ...raw,
+    // The whole contract, not the two fields the readers used to need: the tolerance, the guardrail
+    // and the window reading are part of "which metric decides", and a run that dropped them would
+    // leave the ranking and the gate reading a contract nobody wrote.
+    metrics: { ...metricContract },
     executor: { kind: 'local', ...executor },
     interval_ms: intervalMs,
     workspaceDir: resolvePath(cwd, raw.workspace),
     domainPack: pack,
   }
 
-  // The pack declares what "better" means; a run may restate it. When a run says nothing, the pack
-  // answers — so a configuration that names a pack and no metric is complete rather than metric-less,
-  // and the two accounts cannot disagree by omission. (Collapsing the restatement entirely, so that
-  // one file names the metric, is a contract-resolution change, not this seam.)
-  const binding = metricFromContract(pack.metricContract)
-  if (config.metrics === undefined) {
-    config.metrics = {
-      primary: pack.metricContract.primary,
-      objectives: { ...pack.metricContract.objectives },
-    }
-  }
+  // The round workflow's binding is *derived* from the same resolution rather than declared beside it:
+  // `rounds.metric` is the shape rounds.js freezes at INIT, and a second account of which metric leads
+  // would let the gate and the round planner optimise different numbers. An explicit `rounds.metric`
+  // still wins here — and `warnings.js` reports it when it disagrees with the contract.
   if (isObject(config.rounds) && config.rounds.metric === undefined) {
-    config.rounds = { ...config.rounds, metric: { ...binding } }
+    const binding = bindingOf(metricResolution)
+    if (binding !== undefined) config.rounds = { ...config.rounds, metric: binding }
   }
 
   return { ok: true, config, problems: [], warnings: configWarnings(config) }
