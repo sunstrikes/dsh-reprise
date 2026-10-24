@@ -449,3 +449,88 @@ test('losing the state row entirely, the event stream restores phase, round and 
   assert.equal(rebuilt.hypothesis, 'widen the embedding table', 'the hypothesis is part of what was created')
   ports.store.close()
 })
+
+/**
+ * Ticket 15: the platform can refuse a submission for good (a candidate tree too large for the job
+ * package, or an archive whose inventory disagrees with the runner's git diff). That is a decision,
+ * not a transient fault, and the two must not share a code path — retrying a tree that cannot change
+ * only fills the log while the candidate sits in SUBMIT.
+ *
+ * What is asserted on the surface a person reads: the candidate is REJECTED, the reason names the
+ * platform's conclusion, and — per CODING_STANDARDS §2 — the rejection carries **no** four-state
+ * `status`, because nothing the candidate produced was malformed.
+ */
+test('a submission refused for good rejects the candidate on the first attempt, without a four-state status', async () => {
+  const ports = setup()
+  let attempts = 0
+  ports.platform.submit = () => {
+    attempts += 1
+    // The shape `PackageRefusedError` has: a conclusion an operator can act on, and no retry.
+    throw Object.assign(new Error('the candidate tree is 900 bytes, over the 16-byte job-package limit'), {
+      name: 'PackageRefusedError',
+      conclusion: 'archive_too_large',
+      retryable: false,
+    })
+  }
+
+  const { phase } = await drive(ports, { maxTicks: 20 })
+
+  assert.equal(phase, 'REJECTED')
+  const rejection = ports.store.eventsFor('c1').at(-1)
+  assert.equal(rejection.event_type, 'candidate_rejected')
+  assert.equal(
+    rejection.payload.status,
+    undefined,
+    'a tree that cannot be shipped is bad news, not a malformed artifact: inventing "invalid" sends the next reader hunting for a broken document',
+  )
+  assert.match(rejection.payload.reject_reason, /archive_too_large/, 'the conclusion is the reason a person reads')
+  assert.match(rejection.payload.reject_reason, /over the 16-byte job-package limit/)
+  assert.equal(attempts, 1, 'the platform was asked once: waiting does not make a tree smaller')
+  assert.equal(ports.platform.size, 0, 'no job was invented on the way out')
+  assert.equal(
+    ports.store.eventsFor('c1').some((event) => event.event_type === 'submit_refused'),
+    false,
+    'the retry path was not taken at all',
+  )
+  ports.store.close()
+})
+
+test('a submission the platform cannot answer for is still retried, never rejected', async () => {
+  const ports = setup()
+  let attempts = 0
+  let broken = true
+  const realSubmit = ports.platform.submit.bind(ports.platform)
+  ports.platform.submit = (request) => {
+    attempts += 1
+    if (broken) throw new Error('ray rejected the submission: 500 no resources available')
+    return realSubmit(request)
+  }
+
+  // Walk to SUBMIT, then let the refused tick happen.
+  for (let index = 0; index < 20 && ports.store.getState('c1', 'phase')?.phase !== 'SUBMIT'; index += 1) {
+    await tick(ports)
+    ports.clock.advance(1_000)
+  }
+  assert.equal(ports.store.getState('c1', 'phase')?.phase, 'SUBMIT')
+
+  await tick(ports)
+  assert.equal(attempts, 1)
+  assert.equal(ports.store.getState('c1', 'phase').phase, 'SUBMIT', 'a cluster that is down is not the candidate being wrong')
+  const refused = ports.store.eventsFor('c1').filter((event) => event.event_type === 'submit_refused')
+  assert.equal(refused.length, 1)
+  assert.match(refused[0].payload.message, /no resources available/)
+  assert.equal(
+    ports.store.eventsFor('c1').some((event) => event.event_type === 'candidate_rejected'),
+    false,
+    'rejecting here would throw away a candidate because the cluster was busy',
+  )
+
+  // And the backoff really does come back around.
+  ports.clock.advance(60_000)
+  broken = false
+  await tick(ports)
+  assert.equal(attempts, 2)
+  assert.equal(ports.store.getState('c1', 'phase').phase, 'MONITOR_POLL')
+  assert.equal(ports.platform.size, 1)
+  ports.store.close()
+})
