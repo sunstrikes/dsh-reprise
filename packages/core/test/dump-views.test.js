@@ -159,7 +159,7 @@ test('--config lets an old workspace be read with the contract the run used', as
   ports.store.close()
 
   const withoutConfig = runDump(['--candidate', 'r1-c1', '--workspace', dir])
-  assert.match(withoutConfig.output, /not computed — no metric contract configured/)
+  assert.match(withoutConfig.output, /not computed \(missing\) — no metric contract/, 'the dump names the state, not only a sentence')
 
   const path = join(mkdtempSync(join(tmpdir(), 'reprise-config-')), 'config.json')
   writeFileSync(path, JSON.stringify(CONTRACT))

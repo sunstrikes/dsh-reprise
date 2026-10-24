@@ -30,7 +30,7 @@ import { fakeJudge, forgetRecordedConfig, openWorkspace, runCandidate, seedConfi
 import { candidateHandler, conclusionHandler, overviewHandler } from '../lib/routes.js'
 
 const RUN_CONFIG = {
-  metrics: { primary: undefined, objectives: { auc: 'up' } },
+  metrics: { primary: 'auc', objectives: { auc: 'up' } },
   stop: { max_rounds: 1 },
   budget: { gpu_hours_limit: 4 },
 }

@@ -50,7 +50,7 @@ function seed(store, runConfig) {
  * conclusion page has to show.
  */
 async function concludedWorkspace({ stop = { max_rounds: 0 }, conclude = false } = {}) {
-  const ports = openWorkspace({ config: config({ auc: 'up' }, undefined, { budget: { gpu_hours_limit: 4 }, stop }) })
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { budget: { gpu_hours_limit: 4 }, stop }) })
   seed(ports.store, ports.config)
   await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
   await runCandidate(ports, { candidateId: 'r2-c1', round: 2, metrics: { auc: 0.7401 } })
@@ -84,7 +84,7 @@ test('the overview answers from the workspace directory alone, with every store 
 })
 
 test('a run that never recorded a budget says so instead of showing 0 as if it were a limit', async () => {
-  const ports = openWorkspace({ config: config({ auc: 'up' }, undefined, { budget: { gpu_hours_limit: 4 } }) })
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { budget: { gpu_hours_limit: 4 } }) })
   await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
   // Strip what the kernel now records, leaving a workspace shaped like one written before that
   // existed: the metric contract is known, no budget was ever written down.
@@ -103,7 +103,7 @@ test('a run that never recorded a budget says so instead of showing 0 as if it w
 })
 
 test('a workspace whose facts have not started yet is answered as a page of zeros, not as a failure', () => {
-  const ports = openWorkspace({ config: config({ auc: 'up' }, undefined, {}) })
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', {}) })
   const dir = dirname(ports.store.path)
   ports.store.close()
 
@@ -178,7 +178,7 @@ test('the conclusion view names the best candidate and what it is compared again
 })
 
 test('a rejected candidate carries the four-state verdict that stopped it', async () => {
-  const ports = openWorkspace({ config: config({ auc: 'up' }, undefined, { stop: { max_rounds: 0 } }) })
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 0 } }) })
   seed(ports.store, ports.config)
   await runCandidate(ports, {
     candidateId: 'r1-c2',
