@@ -182,11 +182,13 @@ export function forgetRecordedConfig(store, keys) {
 }
 
 /**
- * Drive one candidate to a terminal phase, letting the platform finish its job with `metrics`.
+ * Drive one candidate to a terminal phase, letting the platform finish its job with `metrics` and, if
+ * given, a `series` — the `window_series` document a real adapter hands back once it has read the
+ * run's samples, which is what the stop rules judge.
  * Returns the terminal phase; throws when a stop rule or pause cut the run short, because a test
  * that silently gets a half-finished candidate would prove nothing.
  */
-export async function runCandidate(ports, { candidateId, round = 1, metrics = { auc: 0.7123 }, judge } = {}) {
+export async function runCandidate(ports, { candidateId, round = 1, metrics = { auc: 0.7123 }, judge, series } = {}) {
   const withJudge = judge === undefined ? ports : { ...ports, judge }
   createCandidate(withJudge, { candidateId, round, hypothesis: `hypothesis of ${candidateId}` })
 
@@ -197,7 +199,7 @@ export async function runCandidate(ports, { candidateId, round = 1, metrics = { 
       throw new Error(`${candidateId}: the workspace stopped (${result.stopped.rule}) mid-candidate`)
     }
     for (const job of withJudge.platform.jobs.values()) {
-      if (job.candidate_id === candidateId && job.state === 'running') withJudge.platform.finish(job.job_id, metrics)
+      if (job.candidate_id === candidateId && job.state === 'running') withJudge.platform.finish(job.job_id, metrics, { series })
     }
     const phase = withJudge.store.getState(candidateId, 'phase')?.phase
     if (phase === 'DONE' || phase === 'REJECTED') return phase

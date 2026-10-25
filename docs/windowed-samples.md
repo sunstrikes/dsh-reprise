@@ -259,6 +259,12 @@ a `data failure` reason and an empty stdout.
   "Last" means the last window of the series: if that window carries no finite number for the metric,
   the answer is "not measured", with the window named — an earlier window is never substituted, because
   then one reader would call it the last measurement and another the last window.
-- **What an improvement is** — the comparison, tickets 21/30, computed from a pairing.
+- **What an improvement is, and what a regression is** — the comparison, tickets 21/30. `pairWindows`
+  pairs window by bounds; `packages/core/lib/stop.js` reads that pairing to kill a candidate whose
+  last window carries no finite value for the deciding metric (*evidence invalid*: the artifact was
+  fine, the number was absent) and one that is worse than the baseline in each of the trailing N
+  windows (`stop.regression_windows`, with `stop.regression_floor` raising — never lowering — the
+  contract's tolerance). Both read a subject's samples through `windowSamplesOf` in
+  `packages/core/lib/samples.js`, the same way for the baseline and for a candidate.
 - **Tensor-valued scalars** — only `simple_value` scalars are read today; a run that logs tensors needs
   an adapter change here, not a kernel change.

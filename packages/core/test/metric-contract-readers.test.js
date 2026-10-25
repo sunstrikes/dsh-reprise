@@ -127,13 +127,27 @@ test('no contract is `missing` at all three readers, and none of them picks a de
   assert.equal(stop.contract.status, 'missing')
   const limits = stopConfig({ stop: { max_no_improvement_rounds: 1, consecutive_empty_rounds: 1 } })
   const rules = describeRules({ limits, view: { contract: stop.contract } })
+  // The metric rules, which are the ones that cannot run without a contract. The ceilings
+  // (`max_wall_hours`, `max_windows`) are readable without one and are asserted to stay enabled.
   assert.deepEqual(
-    rules.filter((rule) => rule.rule !== 'max_rounds').map((rule) => [rule.contract, /no contract \(missing\)/.test(rule.reason ?? '')]),
+    rules
+      .filter((rule) => rule.rule === 'max_no_improvement_rounds' || rule.rule === 'consecutive_empty_rounds')
+      .map((rule) => [rule.contract, /no contract \(missing\)/.test(rule.reason ?? '')]),
     [
       ['missing', true],
       ['missing', true],
     ],
     'each metric rule names the same status rather than comparing against a guess',
+  )
+  const ceilings = describeRules({ limits: stopConfig({ stop: { max_wall_hours: 1, max_windows: 10 } }), view: { contract: stop.contract } })
+    .filter((rule) => rule.rule === 'max_wall_hours' || rule.rule === 'max_windows')
+  assert.deepEqual(
+    ceilings.map((rule) => [rule.enabled, rule.reason]),
+    [
+      [true, null],
+      [true, null],
+    ],
+    'a clock and a window count mean the same thing without a contract, so the ceilings stay enabled',
   )
 
   // 3. the gate: it cannot admit anything without a contract, and refuses with the same status name.

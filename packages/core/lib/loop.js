@@ -86,7 +86,7 @@ export function createCandidate({ store, clock }, { candidateId, round = 1, hypo
  * because "your verify did not pass" and "your verify is malformed" are different events and
  * merging them would undo the distinction the whole contract exists for.
  */
-function reject(ports, candidateId, phase, verdict, extra = {}) {
+export function rejectCandidate(ports, candidateId, phase, verdict, extra = {}) {
   const payload = {
     phase,
     blocking_message: verdict.message,
@@ -102,7 +102,7 @@ function reject(ports, candidateId, phase, verdict, extra = {}) {
     'REJECTED',
     { reject_reason: verdict.message, rejected_at_phase: phase },
   )
-  return { candidateId, phase, action: `rejected:${verdict.status}`, message: verdict.message }
+  return { candidateId, phase, action: verdict.status === undefined ? 'rejected' : `rejected:${verdict.status}`, message: verdict.message }
 }
 
 /**
@@ -241,6 +241,29 @@ export async function tick(ports) {
 
   const actions = []
 
+  // Candidate-level stop conclusions, before any candidate moves: a candidate whose evidence cannot
+  // be judged is already lost, and stepping it further would spend money to learn nothing. These do
+  // not end the run — the workspace conclusion above is what does that — so they are applied here,
+  // between the two.
+  for (const kill of stopped.kills ?? []) {
+    const state = store.getState(kill.candidate_id, 'phase')
+    // A candidate already rejected has been answered; a `DONE` one has not — it finished, and the
+    // facts say its finish is worthless, which is exactly what this kill records.
+    if (state === undefined || state.phase === 'REJECTED') continue
+    log?.(`${kill.candidate_id}: ${kill.rule} — ${kill.reason}`)
+    actions.push(
+      rejectCandidate(ports, kill.candidate_id, state.phase, { message: kill.message }, {
+        // The record carries the rule, so "why did this candidate stop" is answerable from the
+        // candidate's own facts — the same question the workspace stop answers on `_workspace`.
+        stop_rule: kill.rule,
+        stop_reason: kill.reason,
+        ...(kill.metric === undefined ? {} : { metric: kill.metric, direction: kill.direction, windows: kill.windows }),
+        ...(kill.tolerance === undefined ? {} : { tolerance: kill.tolerance }),
+        ...(kill.limit === undefined ? {} : { limit: kill.limit }),
+      }),
+    )
+  }
+
   // Workspace phases (INIT → BASELINE → ROUND_PLAN → FINALIZE): one step per tick, and `skipped`
   // when this workspace runs no round workflow, so a candidate-only workspace is unchanged.
   const workspaceStep = await stepWorkspace(ports)
@@ -266,7 +289,7 @@ async function stepFor(ports, candidateId, state) {
   })
   if (isBlocking(verdict)) {
     log?.(`${candidateId}: contract ${verdict.status} at ${state.phase} — ${verdict.message}`)
-    return reject(ports, candidateId, state.phase, verdict)
+    return rejectCandidate(ports, candidateId, state.phase, verdict)
   }
 
   switch (state.phase) {
@@ -365,9 +388,9 @@ async function land(ports, candidateId, state) {
   // nothing to state is rejected rather than handed to an implementer to guess at.
   if (state.land_hypothesis !== undefined) {
     const artifact = validateArtifact('land_hypothesis', state.land_hypothesis)
-    if (isBlocking(artifact)) return reject(ports, candidateId, 'LAND', artifact)
+    if (isBlocking(artifact)) return rejectCandidate(ports, candidateId, 'LAND', artifact)
   } else if (typeof state.hypothesis !== 'string' || state.hypothesis.trim() === '') {
-    return reject(ports, candidateId, 'LAND', {
+    return rejectCandidate(ports, candidateId, 'LAND', {
       status: 'missing',
       message: 'this candidate reached LAND with no structural hypothesis to land',
     })
@@ -402,7 +425,7 @@ async function land(ports, candidateId, state) {
     // A landing that failed on a cross-check is a *conflict*: two accounts of the same edit
     // disagree. Everything else the harness refuses is an invalid artifact, not a contradiction.
     const status = result.conflict === true ? 'conflict' : 'invalid'
-    return reject(
+    return rejectCandidate(
       ports,
       candidateId,
       'LAND',
@@ -473,7 +496,7 @@ async function verify(ports, candidateId, state) {
       const recheck = recheckReport(prior, { worktreeDir })
       log?.(`${candidateId}: attempt ${attempt - 1} rechecks ${recheck.status}`)
       if (recheck.status === 'conflict') {
-        return reject(
+        return rejectCandidate(
           ports,
           candidateId,
           'VERIFY',
@@ -496,7 +519,7 @@ async function verify(ports, candidateId, state) {
   if (isBlocking(verdict)) {
     // Fail closed, but say which of the four states it was — that is the whole point of having four.
     // A contradiction is not retried: re-asking the same two facts cannot resolve which one is right.
-    return reject(ports, candidateId, 'VERIFY', verdict, { attempt, attempts: attempt, artifact: record })
+    return rejectCandidate(ports, candidateId, 'VERIFY', verdict, { attempt, attempts: attempt, artifact: record })
   }
 
   if (artifact.passed !== true) {
@@ -579,7 +602,7 @@ function failAttempt(ports, candidateId, { gate, attempt, record, message, artif
   if (attempt >= gate.max_attempts) {
     // Out of attempts is an exhausted limit, not a malformed artifact: reject with the message and
     // no four-state status at all.
-    return reject(ports, candidateId, 'VERIFY', { message }, detail)
+    return rejectCandidate(ports, candidateId, 'VERIFY', { message }, detail)
   }
 
   const delay = detail.next_attempt_in_ms
@@ -626,7 +649,7 @@ async function submit(ports, candidateId, state) {
     // `conflict` — the news is bad and the platform said why, which is not one of the four states
     // (CODING_STANDARDS §2).
     if (error?.retryable === false) {
-      return reject(ports, candidateId, 'SUBMIT', {
+      return rejectCandidate(ports, candidateId, 'SUBMIT', {
         message: [error.conclusion, error.message].filter((part) => typeof part === 'string' && part !== '').join(': '),
       })
     }
@@ -677,7 +700,7 @@ async function monitor(ports, candidateId, state) {
 
   if (job === undefined) {
     // Past SUBMIT with no job row: the contract already flagged it as missing.
-    return reject(ports, candidateId, 'MONITOR_POLL', {
+    return rejectCandidate(ports, candidateId, 'MONITOR_POLL', {
       status: 'missing',
       message: 'no job ledger row for a candidate in MONITOR_POLL',
     })
@@ -712,7 +735,7 @@ async function monitor(ports, candidateId, state) {
       },
       'MONITOR_POLL',
     )
-    return reject(ports, candidateId, 'MONITOR_POLL', {
+    return rejectCandidate(ports, candidateId, 'MONITOR_POLL', {
       message: `${timeout.kind} timeout after ${timeout.elapsed_ms}ms (limit ${timeout.limit_ms}ms); the poller stopped the job`,
     })
   }
@@ -743,7 +766,7 @@ async function monitor(ports, candidateId, state) {
         ? 'the job was stopped, and not by us: an external stop says nothing about the candidate\u2019s code, ' +
           'so this candidate produced no measurement rather than a bad one'
         : `job ${polled.state}: ${polled.error_class ?? 'no error class'}`
-    return reject(ports, candidateId, 'MONITOR_POLL', { message }, { job_id: job.job_id, error_class: polled.error_class ?? null, outcome })
+    return rejectCandidate(ports, candidateId, 'MONITOR_POLL', { message }, { job_id: job.job_id, error_class: polled.error_class ?? null, outcome })
   }
 
   // Still running, or not visible upstream yet: back off, never spin.
@@ -783,7 +806,7 @@ async function analyze(ports, candidateId, state) {
   }
   const verdict = validateArtifact('analyze_report', artifact)
   if (isBlocking(verdict)) {
-    return reject(ports, candidateId, 'CAND_ANALYZE', verdict, {
+    return rejectCandidate(ports, candidateId, 'CAND_ANALYZE', verdict, {
       artifact: `analyze_report:${candidateId}`,
       ...(samples === undefined ? {} : { window_series: samples.artifact }),
     })
