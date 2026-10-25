@@ -44,7 +44,7 @@ import { createRayPlatform } from '@dsh-reprise/exec/platform/ray'
 
 import { fileArtifacts } from './artifacts.js'
 import { BASELINE_SUBJECT } from './baseline.js'
-import { baselineMarker, cudaVisibleDevicesOf, jobMarker, MARKER_KEY } from './jobs.js'
+import { cudaVisibleDevicesOf, MARKER_KEY, submissionIdFor } from './jobs.js'
 import { createJudge } from './judge.js'
 import { readRoundsState } from './rounds.js'
 
@@ -196,14 +196,15 @@ export function planForConfig(config, { workspaceDir, runner }) {
   // Two things every job of ours carries, whichever executor runs it:
   //
   //  - the **marker**, so the job can be recognised again in the cluster's own listing afterwards
-  //    (`jobs.js` reads it back). `metadata` is where it goes: on Ray a listing row's `job_id` may be
-  //    null while `submission_id` and `metadata` survive.
+  //    (`jobs.js` reads it back). It goes into `metadata` *and* it is the submission id the job is
+  //    submitted under: measured on the live cluster, a listing row's `job_id` may be null and no
+  //    listing row carries `metadata` at all, so `submission_id` is the channel that always survives.
   //  - the **device list**, when that is the run's GPU-exclusivity choice — written by the submission
   //    itself, because nothing in the cluster does it for us.
   const devices = cudaVisibleDevicesOf(config)
 
   if ((executor.kind ?? 'local') === 'ray') {
-    return ({ candidateId, round }) => ({
+    return ({ candidateId, round, submissionId }) => ({
       // Runnable inside the unpacked package: relative paths resolve against the shipped tree, which
       // is the whole point of shipping it. For the baseline that tree is the base ref, unmodified.
       entrypoint: executor.command,
@@ -213,9 +214,12 @@ export function planForConfig(config, { workspaceDir, runner }) {
         env_vars: { ...(executor.env ?? {}), ...(devices === undefined ? {} : { CUDA_VISIBLE_DEVICES: devices }) },
       },
       ...(executor.num_gpus === undefined ? {} : { numGpus: executor.num_gpus }),
-      // The marker says which job of ours this is. The baseline has no candidate and no round, so it
-      // carries its own marker form rather than a candidate marker with two invented fields.
-      metadata: { [MARKER_KEY]: isBaseline(candidateId) ? baselineMarker() : jobMarker({ candidateId, round }) },
+      // The marker says which job of ours this is — and it is the submission id itself, so the two
+      // channels a cluster may answer on cannot disagree about which job ran. When the caller passes
+      // the id it is submitting under, that is the marker; when it does not, the same builder derives
+      // it. The baseline has no candidate and no round, so it carries its own marker form rather than
+      // a candidate marker with two invented fields.
+      metadata: { [MARKER_KEY]: submissionId ?? submissionIdFor({ candidateId, round, baseline: isBaseline(candidateId) }) },
     })
   }
 
@@ -264,6 +268,9 @@ export function createPlatform(config, context) {
       // `sec-fetch-mode: cors`, which Ray reads as browser traffic). The adapter defaults to
       // `node:http`; see `packages/exec/lib/ray-http.js`.
       plan,
+      // The round-less family root, so `find()` can recover a crashed submission whose round nobody
+      // remembers any more: the vocabulary lives here, in the ledger, not in the cluster adapter.
+      submissionIdFor: (candidateId) => submissionIdFor({ candidateId, probe: true }),
       baseUrl: executor.base_url,
       metricsDir: resolve(context.workspaceDir, executor.metrics_dir ?? 'metrics'),
       limits,

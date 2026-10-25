@@ -21,7 +21,7 @@ import { gateSettings, recheckReport } from './gate.js'
 import { MODEL_UNAVAILABLE, isModelUnavailable, isOutage, modelFailureOf, recordModelUnavailable } from './model-failure.js'
 import { recordWindowSamples, seriesOf } from './samples.js'
 import { consumePending } from './intents.js'
-import { gpuExclusivityOf, jobMarker, outcomeOf } from './jobs.js'
+import { gpuExclusivityOf, markerFromSubmissionId, outcomeOf, parseMarker, submissionIdFor } from './jobs.js'
 import { stepWorkspace } from './rounds.js'
 import { evaluateStop } from './stop.js'
 
@@ -599,20 +599,24 @@ function failAttempt(ports, candidateId, { gate, attempt, record, message, artif
 async function submit(ports, candidateId, state) {
   const { store, clock, platform, config } = ports
   const budget = budgetOf(ports.workspace ?? workspaceState(store, clock, config), config)
-  // The marker is what makes this job findable in the cluster's own listing afterwards. It is built
-  // here, from facts the kernel owns (which candidate, which round), and handed to the executor so
-  // that the plan and the ledger row cannot end up naming two different jobs.
+  // The submission id *is* the marker: the name this job is submitted under is the string the
+  // cluster's listing hands back, and the listing carries no `metadata` at all (measured). It is
+  // built here, from facts the kernel owns (which candidate, which round), and handed to the
+  // executor so the plan, the platform and the ledger row cannot end up naming two different jobs.
+  //
+  // The round is in it because one candidate may be run more than once: with the bare candidate id
+  // as the key, a second round's submit resolved to the *first* round's finished job.
   const round = state.round
-  const marker = jobMarker({ candidateId, round })
+  const submissionId = submissionIdFor({ candidateId, round })
 
   let submitted
   try {
     submitted = await platform.submit({
-      submissionId: candidateId,
+      submissionId,
       candidateId,
       gpuHours: state.reserved_gpu_hours ?? budget.candidate_gpu_hours,
-      // The round reaches the plan, which is where the job's marker is built: the plan and the
-      // ledger row then name the same job by construction.
+      // The round — and the id it produced — reach the plan, which writes that same string into the
+      // job's `metadata`: the plan, the platform and the ledger row name one job by construction.
       round,
     })
   } catch (error) {
@@ -648,7 +652,7 @@ async function submit(ports, candidateId, state) {
   store.putJob({
     job_id: submitted.job_id,
     candidate_id: candidateId,
-    submission_id: candidateId,
+    submission_id: submissionId,
     harness: submitted.harness ?? 'unknown',
     submitted_at_ms: clock.now(),
     deadline_ms: clock.now() + (submitted.deadline_ms ?? 3_600_000),
@@ -656,7 +660,7 @@ async function submit(ports, candidateId, state) {
     state: submitted.state ?? 'running',
     attempts: 0,
     round,
-    marker,
+    marker: submissionId,
   })
 
   transition(
@@ -911,6 +915,26 @@ export function foldEvents(store, candidateId) {
 }
 
 /**
+ * The identity to record for a job we found rather than submitted.
+ *
+ * `find()` resolves a candidate's *family* (`reprise:candidate=<id>:`) because the round is exactly
+ * what crash recovery does not know, so the job it answers with may belong to a round other than the
+ * one the state row remembers. The platform's own submission id is therefore the first answer: it is
+ * the key the job really ran under, and recording our derivation instead would name a job nobody
+ * submitted. The derivation is the fallback for a platform that reports only a job id, and the bare
+ * candidate id is the last resort for a candidate whose state carries no round at all.
+ */
+function adoptedIdentity(remote, candidateId, round) {
+  const reported = markerFromSubmissionId(remote?.submission_id)
+  if (reported !== undefined) return { submissionId: reported, marker: reported, round: parseMarker(reported)?.round ?? round }
+  if (Number.isSafeInteger(round) && round >= 1) {
+    const derived = submissionIdFor({ candidateId, round })
+    return { submissionId: derived, marker: derived, round }
+  }
+  return { submissionId: candidateId, marker: null, round }
+}
+
+/**
  * Startup reconciliation: ask the platform before trusting the last row we wrote.
  *
  * The grace period is not politeness. A job submitted a second before the crash may not be
@@ -934,20 +958,21 @@ export async function reconcile(ports) {
 
     if (remote !== undefined && local === undefined) {
       // We submitted, then died before recording it. Adopt the platform's truth; do not resubmit.
+      const adopted = adoptedIdentity(remote, candidateId, state.round)
       store.putJob({
         job_id: remote.job_id,
         candidate_id: candidateId,
-        submission_id: candidateId,
+        submission_id: adopted.submissionId,
         harness: remote.harness ?? 'unknown',
         submitted_at_ms: remote.submitted_at_ms ?? clock.now(),
         deadline_ms: remote.deadline_ms ?? clock.now() + 3_600_000,
         next_poll_at_ms: 0,
         state: remote.state ?? 'running',
         attempts: 0,
-        // The adopted row carries the same identity the plan put on the job, so the ledger view can
+        // The adopted row carries the identity the job really runs under, so the ledger view can
         // match it in the cluster's listing even though we never saw the submit answer.
-        round: state.round,
-        marker: state.round === undefined ? null : jobMarker({ candidateId, round: state.round }),
+        round: adopted.round,
+        marker: adopted.marker,
       })
       const { seq } = emit(store, clock, candidateId, 'job_adopted_on_recovery', {
         job_id: remote.job_id,
