@@ -163,7 +163,14 @@ test('a v1 workspace is brought forward in place, and every fact it held survive
   v1.close()
 
   const store = Store.open(dir)
-  assert.equal(store.version, 2, 'the file was migrated forward, not recreated at the current shape')
+  // The head is whatever a brand-new workspace is at, so this does not need editing every time a
+  // released migration appends a version (it is 3 today: 2 = ticket 16's round/marker/outcome,
+  // 3 = ticket 30's `kind`). A v1 file must walk the whole chain and arrive where a new file is.
+  const fresh = Store.open(workspace())
+  const headVersion = fresh.version
+  fresh.close()
+  assert.equal(store.version, headVersion, 'the file was migrated forward, not recreated at the current shape')
+  assert.ok(headVersion >= 2, 'v1 is behind the head, so this test is really testing a migration')
 
   // The new columns exist, and an old row has no value in them: v1 never knew about rounds as a
   // column, or about the outcome of a job, and inventing a value would be a fact nobody wrote.
@@ -176,6 +183,9 @@ test('a v1 workspace is brought forward in place, and every fact it held survive
   assert.equal(job.round, null)
   assert.equal(job.marker, null)
   assert.equal(job.outcome, null)
+  // Migration 3 added `kind` with a default rather than a null: a v1 row *is* a candidate job, and
+  // the default is the only claim the migration is allowed to make about it.
+  assert.equal(job.kind, 'candidate')
 
   // The old rows are the old rows — same text, same identity, not a re-serialisation of them.
   const raw = store.db.prepare('SELECT payload FROM events WHERE candidate_id = ? AND local_seq = ?').get('r1-h1', 1)
@@ -196,7 +206,7 @@ test('a v1 workspace is brought forward in place, and every fact it held survive
   assert.equal(store.jobFor('r1-h1').outcome, 'succeeded')
   store.close()
   const again = Store.open(dir)
-  assert.equal(again.version, 2)
+  assert.equal(again.version, headVersion)
   assert.equal(again.jobFor('r1-h1').outcome, 'succeeded', 'the second open did not undo anything')
   assert.equal(again.eventsFor('r1-h1').length, 1)
   again.close()
