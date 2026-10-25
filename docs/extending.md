@@ -26,7 +26,7 @@ five call sites. None of it is code. A pack is a directory with a manifest that 
 
 | Part | What it must contain | Read by |
 |---|---|---|
-| `metric_contract` | `name`, `primary`, `direction` (`higher`/`lower`), `objectives` ({metric: `up`/`down`}); optional `role`, `minimum_effective_delta` ({metric: positive delta}), `guardrail` ({`metric`: a ranked metric other than the primary}) | the judge, the frontier, `rounds.metric` when the run does not restate it |
+| `metric_contract` | `name`, `primary`, `direction` (`higher`/`lower`, or `up`/`down`), `objectives` ({metric: `up`/`down`}); optional `guardrail` ({`metric`: a ranked metric other than the primary}), `minimum_effective_delta` (a positive number, or `{default, <metric>: number}`), `window_mode` (`mean`/`last`, or `{default, <metric>: mode}`), `role` (prose) | one resolution, `packages/core/lib/metric-contract.js`, read by the ranking's `best`, the stop rules and the gate; `rounds.metric` is derived from it |
 | `priors` | `search_space`, `priors[]`, `hypothesis_classes[]` (each with an `id`) | the round planner's facts; the injection packet's search space |
 | `surface` | `files[]` (the path whitelist a candidate's diff is checked against), optional `keys[]` and `symbols[]` | the LAND/VERIFY facts as `allowed_surface`; gate two (ticket 24) |
 | `prompts` | `prompts/{land,verify,cand-analyze,round-plan,round-reflect}/SKILL.md`, non-empty | every model call site, re-read per call |
@@ -42,10 +42,28 @@ Rules the loader (`packages/core/lib/domain.js`) enforces, all of them loud:
 3. **A pack is self-contained** — every part must resolve inside the pack directory, so copying the
    directory (into another repository, or an example) preserves its meaning.
 4. **How much of a difference counts is the contract's answer, not the kernel's.** `judge.compareMetric`
-   compares strictly on purpose, so a pack that wants a tolerance declares `minimum_effective_delta` —
-   and the loader then refuses one that is zero, negative, or keyed by a metric the `objectives` do not
-   rank, and a `guardrail` that restates the primary. A tolerance nobody ranks is a comment; a
-   tolerance of zero says every difference counts.
+   takes the minimum effective delta of the metric it compares (0 when the contract states none, which
+   is a strict comparison), and the stop rules use the same number, so one contract decides "improved"
+   for both. A pack that wants a tolerance declares `minimum_effective_delta`; the loader refuses one
+   that is zero, negative, or keyed by a metric the `objectives` do not rank, and a `guardrail` that
+   restates the primary. A tolerance nobody ranks is a comment; a tolerance of zero says every
+   difference counts.
+5. **How a windowed series collapses to one number is the contract's answer too.** `window_mode` is
+   `mean` (the mean of the finite values, over the windows that measured the metric — the default) or
+   `last` (the last window's value), per metric. `readMetric` in the same module applies it to the
+   `window_series` shape [`docs/windowed-samples.md`](windowed-samples.md) describes, and answers "not
+   measured", with a reason, rather than substituting an earlier window when the last one carries no
+   finite number.
+
+### What the metric contract deliberately does not decide (deferred)
+
+**Whether a metric is measurable in the data a given run actually has.** The contract says `hr@10` is
+primary and ranks it; it does not promise that this run's logs produce it. The predecessor carried a
+"which keys are measurable in this profile" table and a `task × metric` whitelist for exactly that
+question, and neither is carried here yet: a resolved contract is a statement about what *would* count,
+not about what *was* produced. `readMetric` returning no value is the closest this comes — a series that
+does not carry the metric yields "not measured" instead of a number — and the qualification itself is
+left for a later ticket rather than approximated.
 
 Point a run at it with `domain: /path/to/the/directory`. Nothing in `packages/` changes; if a second
 pack needs a kernel edit to work, the seam is leaking. `packages/core/test/fixtures/config-only-domain`

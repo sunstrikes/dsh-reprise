@@ -13,8 +13,13 @@ import test from 'node:test'
 import { DERIVED_VERSION, frontier, rebuildFrontier, roundHistory } from '../lib/frontier.js'
 import { openWorkspace, runCandidate } from './support/fake-ports.js'
 
-/** The kernel config shape is `{ metrics }`, the same as `{ budget }` and `{ poll }`. */
-const config = (objectives, primary) => ({ metrics: { primary, objectives } })
+/**
+ * The kernel config shape is `{ metrics }`, the same as `{ budget }` and `{ poll }`. The primary is
+ * named explicitly: a contract that ranks objectives and never says which one leads is `missing`
+ * (the resolution refuses to promote the first objective — that was the silent default ticket 20
+ * removed), so a test that means "auc decides" says so.
+ */
+const config = (objectives) => ({ metrics: { primary: Object.keys(objectives)[0], objectives } })
 const AUC_ONLY = config({ auc: 'up' })
 
 test('the best candidate is the one with the best platform-reported metric, chosen in code', async () => {
@@ -46,10 +51,10 @@ test('the objective vector records the metric names the contract declared, in a 
   const view = frontier(ports.store, config({ auc: 'up', loss: 'down' }))
 
   assert.deepEqual(
-    view.contract.objectives,
+    view.contract.objectives.map(({ name, direction, kind }) => ({ name, direction, kind })),
     [
-      { name: 'auc', direction: 'up' },
-      { name: 'loss', direction: 'down' },
+      { name: 'auc', direction: 'up', kind: 'primary' },
+      { name: 'loss', direction: 'down', kind: 'objective' },
     ],
     'the vector is the declared objectives, in declaration order — not every number the job emitted',
   )
@@ -205,7 +210,7 @@ test('a contract with an unknown direction is refused instead of silently treate
   const view = frontier(ports.store, config({ auc: 'maximize' }))
 
   assert.equal(view.contract.ok, false)
-  assert.match(view.contract.error, /direction/, 'the error names the field that is wrong')
+  assert.match(view.contract.error, /objectives\.auc/, 'the error names the field that is wrong')
 })
 
 test('the incremental view and a full rebuild agree on the same facts', async () => {

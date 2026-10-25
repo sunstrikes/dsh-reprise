@@ -19,7 +19,7 @@ import { fakeJudge, openWorkspace, runCandidate } from './support/fake-ports.js'
 const config = (objectives, primary, extra = {}) => ({ metrics: { primary, objectives }, ...extra })
 
 test('the overview answers "where is this run, and how much is it costing" without reading events by hand', async () => {
-  const ports = openWorkspace({ config: config({ auc: 'up' }, undefined, { budget: { gpu_hours_limit: 4 } }) })
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { budget: { gpu_hours_limit: 4 } }) })
   await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
   await runCandidate(ports, {
     candidateId: 'r1-c2',
@@ -44,7 +44,7 @@ test('the overview answers "where is this run, and how much is it costing" witho
 })
 
 test('settled and in-flight spend are different numbers, because only one of them is still at risk', async () => {
-  const ports = openWorkspace({ config: config({ auc: 'up' }, undefined, { budget: { gpu_hours_limit: 4 } }) })
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { budget: { gpu_hours_limit: 4 } }) })
   await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
   // Walk a second candidate to SUBMIT and leave its job running: money reserved, not yet settled.
   createCandidate(ports, { candidateId: 'r1-c2', round: 1, hypothesis: 'still queued' })
@@ -63,7 +63,7 @@ test('settled and in-flight spend are different numbers, because only one of the
 })
 
 test('a concluded workspace reports which rule ended it, in the words recorded at the time', async () => {
-  const ports = openWorkspace({ config: config({ auc: 'up' }, undefined, { stop: { max_rounds: 1 } }) })
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 1 } }) })
   await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
   const stopped = await tick(ports)
   assert.equal(stopped.stopped.rule, 'max_rounds')
@@ -80,7 +80,7 @@ test('a concluded workspace reports which rule ended it, in the words recorded a
 })
 
 test('the rounds projection says which rounds improved and which produced nothing', async () => {
-  const ports = openWorkspace({ config: config({ auc: 'up' }, undefined, { stop: { max_rounds: 0 } }) })
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 0 } }) })
   await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
   await runCandidate(ports, { candidateId: 'r2-c1', round: 2, metrics: { auc: 0.69 } })
   await runCandidate(ports, { candidateId: 'r3-c1', round: 3, metrics: { auc: 0.75 } })
@@ -101,7 +101,7 @@ test('the rounds projection says which rounds improved and which produced nothin
 })
 
 test('the candidate detail carries the timeline, every gate verdict, the failure text and the artifacts', async () => {
-  const ports = openWorkspace({ config: config({ auc: 'up' }, undefined, { stop: { max_rounds: 0 } }) })
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 0 } }) })
   await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
   await runCandidate(ports, {
     candidateId: 'r1-c2',
@@ -134,7 +134,7 @@ test('the candidate detail carries the timeline, every gate verdict, the failure
 })
 
 test('the conclusion names the best candidate, its number, and what it is being compared against', async () => {
-  const ports = openWorkspace({ config: config({ auc: 'up' }, undefined, { stop: { max_rounds: 2 } }) })
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 2 } }) })
   await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
   await runCandidate(ports, { candidateId: 'r2-c1', round: 2, metrics: { auc: 0.7401 } })
   await tick(ports)
@@ -156,7 +156,7 @@ test('the conclusion names the best candidate, its number, and what it is being 
 })
 
 test('the projection is read-only: it works on a handle that could not write even if it tried', async () => {
-  const ports = openWorkspace({ config: config({ auc: 'up' }, undefined, { stop: { max_rounds: 1 } }) })
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 1 } }) })
   await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7, loss: 0.3 } })
   await tick(ports)
   const dir = ports.store.path.replace(/\/workspace\.db$/, '')
@@ -183,7 +183,7 @@ test('the projection is read-only: it works on a handle that could not write eve
 })
 
 test('the projection is a pure function of the facts: same store, same page', async () => {
-  const ports = openWorkspace({ config: config({ auc: 'up' }, undefined, { stop: { max_rounds: 0 } }) })
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 0 } }) })
   await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
 
   const first = overview(ports.store, { config: ports.config })
@@ -194,7 +194,7 @@ test('the projection is a pure function of the facts: same store, same page', as
 })
 
 test('an unknown candidate is reported as absent, not rendered as an empty candidate', async () => {
-  const ports = openWorkspace({ config: config({ auc: 'up' }, undefined, { stop: { max_rounds: 0 } }) })
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 0 } }) })
 
   const detail = candidateDetail(ports.store, 'nobody', { config: ports.config })
 

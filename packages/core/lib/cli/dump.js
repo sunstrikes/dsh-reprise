@@ -63,7 +63,7 @@ function frontierLines(store, candidateId, { config } = {}) {
 
   const workspace = overview(store, { config })
   if (workspace.metricContract.ok !== true) {
-    lines.push(`  not computed — ${workspace.metricContract.error}`)
+    lines.push(`  not computed (${workspace.metricContract.status ?? 'no contract'}) — ${workspace.metricContract.error}`)
     return lines
   }
 

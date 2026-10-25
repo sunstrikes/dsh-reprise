@@ -22,7 +22,7 @@ import test from 'node:test'
 import { overviewHandler } from '../lib/routes.js'
 import { openWorkspace, runCandidate, seedConfig } from '../../core/test/support/fake-ports.js'
 
-const config = (extra = {}) => ({ metrics: { primary: undefined, objectives: { auc: 'up' } }, ...extra })
+const config = (extra = {}) => ({ metrics: { primary: 'auc', objectives: { auc: 'up' } }, ...extra })
 
 async function portsFor(extra = {}) {
   const ports = openWorkspace({ config: config({ stop: { max_rounds: 0 }, ...extra }) })

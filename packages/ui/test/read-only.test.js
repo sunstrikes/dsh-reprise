@@ -50,7 +50,7 @@ function facts(store) {
 
 /** A workspace with a done candidate, a rejected one, and a concluded stop decision. */
 async function workspaceWithEverything() {
-  const ports = openWorkspace({ config: { metrics: { primary: undefined, objectives: { auc: 'up' } }, stop: { max_rounds: 1 } } })
+  const ports = openWorkspace({ config: { metrics: { primary: 'auc', objectives: { auc: 'up' } }, stop: { max_rounds: 1 } } })
   seedConfig(ports.store, ports.config)
   await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
   await runCandidate(ports, {
