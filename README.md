@@ -163,7 +163,7 @@ pack, and a pack missing a part is refused by name at boot instead of running ha
 | `candidate.command` | **required for `command`** | argv; `{candidate}` and `{worktree}` are substituted |
 | `runner.repo` / `runner.dir` | **required with `candidate`** | repo inside the workspace; where worktrees are created |
 | `runner.base_ref` | git default | the commit candidates branch from |
-| `model.kind` | `'command'` | how a judgement reaches a model: `dsh` (`dsh --profile headless --json -`), `claude` (`claude -p --output-format stream-json`), or `command` for a wrapper of your own |
+| `model.kind` | `'command'` | how a judgement reaches a model: `dsh` (`dsh --profile headless --json -`), `claude` (`claude -p --output-format stream-json --verbose`), or `command` for a wrapper of your own |
 | `model.command` | **required for `kind: command`** | the wrapper's argv: one JSON question on stdin, one JSON answer (a JSON object) on stdout |
 | `model.timeout_ms` | `600000` | how long one judgement may take before it is killed — a phase never waits for a model without a deadline |
 | `rounds.metric.name` / `.direction` | derived from the metric contract | the one metric the round gate optimises; restating it is how a run points at a different objective, and a restatement that disagrees with `metrics` is warned about |

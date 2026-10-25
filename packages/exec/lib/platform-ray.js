@@ -37,6 +37,7 @@ import {
 } from './archive.js'
 import { DEFAULTS, TERMINAL_STATES, resolveJobId, safeSlug } from './platform.js'
 import { createHttpRequest, isBrowserTraffic } from './ray-http.js'
+import { parseWindowLog } from './window-samples.js'
 
 const CLIP = 2_048
 
@@ -71,6 +72,20 @@ const LOG_SIGNATURES = [
   ['data', /FileNotFoundError|No such file or directory|JSONDecodeError|TOMLDecodeError|EmptyDataError|PermissionError/i],
   ['code', /Traceback \(most recent call last\)|SyntaxError|AssertionError|ModuleNotFoundError|ImportError|Segmentation fault/i],
 ]
+
+/**
+ * The windowed sample series a job summarised in its driver log, when it printed one.
+ *
+ * `parseWindowLog` refuses with a reason (`error_class: 'data'`) rather than answering with an empty
+ * series, and a refusal here is not this adapter's business: `collect()` reports the job's own
+ * outcome, and the kernel's sample reader decides what a missing series means for the run. What the
+ * adapter must not do is invent one, or throw on a log that simply never printed the marker.
+ */
+function windowsFrom(logs) {
+  if (typeof logs !== 'string' || logs === '') return undefined
+  const parsed = parseWindowLog(logs)
+  return parsed?.ok === true ? parsed.series : undefined
+}
 
 /** What a failed job's logs say, when the task records say nothing. */
 export function classifyRayLogs(logs) {
@@ -338,17 +353,70 @@ export function createRayPlatform({
    * It is the only way to answer "is one of our jobs still running that the ledger never recorded",
    * because a listing is the cluster's own state and there is no per-job route for "everything".
    * Two things about its shape, both measured on Ray 2.59: it arrives in the same StateApiResponse
-   * envelope as `/api/v0/tasks`, and a row's `job_id` may be `null` while `submission_id` is always
-   * there. So the fields this adapter promises are exactly those two, plus `status` and `metadata`
-   * (where our marker travels) — anything else is passed through if present and never required.
+   * envelope as `/api/v0/tasks` — `{result: true, msg: '', data: {result: {total, result: [...]}}}`
+   * — and a row's `job_id` may be `null` while `submission_id` is always there. So the fields this
+   * adapter promises are exactly those two, plus `status` and `metadata` (where our marker travels)
+   * — anything else is passed through if present and never required.
    *
    * "We could not read it" is an answer: `{ok: false}` with the reason, never an empty list, because
    * an empty list reads as "nothing of ours is running" to everything downstream.
    */
   function listingRows(document) {
-    const rows = document?.data?.result?.result ?? document?.result?.result ?? document?.jobs ?? document
-    if (!Array.isArray(rows)) return rows !== null && typeof rows === 'object' ? [rows] : []
-    return rows.filter((row) => row !== null && typeof row === 'object')
+    // The two wrapped positions: the measured envelope, and the same one without the outer `data`.
+    // A single-row object is tolerated here (and only here) because wrapping one row instead of a
+    // list is a pagination detail, not a different document.
+    for (const wrapped of [document?.data?.result?.result, document?.result?.result]) {
+      const listed = asListing(wrapped, { singleRow: true })
+      if (listed !== undefined) return listed
+    }
+    // The shorthand forms: `{result: [...]}`, `{jobs: [...]}`, and a bare array. A `result: true`
+    // with no envelope reaches none of these, which is the point — see `asListing`.
+    for (const candidate of [document?.result, document?.jobs, document]) {
+      const listed = asListing(candidate, { singleRow: false })
+      if (listed !== undefined) return listed
+    }
+    return {
+      message:
+        `the dashboard answered 200 for the job listing with a shape this adapter cannot read: ${describeShape(document)}` +
+        ' — "we could not read the listing" is not "the cluster is empty"',
+    }
+  }
+
+  /**
+   * One candidate position, read as a listing or rejected. `undefined` means "this position is not a
+   * listing", so the caller can try the next one; a `message` means the position *was* a listing
+   * position and its contents are not rows, which is a refusal rather than a fall-through.
+   *
+   * There is deliberately no "some object, therefore one job" fallback outside `singleRow`: that
+   * fallback is how a 200 nobody recognised used to become `{ok: true, jobs: [<the envelope>]}`, and
+   * a consumer cannot tell that from a cluster with nothing of ours on it.
+   */
+  function asListing(candidate, { singleRow }) {
+    if (Array.isArray(candidate)) {
+      const rows = candidate.filter((row) => row !== null && typeof row === 'object' && !Array.isArray(row))
+      if (candidate.length > 0 && rows.length === 0) {
+        return {
+          message: `the job listing cannot be read: the dashboard answered 200 with ${candidate.length} row(s) and none of them is an object — the first is ${describeShape(candidate[0])}`,
+        }
+      }
+      return { rows }
+    }
+    if (singleRow && candidate !== null && typeof candidate === 'object') return { rows: [candidate] }
+    return undefined
+  }
+
+  /** The shape a document actually had, in words an operator can act on without a debugger. */
+  function describeShape(value) {
+    if (value === undefined) return 'an empty body (200 with no JSON)'
+    if (value === null) return 'null'
+    if (Array.isArray(value)) return `an array of ${value.length}`
+    if (typeof value === 'object') {
+      const keys = Object.keys(value)
+      if (keys.length === 0) return 'an object with no keys'
+      return `an object with keys ${keys.slice(0, 8).map((key) => JSON.stringify(key)).join(', ')}`
+    }
+    if (typeof value === 'string') return `the string ${JSON.stringify(clip(value, 80))}`
+    return `a ${typeof value} (${JSON.stringify(value)})`
   }
 
   async function fetchLogs(jobId) {
@@ -725,18 +793,24 @@ export function createRayPlatform({
         artifacts.push({ name: 'metrics.json', uri: `file://${metricsPath}`, bytes: statSync(metricsPath).size })
       }
 
-      if (artifactsDir !== undefined) {
-        const logs = await fetchLogs(ref)
-        if (logs !== undefined) {
+      // The driver log is the only channel back from a cluster with no shared filesystem, so it is
+      // read for two reasons: to keep it as an artifact when a directory was configured, and to
+      // recover the windowed sample series the job summarised itself (`REPRISE_WINDOWS`). Reading it
+      // only for the artifact would leave every cluster baseline without windows — the samples exist
+      // in the log and nowhere else.
+      const logs = await fetchLogs(ref)
+      if (logs !== undefined) {
+        if (artifactsDir !== undefined) {
           mkdirSync(artifactsDir, { recursive: true })
           const path = join(artifactsDir, `${safeSlug(ref)}.driver.log`)
           writeFileSync(path, logs)
           artifacts.push({ name: 'driver.log', uri: `file://${path}`, bytes: Buffer.byteLength(logs) })
         }
       }
+      const series = windowsFrom(logs)
 
       if (!TERMINAL_STATES.includes(observed.state)) {
-        return { state: observed.state, metrics: undefined, artifacts }
+        return { state: observed.state, metrics: undefined, artifacts, ...(series === undefined ? {} : { window_series: series }) }
       }
       return {
         state: observed.state,
@@ -744,6 +818,7 @@ export function createRayPlatform({
         error_class: observed.error_class,
         error_detail: observed.error_detail,
         artifacts,
+        ...(series === undefined ? {} : { window_series: series }),
       }
     },
 
@@ -771,6 +846,11 @@ export function createRayPlatform({
      * The cluster's whole job listing. Optional capability: `submit`/`poll`/`collect`/`find`/`cancel`
      * stay the port, and a caller that needs it asks `platform.list` (see `jobs.js` in core, which
      * turns the answer into "ours / orphan / foreign" — this adapter does not decide that).
+     *
+     * A 200 is only a listing if the document is one of the envelopes `listingRows` recognises.
+     * Answering `{ok: true, jobs: []}` for a document nobody understood is the failure this refuses:
+     * the `single_job` GPU-exclusivity hold and the orphan view both read an empty listing as
+     * "nothing of ours is running", and acting on that dispatches a second job onto shared cards.
      */
     async list() {
       const response = await call('GET', '/api/v0/jobs')
@@ -781,7 +861,9 @@ export function createRayPlatform({
           message: response.transport_error ?? `the dashboard answered ${response.status} for the job listing`,
         }
       }
-      return { ok: true, jobs: listingRows(response.json) }
+      const listed = listingRows(response.json)
+      if (!Array.isArray(listed.rows)) return { ok: false, status: response.status, message: listed.message }
+      return { ok: true, jobs: listed.rows }
     },
 
     async cancel(jobId) {
