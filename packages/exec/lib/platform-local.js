@@ -324,6 +324,10 @@ export function createLocalPlatform({
       const newest = matches.at(-1)
       return {
         job_id: newest.job_id,
+        // The key the job was submitted under, for the same reason the Ray adapter reports it: crash
+        // recovery adopts the identity the platform holds rather than re-deriving one that may name
+        // a different attempt of the same candidate.
+        submission_id: newest.submission_id,
         state: observe(newest.job_id).state,
         harness: newest.harness ?? name,
         submitted_at_ms: newest.submitted_at_ms,

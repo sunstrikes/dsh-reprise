@@ -207,7 +207,9 @@ const JOB_STATUS_STATES = Object.freeze({
  *   now?: () => number,
  *   name?: string,
  *   limits?: object,
- *   submissionIdFor?: (candidateId: string) => string,
+ *   submissionIdFor?: (candidateId: string) => string, — the *round-less* form of a candidate's
+ *     submission id (core builds it: `reprise:candidate=<id>`), used by `find()` because crash
+ *     recovery does not know the round. Defaults to the candidate id itself,
  *   metricsRequired?: boolean,
  *   packaging?: false | {exclusions?: object[], maxBytes?: number, verify?: false | {command: string[]},
  *     git?: Function},
@@ -310,12 +312,25 @@ export function createRayPlatform({
   }
 
   /**
+   * Does this details document say it is the candidate's job?
+   *
+   * `metadata.candidate_id` is absent on a cluster that stores no metadata, so "unknown" answers yes:
+   * the id being asked about is already our own key, and refusing on a missing field would make a
+   * crashed submit unresolvable. A *different* candidate id, though, means a slug collision, and
+   * adopting that job would hand this candidate somebody else's run.
+   */
+  function belongsToCandidate(details, candidateId) {
+    const metadataCandidate = details?.metadata?.candidate_id
+    return metadataCandidate === undefined || metadataCandidate === candidateId
+  }
+
+  /**
    * The job this submission id already owns, if the cluster can still show it.
    *
    * Measured on the live cluster (Ray 2.59, 2026-10-24): `GET /api/jobs/<submission_id>` answers
    * **200** for a finished job, and 404 for an id the cluster never accepted — so this read is the
    * duplicate check, not a guess. The same route also answers for jobs whose details document
-   * reports `job_id: null` (42 of 129 rows had one), and `/api/jobs/<submission_id>/logs` resolves
+   * reports `job_id: null` (80 of 167 listing rows had one), and `/api/jobs/<submission_id>/logs` resolves
    * too, which is why the submission id below is a *usable* job reference rather than a placeholder.
    *
    * Why a read before the write: a crash-and-retry, or two ticks racing on one candidate, must not
@@ -327,8 +342,7 @@ export function createRayPlatform({
     const response = await jobDetails(`/api/jobs/${encodeURIComponent(submissionId)}`)
     if (response.status !== 200) return undefined
     const details = response.json ?? {}
-    const metadataCandidate = details.metadata?.candidate_id
-    if (metadataCandidate !== undefined && metadataCandidate !== candidateId) return undefined
+    if (!belongsToCandidate(details, candidateId)) return undefined
     const mapped = JOB_STATUS_STATES[String(details.status ?? '').toUpperCase()]
     // `job_id` can be null upstream; the submission id is the id the dashboard resolves, so it is a
     // reference that can be polled, not a missing one.
@@ -345,6 +359,43 @@ export function createRayPlatform({
 
   function jobDetails(path) {
     return call('GET', path)
+  }
+
+  /**
+   * The cluster's job listing, as the port answers it: `{ok: true, jobs}` or `{ok: false, message}`.
+   *
+   * Shared by `list()` — the orphan view — and by `find()`, which has to search the listing for a job
+   * whose round it no longer remembers. One reader means the two can never disagree about what the
+   * cluster said.
+   */
+  async function listJobs() {
+    const response = await call('GET', '/api/v0/jobs')
+    if (response.status !== 200) {
+      return {
+        ok: false,
+        status: response.status,
+        message: response.transport_error ?? `the dashboard answered ${response.status} for the job listing`,
+      }
+    }
+    return { ok: true, jobs: listingRows(response.json) }
+  }
+
+  /** The job a details document or listing row describes, in the port's vocabulary. */
+  function foundJob(document, fallbackSubmissionId) {
+    const details = document ?? {}
+    const submissionId = typeof details.submission_id === 'string' && details.submission_id !== '' ? details.submission_id : fallbackSubmissionId
+    const mapped = JOB_STATUS_STATES[String(details.status ?? '').toUpperCase()]
+    const submittedAt = typeof details.start_time === 'number' ? details.start_time : now()
+    return {
+      job_id: details.job_id ?? submissionId,
+      // Reported because crash recovery adopts this row's identity: the job `find()` answers with may
+      // belong to a round the caller never asked about, and guessing one would name a job nobody ran.
+      submission_id: submissionId,
+      state: mapped ?? 'unknown',
+      harness: name,
+      submitted_at_ms: submittedAt,
+      deadline_ms: wallDeadlineFrom(submittedAt),
+    }
   }
 
   /**
@@ -769,24 +820,39 @@ export function createRayPlatform({
       }
     },
 
+    /**
+     * The job a candidate is running, asked for by the key it was submitted under.
+     *
+     * Recovering after a crash is the reason this method exists: our memory of the submission is
+     * gone, so we ask the platform rather than resubmitting — resubmitting is how one candidate ends
+     * up with two GPU bills.
+     *
+     * The tolerance lives here, and it is one thing: **the caller does not know the round**. The
+     * idempotency key core builds is `reprise:candidate=<id>:round=<n>`, so an id built from the
+     * candidate alone is the round-less *family root* — `submissionIdFor` is that root. It is used
+     * twice: the exact id is asked for first (one request, and the shape a deployment without a round
+     * suffix keeps), and when nothing answers, the listing is searched for a submission id that is
+     * the root or starts with `<root>:`. The listing is the only other surface that carries the id:
+     * measured on the live cluster, a listing row has no `metadata` at all.
+     *
+     * Several attempts of one candidate may be listed, so a job the platform still considers in
+     * flight wins over a finished one; among equals the platform's own order decides. The answer
+     * carries the submission id it resolved, because that — not our guess — is the job's identity.
+     */
     async find(candidateId) {
-      // Recovering after a crash is the reason this method exists: our memory of the submission is
-      // gone, so we ask by the idempotency key we chose at submit time.
-      const submissionId = submissionIdFor(candidateId)
-      const response = await jobDetails(`/api/jobs/${encodeURIComponent(submissionId)}`)
-      if (response.status !== 200) return undefined
-      const details = response.json ?? {}
-      const metadataCandidate = details.metadata?.candidate_id
-      if (metadataCandidate !== undefined && metadataCandidate !== candidateId) return undefined
-      const mapped = JOB_STATUS_STATES[String(details.status ?? '').toUpperCase()]
-      const submittedAt = typeof details.start_time === 'number' ? details.start_time : now()
-      return {
-        job_id: details.job_id ?? submissionId,
-        state: mapped ?? 'unknown',
-        harness: name,
-        submitted_at_ms: submittedAt,
-        deadline_ms: wallDeadlineFrom(submittedAt),
-      }
+      const rootId = submissionIdFor(candidateId)
+      const exact = await jobDetails(`/api/jobs/${encodeURIComponent(rootId)}`)
+      if (exact.status === 200 && belongsToCandidate(exact.json, candidateId)) return foundJob(exact.json, rootId)
+
+      const listing = await listJobs()
+      if (listing.ok !== true) return undefined
+      const family = listing.jobs.filter((row) => {
+        const submissionId = typeof row.submission_id === 'string' ? row.submission_id : ''
+        return submissionId === rootId || submissionId.startsWith(`${rootId}:`)
+      })
+      const inFlight = family.find((row) => !TERMINAL_STATES.includes(JOB_STATUS_STATES[String(row.status ?? '').toUpperCase()] ?? 'unknown'))
+      const chosen = inFlight ?? family[0]
+      return chosen === undefined ? undefined : foundJob(chosen, rootId)
     },
 
     /**
@@ -795,15 +861,7 @@ export function createRayPlatform({
      * turns the answer into "ours / orphan / foreign" — this adapter does not decide that).
      */
     async list() {
-      const response = await call('GET', '/api/v0/jobs')
-      if (response.status !== 200) {
-        return {
-          ok: false,
-          status: response.status,
-          message: response.transport_error ?? `the dashboard answered ${response.status} for the job listing`,
-        }
-      }
-      return { ok: true, jobs: listingRows(response.json) }
+      return listJobs()
     },
 
     async cancel(jobId) {
