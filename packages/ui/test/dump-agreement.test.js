@@ -20,14 +20,21 @@
  */
 
 import assert from 'node:assert/strict'
-import { dirname } from 'node:path'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
-import { renderDump } from '../../core/lib/cli/dump.js'
+import { buildQuestion, modelCallName, modelCallRecord } from '@dsh-reprise/exec/model'
+
+import { fileArtifacts } from '../../core/lib/artifacts.js'
+import { renderDump, runDump } from '../../core/lib/cli/dump.js'
+import { loadDomainPack } from '../../core/lib/domain.js'
 import { Store } from '../../core/lib/store.js'
-import { tick } from '../../core/lib/loop.js'
-import { fakeJudge, forgetRecordedConfig, openWorkspace, runCandidate, seedConfig } from '../../core/test/support/fake-ports.js'
-import { candidateHandler, conclusionHandler, overviewHandler } from '../lib/routes.js'
+import { createCandidate, tick } from '../../core/lib/loop.js'
+import { fakeJudge, forgetRecordedConfig, openWorkspace, runCandidate, seedConfig, seedMetrics } from '../../core/test/support/fake-ports.js'
+import { callHandler, callsHandler, candidateHandler, conclusionHandler, overviewHandler } from '../lib/routes.js'
 
 const RUN_CONFIG = {
   metrics: { primary: 'auc', objectives: { auc: 'up' } },
@@ -204,4 +211,112 @@ test('neither path invents a ranking for a run that never recorded its metric co
   assert.equal(overview.metricContract.ok, false, 'the page says it too, so neither side guesses a direction')
   assert.match(overview.metricContract.error, /no metric contract/)
   assert.equal(view.frontier.position, 'unranked', 'and no candidate claims a position it cannot have')
+})
+// ------------------------------------------------- the four observability panels
+
+/**
+ * The panels of ticket 29 are one projection with two renderers, so `dump` has to be able to print
+ * each of them. This block holds that: the workspace page (`--overview`), the candidate's gate chain,
+ * the conclusion's measured/published line, and the model-call audit (`--calls` / `--call`).
+ *
+ * Every expectation is read out of the JSON first and then looked for in the text, the direction the
+ * rest of this file uses: a renderer that prints a different number from the page fails here, and a
+ * page that stops carrying the number fails too.
+ */
+
+const GENERATIVE_PACK_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'examples', 'generative-recommenders')
+
+/** A run under the shipped generative-recommenders contract, with a job ledger and a frozen baseline. */
+async function packRun() {
+  const pack = loadDomainPack(GENERATIVE_PACK_DIR)
+  const workspace = mkdtempSync(join(tmpdir(), 'reprise-dump-panels-'))
+  const ports = openWorkspace({ config: { metrics: pack.metricContract, stop: { max_rounds: 0 } }, dir: workspace })
+  seedMetrics(ports.store, pack.metricContract)
+  const recorded = ports.store.getState(undefined, 'workspace', {}) ?? {}
+  ports.store.setState(undefined, 'workspace', {
+    ...recorded,
+    executor: { kind: 'local', command: ['node', 'train.mjs'], num_gpus: 2 },
+  })
+  writeFileSync(join(workspace, 'baseline.json'), JSON.stringify({ metric: 'hr@10', value: 0.29 }))
+  await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { 'hr@10': 0.3001, 'ndcg@10': 0.17 } })
+  ports.store.close()
+  return { dir: workspace, pack }
+}
+
+test('the workspace dump prints the cards, the queue and the measured/published line the page carries', async () => {
+  const { dir } = await packRun()
+  const overview = overviewHandler(dir, {})
+  const final = conclusionHandler(dir, {}).data
+  const text = runDump(['--workspace', dir, '--overview']).output
+
+  const cluster = overview.data.cluster
+  assert.equal(cluster.cards.inUse, null, 'the page says unknown, so the dump must not claim 0 either')
+  assert.match(
+    text,
+    new RegExp(
+      `^cards {6}per job ${cluster.cards.perJob}; in use unknown; our ledger floor ${cluster.cards.floor} ` +
+        `\\(${cluster.jobs.open.length} open job\\)$`,
+      'm',
+    ),
+    'the card count and the ledger floor, in the same words the page uses for "unknown"',
+  )
+  assert.match(text, new RegExp(`^queue {6}${cluster.queue.count} waiting$`, 'm'))
+  assert.match(text, /^listing {4}not read — /m, 'why the count is unknown, spelled out')
+
+  assert.ok(
+    text.includes(`${'best'.padEnd(11)}${final.best.candidate_id} ${final.best.metric}=${final.best.value}`),
+    'the best result, once',
+  )
+  assert.ok(text.includes(String(final.comparison.measured.value)), 'the number we measured')
+  assert.ok(text.includes(String(final.comparison.published.value)), 'the number they published')
+  assert.match(text, new RegExp(`published +${final.comparison.published.dataset} ${final.comparison.published.method}`))
+  assert.ok(text.includes(final.comparison.published.source.file), 'and where that number came from')
+})
+
+test('the candidate dump prints the gate chain with the same three-way statuses as the page', async () => {
+  const ports = openWorkspace({ config: { metrics: { primary: 'auc', objectives: { auc: 'up' } }, stop: { max_rounds: 0 } } })
+  seedConfig(ports.store, ports.config)
+  ports.harness = { land: () => ({ ok: false, error_class: 'deterministic_fail', message: 'no module named evals' }) }
+  createCandidate(ports, { candidateId: 'c1', round: 1, hypothesis: 'widen the embedding table' })
+  for (let index = 0; index < 6; index += 1) {
+    await tick(ports)
+    ports.clock.advance(10_000)
+  }
+  const dir = dirname(ports.store.path)
+  ports.store.close()
+
+  const chain = candidateHandler(dir, { candidate: 'c1' }).data.gateChain
+  const text = runDump(['--candidate', 'c1', '--workspace', dir]).output
+
+  assert.match(text, /^gate chain$/m)
+  assert.equal(chain.reached, false, 'fixture: the candidate stopped before the gate')
+  for (const step of chain.chain) {
+    assert.ok(text.includes(step.name), `${step.name} is on the page and in the dump`)
+    assert.match(text, new RegExp(`^ {2}${step.name} +${step.status}`, 'm'), `${step.name} is missing in both renderers`)
+  }
+})
+
+test('the audit dump lists the calls the page lists, and prints one call prompt and response word for word', async () => {
+  const { dir } = await packRun()
+  const artifacts = fileArtifacts(join(dir, 'artifacts'))
+  const prompt = 'ROUND_PLAN — propose one structural hypothesis.'
+  const response = 'Here you go:\n```json\n{"hypotheses": []}\n```'
+  const question = buildQuestion({ call_site: 'round_plan', subject: 'round-1', prompt, facts: { round: 1 }, answer_schema: '{"h": 1}' })
+  artifacts.write(modelCallName({ call_site: 'round_plan', subject: 'round-1' }), modelCallRecord({ question, answer: { hypotheses: [] }, response }))
+
+  const list = callsHandler(dir, {}).data
+  const listing = runDump(['--workspace', dir, '--calls']).output
+
+  assert.equal(list.count, 1)
+  assert.match(listing, new RegExp(`^calls {6}${list.count}$`, 'm'))
+  assert.ok(listing.includes(list.calls[0].ref), 'the same reference the page lists')
+
+  const opened = callHandler(dir, { ref: list.calls[0].ref }).data
+  const text = runDump(['--workspace', dir, '--call', list.calls[0].ref]).output
+
+  assert.match(text, new RegExp(`^call +${opened.ref.replace(/[:]/g, '\\:')}$`, 'm'))
+  assert.ok(text.includes(opened.prompt), 'the prompt, word for word')
+  assert.ok(text.includes(opened.response), 'and the response, word for word')
+  assert.match(text, /^prompt$/m)
+  assert.match(text, /^response$/m)
 })
