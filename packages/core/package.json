@@ -12,6 +12,7 @@
     "./loop": "./lib/loop.js",
     "./budget": "./lib/budget.js",
     "./ranking": "./lib/ranking.js",
+    "./frontier": "./lib/frontier.js",
     "./metric-contract": "./lib/metric-contract.js",
     "./stop": "./lib/stop.js",
     "./projection": "./lib/projection.js",

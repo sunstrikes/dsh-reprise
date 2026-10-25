@@ -203,11 +203,12 @@ selection reads it — top_k on each objective axis, then rotate. The ranking an
 numbers, and who is ahead"; it is what the rounds page and `dump` print, and `best` belongs to it
 (chosen on the primary metric, ties broken by round then id).
 
-*Status:* half built. The thing that folds one row per candidate and answers `best` is now
-`packages/core/lib/ranking.js` (`ranking`, `rebuildRanking`, `roundHistory`) — the mechanical rename
-landed first, with no behaviour change, so the vocabulary could be reviewed on its own. The
-non-dominated set as a module of its own, and parent selection reading it, arrive with the parent
-selection ticket.
+*Status:* the two words are two modules. `packages/core/lib/ranking.js` (`ranking`,
+`rebuildRanking`, `roundHistory`) folds one row per candidate and answers `best`;
+`packages/core/lib/frontier.js` (`frontierOf`) answers the non-dominated set over those rows,
+always including the baseline row and saying `empty: true` when no candidate is comparable. The
+ranking calls the frontier for the dominance verdicts it annotates its rows with, so the set and the
+annotations cannot disagree. Parent selection reads the set (next ticket).
 
 *Blurred with:* the injected "current frontier" (see 3), which means the non-dominated set and not the
 ranking; and with `best`, which is one row of the ranking rather than a verdict about the set.

@@ -27,6 +27,7 @@
  * @module
  */
 
+import { frontierOf } from './frontier.js'
 import { resolveMetricContract } from './metric-contract.js'
 import { WORKSPACE_SUBJECT } from './store.js'
 
@@ -140,20 +141,7 @@ function rowsOf(store, { persist }) {
   return rows
 }
 
-const atLeastAsGood = (a, b, direction) => (direction === 'down' ? a <= b : a >= b)
 const strictlyBetter = (a, b, direction) => (direction === 'down' ? a < b : a > b)
-
-/** Does `left` dominate `right`? Better or equal everywhere, better somewhere. */
-function dominates(left, right, objectives) {
-  let strictly = false
-  for (const objective of objectives) {
-    const a = left.vector[objective.name]
-    const b = right.vector[objective.name]
-    if (!atLeastAsGood(a, b, objective.direction)) return false
-    if (strictlyBetter(a, b, objective.direction)) strictly = true
-  }
-  return strictly
-}
 
 function compareByPrimary(left, right, contract) {
   const direction = contract.objectives.find((objective) => objective.name === contract.primary)?.direction
@@ -193,15 +181,15 @@ function viewOf(contract, rows) {
   }
 
   const ranked = candidates.filter((row) => row.complete)
-  const frontier = []
-  for (const candidate of ranked) {
-    const dominator = ranked.find((other) => other !== candidate && dominates(other, candidate, contract.objectives))
-    if (dominator === undefined) {
-      candidate.onFrontier = true
-      frontier.push(candidate.candidate_id)
-    } else {
-      candidate.dominatedBy = dominator.candidate_id
-    }
+
+  // Who dominates whom is the frontier's question, answered in one place (`frontier.js`) so the set
+  // and the row annotations can never disagree. The baseline is not passed in: no candidate dominates
+  // the baseline, and this view is about candidates only.
+  const set = frontierOf({ contract, candidates })
+  for (const row of set.members) row.onFrontier = true
+  for (const entry of set.dominated) {
+    const row = candidates.find((candidate) => candidate.candidate_id === entry.candidate_id)
+    if (row !== undefined) row.dominatedBy = entry.dominated_by
   }
 
   const best = [...ranked].sort((left, right) => compareByPrimary(left, right, contract))[0]
@@ -218,7 +206,7 @@ function viewOf(contract, rows) {
             metric: contract.primary,
             value: best.vector[contract.primary],
           },
-    frontier,
+    frontier: set.members.map((member) => member.candidate_id),
     incomplete: candidates
       .filter((row) => !row.complete && row.missing.length > 0)
       .map((row) => ({ candidate_id: row.candidate_id, missing: row.missing })),
