@@ -26,6 +26,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
+import { createRayPlatform } from '@dsh-reprise/exec/platform/ray'
 import { createCandidate, reconcile, tick } from '../lib/loop.js'
 import { Store } from '../lib/store.js'
 import { jobsCommand } from '../lib/cli/jobs.js'
@@ -241,6 +242,27 @@ test('a listing we could not read reports that we did not look, not an empty clu
   assert.deepEqual(report.orphans, [], '"we could not look" must never be handed back as "there are none"')
   assert.equal(report.ledger.length, 1, 'the ledger half of the view is still readable without the cluster')
   ports.store.close()
+})
+
+test('a 200 the Ray adapter cannot read reaches the view as "cannot read", not as zero jobs', async () => {
+  // The end-to-end half of the same fact, through the real adapter: a dashboard upgrade, a proxy
+  // error page or a truncated body answers 200 with a document nobody recognises. Any fail-open
+  // reading of it — `{ok: true, jobs: [<the envelope>]}` — reaches this view as "here are the jobs"
+  // or "there are none", and the `single_job` hold dispatches a second GPU job on that reading.
+  const platform = createRayPlatform({
+    baseUrl: 'http://ray.fake:8265',
+    request: async () => ({ status: 200, headers: {}, text: JSON.stringify({ result: true, msg: '', data: { result: { total: 0 } } }) }),
+    plan: () => ({ entrypoint: ['python', '-m', 'train'], metadata: {} }),
+  })
+
+  const listing = await readListing(platform)
+  const report = jobReport({ rows: [], listing })
+
+  assert.equal(listing.ok, false, 'the adapter must not hand back a listing it did not recognise')
+  assert.equal(report.read, false, 'the view reports that it did not look')
+  assert.match(report.reason, /cannot read/, 'and it says the listing could not be read')
+  assert.deepEqual(report.orphans, [])
+  assert.deepEqual(report.ours, [])
 })
 
 /** A job carrying our marker that this workspace never recorded: a crash, or a deleted workspace. */

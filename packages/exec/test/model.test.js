@@ -18,7 +18,7 @@
  * or a fake CLI started with `node`.
  */
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -42,7 +42,7 @@ import {
 import { HARNESS_UNAVAILABLE, REFUSAL, TIMEOUT } from '../lib/harness.js'
 
 const FAKE_CLI = `
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 
 const mode = process.env.FAKE_MODE ?? 'answer'
 const input = readFileSync(0, 'utf8')
@@ -74,7 +74,12 @@ if (mode === 'exit') {
   process.stderr.write('line that matters\\n')
   process.exitCode = 7
 }
-if (mode === 'hang') setTimeout(() => {}, 60000)
+if (mode === 'hang') {
+  // Announce the pid before the hang: the fact the deadline test asserts is that this process was
+  // *killed*, and a process that never named itself cannot be looked for afterwards.
+  if (process.env.FAKE_PIDFILE) writeFileSync(process.env.FAKE_PIDFILE, String(process.pid))
+  setTimeout(() => {}, 60000)
+}
 `
 
 /** A fake engine, started with `node`, selected by `FAKE_MODE`; no network, no provider, no harness. */
@@ -258,21 +263,46 @@ test('a non-zero exit is the same closed failure, and its message quotes the las
 })
 
 test('a model that never answers is killed at its deadline, not waited on', async () => {
-  const { ask, records } = port({ mode: 'hang', timeoutMs: 250 })
+  // The property is "we do not wait out the 60 s hang", and it is asserted through the two facts the
+  // deadline produces — never through elapsed milliseconds:
+  //
+  //   1. `cause === 'timeout'`. `classifyAsk` can only reach that cause when our own timer fired and
+  //      the child was signalled; a call that waited the hang out comes back `unparseable_answer`
+  //      (`the model wrote 0 line(s)…`) after the child exits by itself. This is the assertion that
+  //      fails if somebody removes the deadline.
+  //   2. The child is gone afterwards: the fake announces its pid before hanging, and the pid must no
+  //      longer exist. A port that reports "timeout" while leaving the process running is a leaked
+  //      harness, and a night of leaked harnesses is an OOM at 3 a.m.
+  //
+  // Deliberately NOT asserted: an elapsed bound. A 5 s bound here failed a loaded suite once at
+  // 25.1 s, and on the box this was written on the *deadline timer itself* was delayed to 142 s by
+  // event-loop starvation — a bound tight enough to mean something flakes, and one loose enough not
+  // to (≥ 60 s) would pass even if we waited the hang out. What distinguishes the two behaviours is
+  // which of the two timers (ours, or the child's own) ended the call, and that is `cause`.
+  const pidFile = join(mkdtempSync(join(tmpdir(), 'reprise-model-pid-')), 'pid')
+  // 5 s, not 250 ms: on a starved box the fake needs room to start and write its pid before the
+  // deadline fires. It is still 12x shorter than the hang.
+  const { ask, records } = port({ mode: 'hang', timeoutMs: 5_000, env: { FAKE_MODE: 'hang', FAKE_PIDFILE: pidFile } })
 
-  const started = Date.now()
   await assert.rejects(
     () => ask(VERIFY_QUESTION),
     (error) => {
       assert.ok(isModelUnavailable(error))
-      assert.equal(error.cause, CAUSES.timeout)
-      assert.match(error.message, /250 ms/)
+      assert.equal(error.cause, CAUSES.timeout, 'our deadline ended the call, not the child exiting')
+      assert.match(error.message, /5000 ms/, 'and the message quotes the deadline it enforced')
       return true
     },
   )
-  const elapsed = Date.now() - started
-  assert.ok(elapsed < 5_000, `the judgement was bounded by its deadline (took ${elapsed} ms)`)
-  assert.equal(records[0].cause, CAUSES.timeout)
+
+  const pid = Number(readFileSync(pidFile, 'utf8').trim())
+  assert.ok(Number.isSafeInteger(pid) && pid > 0, `the fake engine announced its pid in ${pidFile}`)
+  assert.throws(
+    () => process.kill(pid, 0),
+    (error) => error !== null && error.code === 'ESRCH',
+    `the hung child (pid ${pid}) was killed, not left running`,
+  )
+
+  assert.equal(records[0].cause, CAUSES.timeout, 'the record names the deadline, not an unreadable answer')
 })
 
 test('a port that throws is "no answer arrived", not an opinion — and one predicate says so', async () => {
