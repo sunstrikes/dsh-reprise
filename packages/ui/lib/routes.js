@@ -26,7 +26,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { DB_FILENAME, Store } from '../../core/lib/store.js'
-import { ViewError, candidateView, conclusionView, overviewView, roundsView } from './views.js'
+import { ViewError, callView, callsView, candidateView, conclusionView, overviewView, roundsView } from './views.js'
 
 export { ViewError }
 
@@ -99,6 +99,16 @@ export function conclusionHandler(workspace, query = {}) {
   return answer(workspace, 'conclusion', conclusionView, query)
 }
 
+/** The audit route's plain handler: every model call the run filed, `?site=` to narrow it. */
+export function callsHandler(workspace, query = {}) {
+  return answer(workspace, 'calls', callsView, query)
+}
+
+/** One model call, opened: needs `query.ref`. */
+export function callHandler(workspace, query = {}) {
+  return answer(workspace, 'call', callView, query)
+}
+
 /**
  * The declared routes, in registration order.
  *
@@ -111,6 +121,9 @@ export const ROUTES = [
   { name: 'rounds', path: '/api/reprise/rounds', handler: roundsHandler },
   { name: 'candidate', path: '/api/reprise/candidate', handler: candidateHandler },
   { name: 'conclusion', path: '/api/reprise/conclusion', handler: conclusionHandler },
+  // The audit is what makes a model's answer checkable: which judgement, what prompt, what came back.
+  { name: 'calls', path: '/api/reprise/calls', handler: callsHandler },
+  { name: 'call', path: '/api/reprise/call', handler: callHandler },
 ]
 
 /** Static files the page needs. Served from this package so there is no build artefact to ship. */
@@ -123,7 +136,7 @@ export const ASSETS = [
 export function queryOf(url) {
   const params = new URL(url, 'http://dsh.test').searchParams
   const query = {}
-  for (const key of ['after', 'candidate']) {
+  for (const key of ['after', 'candidate', 'site', 'ref']) {
     const value = params.get(key)
     if (value !== null) query[key] = value
   }
