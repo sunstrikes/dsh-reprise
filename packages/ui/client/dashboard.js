@@ -15,12 +15,20 @@
  * injection surface for the thing it is watching.
  */
 
-/** The four views this page shows. Paths are absolute because the host mounts them on its own origin. */
+/**
+ * The views this page shows. Paths are absolute because the host mounts them on its own origin.
+ *
+ * `calls` is the audit list and `call` opens one record: the judgement a model was asked for, with
+ * the prompt it read and the words it returned. Reading a call is a second request on purpose, so the
+ * list can carry a hundred calls without carrying a hundred prompts.
+ */
 const ROUTES = {
   overview: '/api/reprise/overview',
   rounds: '/api/reprise/rounds',
   candidate: '/api/reprise/candidate',
   conclusion: '/api/reprise/conclusion',
+  calls: '/api/reprise/calls',
+  call: '/api/reprise/call',
 }
 
 /** Poll cadence. The old dashboard re-read everything every 30s; this one only asks for increments. */
@@ -30,17 +38,21 @@ export const POLL_MS = 5_000
 const STREAM_LIMIT = 200
 
 /**
- * One route URL, with the cursor and the candidate as query parameters.
+ * One route URL, with the cursor, the candidate and the audit reference as query parameters.
  *
  * @param {keyof ROUTES} view
- * @param {{ cursor?: string | null, candidate?: string | null }} [options]
+ * @param {{ cursor?: string | null, candidate?: string | null, ref?: string | null }} [options]
  */
-export function urlFor(view, { cursor, candidate } = {}) {
+export function urlFor(view, { cursor, candidate, ref } = {}) {
   const query = []
   if (cursor) query.push(`after=${encodeURIComponent(cursor)}`)
   if (candidate) query.push(`candidate=${encodeURIComponent(candidate)}`)
+  if (ref) query.push(`ref=${encodeURIComponent(ref)}`)
   return query.length === 0 ? ROUTES[view] : `${ROUTES[view]}?${query.join('&')}`
 }
+
+/** The card count, or the word for "we could not ask". */
+const cardsInUse = (cluster) => (cluster === undefined ? '—' : cluster.cards.inUse === null ? 'unknown' : cluster.cards.inUse)
 
 /** One element, with text and listeners attached safely. */
 function el(tag, props = {}, children = []) {
@@ -61,6 +73,9 @@ const now = () => new Date().toLocaleTimeString()
 
 const formatValue = (value) => (value === undefined || value === null ? '—' : String(value))
 
+/** A change, signed, so "better" reads without knowing which direction the metric runs. */
+const signedChange = (value) => (typeof value !== 'number' || !Number.isFinite(value) ? '—' : value > 0 ? `+${value}` : String(value))
+
 /** The state of the page: one cursor per answer, one dedupe set, one bounded stream. */
 const state = {
   cursors: new Map(),
@@ -68,6 +83,18 @@ const state = {
   events: [],
   selected: null,
   lastError: null,
+  /** The audit list as last read, and the one call the reader opened (if any). */
+  audit: null,
+  openCall: null,
+  openCallRecord: null,
+}
+
+/** One read with no cursor bookkeeping — the audit's detail request is not part of the increment. */
+async function readOnce(view, options = {}) {
+  const response = await fetch(urlFor(view, options), { headers: { accept: 'application/json' }, cache: 'no-store' })
+  const answer = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(`${view}: HTTP ${response.status} — ${answer?.error?.message ?? 'no answer'}`)
+  return answer
 }
 
 async function read(view, options = {}) {
@@ -117,8 +144,28 @@ function renderOverview(answer) {
       stat('GPU h in flight', data.spend.inFlightGpuHours),
       stat('GPU h limit', data.spend.limitGpuHours === 0 ? 'unlimited' : data.spend.limitGpuHours),
       stat('tokens', data.spend.tokens),
+      stat('cards in use', cardsInUse(data.cluster)),
+      stat('cards / job', formatValue(data.cluster?.cards?.perJob)),
+      stat('ledger floor', formatValue(data.cluster?.cards?.floor)),
+      stat('waiting', formatValue(data.cluster?.queue?.count)),
     ]),
   )
+
+  // The card figures above are only knowable when the cluster answered; a page that cannot ask says
+  // so, and never draws the unknown as 0 — "0 cards" is the answer somebody acts on.
+  if (data.cluster !== undefined && data.cluster.read === false) {
+    root.append(
+      el('p', {
+        class: 'note',
+        text:
+          `the cluster listing was not read — ${data.cluster.reason}; ` +
+          `${formatValue(data.cluster.cards.floor)} card(s) is what our own ledger supports, not what is running`,
+      }),
+    )
+  }
+  for (const entry of data.cluster?.queue?.waiting ?? []) {
+    root.append(el('p', { class: 'dim', text: `waiting: ${entry.candidate_id} — ${entry.reason ?? 'not yet dispatched'}` }))
+  }
 
   for (const warning of data.warnings ?? []) {
     root.append(el('p', { class: warning.severity === 'warning' ? 'warning' : 'note', text: warning.label ?? warning.code }))
@@ -243,6 +290,25 @@ function renderCandidate(answer) {
     )
   }
 
+  const chain = detail.gateChain
+  if (chain !== undefined && chain.chain.length > 0) {
+    const rows = chain.chain.map((step) =>
+      el('li', {}, [
+        el('span', { class: 'badge', dataset: { state: step.status }, text: step.status }),
+        el('span', { text: ` ${step.name}${step.detail === '' ? '' : ` — ${step.detail}`}` }),
+      ]),
+    )
+    root.append(el('h3', { text: 'gate chain' }), el('ul', {}, rows))
+    if (chain.attempts.length > 0) {
+      root.append(
+        el(
+          'p',
+          { class: 'dim', text: `attempts: ${chain.attempts.map((attempt) => `${attempt.attempt} ${attempt.passed === true ? 'passed' : 'failed'}${attempt.review === null ? '' : ` (review: ${attempt.review.verdict})`}`).join(' · ')}` },
+        ),
+      )
+    }
+  }
+
   root.append(
     el('h3', { text: 'timeline' }),
     el(
@@ -326,6 +392,35 @@ function renderConclusion(answer) {
     )
   }
 
+  const comparison = data.comparison
+  if (comparison?.measured !== null && comparison?.measured !== undefined) {
+    root.append(
+      el('h3', { text: 'measured / published' }),
+      el('dl', { class: 'stats' }, [
+        stat('we measured', `${comparison.measured.value} (${comparison.measured.candidate_id})`),
+        stat('against', comparison.group === null ? '—' : `${comparison.group.kind} ${comparison.group.value}`),
+        stat('change', signedChange(comparison.change)),
+        stat(
+          'they published',
+          comparison.published === null
+            ? '—'
+            : `${comparison.published.method} ${comparison.published.metric}=${comparison.published.value}`,
+        ),
+        stat('difference', signedChange(comparison.publishedChange)),
+      ]),
+    )
+    if (comparison.published === null) {
+      root.append(el('p', { class: 'note', text: comparison.publishedAbsent }))
+    } else if (comparison.published.source?.file !== undefined) {
+      root.append(
+        el('p', {
+          class: 'dim',
+          text: `published numbers: ${comparison.published.source.file}${comparison.published.dataset === null ? '' : ` (${comparison.published.dataset})`}`,
+        }),
+      )
+    }
+  }
+
   root.append(el('p', { class: 'dim', text: `rounds ${data.rounds} · frontier ${data.frontier.size}` }))
   const objectives = data.objectives.map((objective) => `${objective.name} (${objective.direction})`)
   root.append(el('p', { class: 'dim', text: `objectives ${objectives.length === 0 ? '—' : objectives.join(', ')}` }))
@@ -337,6 +432,72 @@ function renderConclusion(answer) {
       el('p', { class: 'dim', text: `limit ${formatValue(data.stopped.limit)}, observed ${formatValue(data.stopped.observed)}` }),
     )
   }
+}
+
+/**
+ * The audit panel: every judgement the run asked a model for, and — on click — the one that was
+ * opened, prompt and response word for word.
+ *
+ * Clicking a call asks the server for that record (`/api/reprise/call?ref=…`) instead of carrying
+ * every prompt in the list: a run with a hundred judgements would otherwise ship a megabyte of
+ * prose on every poll.
+ */
+function renderAudit() {
+  const root = document.getElementById('audit')
+  const answer = state.audit
+  root.replaceChildren(el('h2', { text: 'Model calls' }))
+
+  const data = answer?.data
+  if (data === undefined || data === null || data.calls.length === 0) {
+    root.append(el('p', { class: 'empty', text: answer?.reason ?? data?.reason ?? 'no judgement has asked a model yet.' }))
+    return
+  }
+
+  const list = el('ul', { class: 'calls' })
+  for (const call of data.calls) {
+    const label = `${call.call_site ?? '?'} ${call.subject ?? ''}`.trim()
+    list.append(
+      el('li', {}, [
+        el('button', {
+          type: 'button',
+          text: call.status === 'answered' ? label : `${label} (${call.status})`,
+          'aria-pressed': state.openCall === call.ref ? 'true' : 'false',
+          onclick: () => openCall(call.ref),
+        }),
+        el('span', { class: 'dim', text: ` ${call.ref}` }),
+      ]),
+    )
+  }
+  root.append(el('p', { class: 'dim', text: `${data.count} call(s)` }), list)
+
+  const opened = state.openCallRecord
+  if (opened === undefined || opened === null) return
+  if (opened.reason !== undefined) {
+    root.append(el('p', { class: 'note', text: opened.reason }))
+    return
+  }
+  root.append(
+    el('h3', { text: opened.ref }),
+    el('p', { class: 'dim', text: `${opened.call_site ?? '?'} · ${opened.status}${opened.error_class === null ? '' : ` (${opened.error_class})`}` }),
+    opened.message === null ? el('span') : el('p', { class: 'note', text: opened.message }),
+    el('h3', { text: 'prompt' }),
+    el('pre', { text: opened.prompt }),
+    el('h3', { text: 'response' }),
+    el('pre', { text: opened.response === '' ? '(an empty response)' : opened.response }),
+  )
+}
+
+/** Open one judgement: one more read, and the panel redraws. */
+async function openCall(ref) {
+  state.openCall = ref
+  state.openCallRecord = null
+  renderAudit()
+  try {
+    state.openCallRecord = (await readOnce('call', { ref }))?.data ?? { reason: 'that call is no longer recorded' }
+  } catch (error) {
+    state.openCallRecord = { reason: error instanceof Error ? error.message : String(error) }
+  }
+  renderAudit()
 }
 
 function renderStream() {
@@ -385,14 +546,17 @@ async function select(candidateId) {
 /** One poll: the increment for every view, then the page is redrawn from what the facts say. */
 async function refresh() {
   try {
-    const [overview, rounds, conclusion] = await Promise.all([
+    const [overview, rounds, conclusion, audit] = await Promise.all([
       read('overview'),
       read('rounds'),
       read('conclusion'),
+      read('calls'),
     ])
+    state.audit = audit
     renderOverview(overview)
     renderRounds(rounds)
     renderConclusion(conclusion)
+    renderAudit()
 
     if (state.selected !== null) renderCandidate(await read('candidate', { candidate: state.selected }))
 
