@@ -263,32 +263,37 @@ test('a non-zero exit is the same closed failure, and its message quotes the las
 })
 
 test('a model that never answers is killed at its deadline, not waited on', async () => {
-  // The property under test is "we do not wait out the 60 s hang", so the assertions are the kill
-  // (the child is gone afterwards) and a bound far below the hang. What this test must NOT assert is
-  // "we answered in a few hundred milliseconds": a full suite on a loaded box once spent 25.1 s here
-  // while the behaviour was exactly right, because the port's deadline is a timer racing a machine
-  // that was busy running other tests. Alone this file takes 786 ms.
+  // The property is "we do not wait out the 60 s hang", and it is asserted through the two facts the
+  // deadline produces — never through elapsed milliseconds:
+  //
+  //   1. `cause === 'timeout'`. `classifyAsk` can only reach that cause when our own timer fired and
+  //      the child was signalled; a call that waited the hang out comes back `unparseable_answer`
+  //      (`the model wrote 0 line(s)…`) after the child exits by itself. This is the assertion that
+  //      fails if somebody removes the deadline.
+  //   2. The child is gone afterwards: the fake announces its pid before hanging, and the pid must no
+  //      longer exist. A port that reports "timeout" while leaving the process running is a leaked
+  //      harness, and a night of leaked harnesses is an OOM at 3 a.m.
+  //
+  // Deliberately NOT asserted: an elapsed bound. A 5 s bound here failed a loaded suite once at
+  // 25.1 s, and on the box this was written on the *deadline timer itself* was delayed to 142 s by
+  // event-loop starvation — a bound tight enough to mean something flakes, and one loose enough not
+  // to (≥ 60 s) would pass even if we waited the hang out. What distinguishes the two behaviours is
+  // which of the two timers (ours, or the child's own) ended the call, and that is `cause`.
   const pidFile = join(mkdtempSync(join(tmpdir(), 'reprise-model-pid-')), 'pid')
+  // 5 s, not 250 ms: on a starved box the fake needs room to start and write its pid before the
+  // deadline fires. It is still 12x shorter than the hang.
   const { ask, records } = port({ mode: 'hang', timeoutMs: 5_000, env: { FAKE_MODE: 'hang', FAKE_PIDFILE: pidFile } })
 
-  const started = Date.now()
   await assert.rejects(
     () => ask(VERIFY_QUESTION),
     (error) => {
       assert.ok(isModelUnavailable(error))
-      assert.equal(error.cause, CAUSES.timeout)
-      assert.match(error.message, /5000 ms/)
+      assert.equal(error.cause, CAUSES.timeout, 'our deadline ended the call, not the child exiting')
+      assert.match(error.message, /5000 ms/, 'and the message quotes the deadline it enforced')
       return true
     },
   )
-  const elapsed = Date.now() - started
-  // Half the hang, and 6x the deadline: loose enough that load cannot fail it, tight enough that
-  // waiting the child out (60 s) cannot pass it.
-  assert.ok(elapsed < 30_000, `the deadline, not the 60 s hang, ended the judgement (took ${elapsed} ms)`)
 
-  // The observable fact behind "killed": the process the fake announced is gone. A port that reports
-  // `timeout` while leaving the child alive is a leaked harness, and a night of leaked harnesses is
-  // an OOM at 3 a.m.
   const pid = Number(readFileSync(pidFile, 'utf8').trim())
   assert.ok(Number.isSafeInteger(pid) && pid > 0, `the fake engine announced its pid in ${pidFile}`)
   assert.throws(
