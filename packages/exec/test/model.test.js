@@ -18,7 +18,7 @@
  * or a fake CLI started with `node`.
  */
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -42,7 +42,7 @@ import {
 import { HARNESS_UNAVAILABLE, REFUSAL, TIMEOUT } from '../lib/harness.js'
 
 const FAKE_CLI = `
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 
 const mode = process.env.FAKE_MODE ?? 'answer'
 const input = readFileSync(0, 'utf8')
@@ -74,7 +74,12 @@ if (mode === 'exit') {
   process.stderr.write('line that matters\\n')
   process.exitCode = 7
 }
-if (mode === 'hang') setTimeout(() => {}, 60000)
+if (mode === 'hang') {
+  // Announce the pid before the hang: the fact the deadline test asserts is that this process was
+  // *killed*, and a process that never named itself cannot be looked for afterwards.
+  if (process.env.FAKE_PIDFILE) writeFileSync(process.env.FAKE_PIDFILE, String(process.pid))
+  setTimeout(() => {}, 60000)
+}
 `
 
 /** A fake engine, started with `node`, selected by `FAKE_MODE`; no network, no provider, no harness. */
@@ -258,7 +263,13 @@ test('a non-zero exit is the same closed failure, and its message quotes the las
 })
 
 test('a model that never answers is killed at its deadline, not waited on', async () => {
-  const { ask, records } = port({ mode: 'hang', timeoutMs: 250 })
+  // The property under test is "we do not wait out the 60 s hang", so the assertions are the kill
+  // (the child is gone afterwards) and a bound far below the hang. What this test must NOT assert is
+  // "we answered in a few hundred milliseconds": a full suite on a loaded box once spent 25.1 s here
+  // while the behaviour was exactly right, because the port's deadline is a timer racing a machine
+  // that was busy running other tests. Alone this file takes 786 ms.
+  const pidFile = join(mkdtempSync(join(tmpdir(), 'reprise-model-pid-')), 'pid')
+  const { ask, records } = port({ mode: 'hang', timeoutMs: 5_000, env: { FAKE_MODE: 'hang', FAKE_PIDFILE: pidFile } })
 
   const started = Date.now()
   await assert.rejects(
@@ -266,13 +277,27 @@ test('a model that never answers is killed at its deadline, not waited on', asyn
     (error) => {
       assert.ok(isModelUnavailable(error))
       assert.equal(error.cause, CAUSES.timeout)
-      assert.match(error.message, /250 ms/)
+      assert.match(error.message, /5000 ms/)
       return true
     },
   )
   const elapsed = Date.now() - started
-  assert.ok(elapsed < 5_000, `the judgement was bounded by its deadline (took ${elapsed} ms)`)
-  assert.equal(records[0].cause, CAUSES.timeout)
+  // Half the hang, and 6x the deadline: loose enough that load cannot fail it, tight enough that
+  // waiting the child out (60 s) cannot pass it.
+  assert.ok(elapsed < 30_000, `the deadline, not the 60 s hang, ended the judgement (took ${elapsed} ms)`)
+
+  // The observable fact behind "killed": the process the fake announced is gone. A port that reports
+  // `timeout` while leaving the child alive is a leaked harness, and a night of leaked harnesses is
+  // an OOM at 3 a.m.
+  const pid = Number(readFileSync(pidFile, 'utf8').trim())
+  assert.ok(Number.isSafeInteger(pid) && pid > 0, `the fake engine announced its pid in ${pidFile}`)
+  assert.throws(
+    () => process.kill(pid, 0),
+    (error) => error !== null && error.code === 'ESRCH',
+    `the hung child (pid ${pid}) was killed, not left running`,
+  )
+
+  assert.equal(records[0].cause, CAUSES.timeout, 'the record names the deadline, not an unreadable answer')
 })
 
 test('a port that throws is "no answer arrived", not an opinion — and one predicate says so', async () => {
