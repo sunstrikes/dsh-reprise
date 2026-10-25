@@ -7,9 +7,9 @@
  *
  * Two of the four phases consult a model — ROUND_PLAN and ROUND_REFLECT — and both must hand back
  * an artifact the contract accepts before the phase moves. The other two call it *zero* times:
- * freezing a baseline the run already produced is arithmetic, and deciding the round budget is spent
- * is a comparison against a number in the configuration. A run that is waiting three days for
- * training jobs must not wake a model four thousand times to be told so.
+ * BASELINE dispatches a job and freezes what it measured (`baseline.js`), and deciding the round
+ * budget is spent is a comparison against a number in the configuration. A run that is waiting three
+ * days for training jobs must not wake a model four thousand times to be told so.
  *
  * Where the state lives: one workspace KV row (`rounds`), not the `workspace` row. The `workspace`
  * row is where pausing and the start time live, and two features writing the same JSON object is how
@@ -23,11 +23,13 @@ import { dirname, join } from 'node:path'
 import { isBlocking, isNonEmptyString, isTerminal, validateArtifact } from '@dsh-reprise/contract'
 
 import { fileArtifacts, memoryArtifacts } from './artifacts.js'
+import { stepBaseline } from './baseline.js'
 import { MODEL_UNAVAILABLE, isModelUnavailable, modelFailureOf, recordModelUnavailable } from './model-failure.js'
 // The cycle with loop.js (loop → rounds → loop) is safe by construction: `createCandidate` is a
 // hoisted function declaration, and it is only called while a tick is already running.
 import { createCandidate } from './loop.js'
 import { pause } from './budget.js'
+import { recordStop } from './stop.js'
 // Registers `round_reflect` / `land_hypothesis` even when the judge is a test double.
 import './artifact-kinds.js'
 
@@ -236,21 +238,85 @@ function advanceFromInit({ store, now, settings }, state) {
 }
 
 /**
- * BASELINE: freeze the evidence every candidate will be compared against.
+ * BASELINE: produce and freeze the evidence every candidate will be compared against.
  *
- * It arrives through a port (the baseline run finished somewhere else) or from configuration; either
- * way it is copied into the workspace state once, and ROUND_PLAN only ever reads it from there. If it
- * has not arrived, the workspace waits — it does not guess a baseline, and it does not ask a model
- * what the baseline probably was.
+ * Four sources, in the order they are tried, and the order *is* the decision:
+ *
+ *   1. **A frozen baseline already in the workspace.** Read back, never re-measured: a second boot
+ *      must not replace the denominator that earlier rounds were compared against.
+ *   2. **A number the configuration states.** Frozen as what it is — `source: 'configured'` — so a
+ *      reader can tell a typed-in denominator from a measured one.
+ *   3. **The executor** (`baseline.js`): submit a job, wait, collect its windowed samples. This is
+ *      how a run normally gets a denominator, and it is the same `submit → poll → collect` path a
+ *      candidate takes.
+ *   4. **The evidence file an older workspace carries** (`baseline.json`, through the port). Kept
+ *      for a workspace whose baseline was measured before the loop could do it, and for a run with
+ *      no executor port at all.
+ *
+ * If none of them answers, the workspace waits. It does not guess a baseline, and it does not ask a
+ * model what the baseline probably was.
  */
-async function freezeBaseline({ store, now, settings, baseline: port }, state) {
+async function freezeBaseline(context, state) {
+  const { store, now, settings, baseline: port, platform } = context
+
+  if (state.baseline !== undefined) {
+    // Already a fact. Re-entering BASELINE (a rebuilt state row, a resumed old workspace) must not
+    // turn into a second measurement.
+    writeState(store, { ...state, phase: 'ROUND_PLAN', attempts: 0, next_action_at: 0 })
+    return { action: `baseline already frozen (${state.baseline.metric}=${state.baseline.value}) -> round_plan`, phase: 'ROUND_PLAN', round: state.round }
+  }
+
+  if (settings.baseline !== undefined) {
+    const evidence = evidenceFrom(settings.baseline, settings.metric.name)
+    if (evidence !== undefined) return freeze(context, state, { ...evidence, source: 'configured' })
+  }
+
+  if (platform !== undefined && typeof platform.submit === 'function') {
+    const result = await stepBaseline(context, state)
+    if (result.status === 'frozen') return freeze(context, state, result.baseline)
+    if (result.status === 'stopped') {
+      // A workspace-level conclusion, recorded where every other stop is: the event explains it, the
+      // state absorbs it, and the next tick reports it as already concluded instead of re-running a
+      // baseline that cannot run.
+      const recorded = recordStop({ store, clock: context.clock, log: context.log }, result.decision)
+      return { action: result.action, phase: 'BASELINE', round: state.round, stopped: recorded }
+    }
+    if (result.next_action_at !== undefined) {
+      writeState(store, { ...state, attempts: (state.attempts ?? 0) + 1, next_action_at: result.next_action_at })
+    }
+    return { action: result.action, phase: 'BASELINE', round: state.round }
+  }
+
+  // No executor and no configured number: the evidence file is the last source there is.
   const evidence = await baselineEvidence(settings, port)
   if (evidence === undefined) return { action: 'waiting_for_baseline', phase: 'BASELINE', round: state.round }
+  return freeze(context, state, evidence)
+}
 
-  const frozen = { metric: evidence.metric, value: evidence.value, frozen_at_ms: now }
+/** Write the frozen baseline and move to ROUND_PLAN. One place, so the record has one shape. */
+function freeze({ store, now }, state, evidence) {
+  const frozen = {
+    metric: evidence.metric,
+    value: evidence.value,
+    unit: evidence.unit,
+    windows: evidence.windows,
+    window_series: evidence.window_series,
+    job_id: evidence.job_id,
+    source: evidence.source,
+    frozen_at_ms: now,
+  }
   writeState(store, { ...state, phase: 'ROUND_PLAN', round: 0, baseline: frozen, attempts: 0, next_action_at: 0 })
   store.logOp('baseline_frozen', frozen, now)
   return { action: 'baseline frozen -> round_plan', phase: 'ROUND_PLAN', round: 0 }
+}
+
+/** A configured or file-borne baseline: a number and the metric it is a number *of*. */
+function evidenceFrom(raw, metricName) {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? { metric: metricName, value: raw } : undefined
+  if (raw === null || raw === undefined) return undefined
+  const value = raw.value
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+  return { metric: isNonEmptyString(raw.metric) ? raw.metric : metricName, value }
 }
 
 async function baselineEvidence(settings, port) {
@@ -259,11 +325,8 @@ async function baselineEvidence(settings, port) {
     const read = await port.read()
     if (read !== undefined && read !== null) raw = read
   }
-  if (typeof raw === 'number') return Number.isFinite(raw) ? { metric: settings.metric.name, value: raw } : undefined
-  if (raw === null || raw === undefined) return undefined
-  const value = raw.value
-  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
-  return { metric: isNonEmptyString(raw.metric) ? raw.metric : settings.metric.name, value }
+  const evidence = evidenceFrom(raw, settings.metric.name)
+  return evidence === undefined ? undefined : { ...evidence, source: 'evidence' }
 }
 
 /**

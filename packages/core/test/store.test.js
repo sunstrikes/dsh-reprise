@@ -13,8 +13,9 @@ const openStore = () => Store.open(workspace())
 
 test('a fresh workspace is migrated to the current version', () => {
   const store = openStore()
-  // 2 = ticket 16's job-ledger columns (round, marker, outcome) on top of the initial shape.
-  assert.equal(store.version, 2, 'a new file must already be at the version this kernel speaks')
+  // 2 = ticket 16's job-ledger identity columns (round, marker, outcome) on top of the initial
+  // shape; 3 = ticket 30's `kind`, which says what a job is for.
+  assert.equal(store.version, 3, 'a new file must already be at the version this kernel speaks')
   const tables = store.db
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
     .all()
@@ -22,6 +23,9 @@ test('a fresh workspace is migrated to the current version', () => {
   for (const table of ['candidate_bindings', 'candidate_state', 'events', 'jobs', 'ledger', 'ops_log', 'workspace_state']) {
     assert.ok(tables.includes(table), `${table} must exist`)
   }
+  // Migration 3: the ledger says what a job is for, so a baseline job is not read as a candidate.
+  const jobColumns = store.db.prepare('PRAGMA table_info(jobs)').all().map((column) => column.name)
+  assert.ok(jobColumns.includes('kind'), 'jobs.kind must exist, with candidate as the default for old rows')
   store.close()
 })
 
@@ -29,7 +33,7 @@ test('re-opening an existing workspace is a no-op, not a re-migration', () => {
   const dir = workspace()
   Store.open(dir).close()
   const again = Store.open(dir)
-  assert.equal(again.version, 2)
+  assert.equal(again.version, 3)
   again.close()
 })
 

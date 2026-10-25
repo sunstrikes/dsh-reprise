@@ -119,7 +119,6 @@ const MIGRATIONS = [
     detail TEXT    NOT NULL
   );
   `,
-
   // 2 — the job ledger becomes a ledger of identities and outcomes (ticket 16).
   //
   // `round` and `marker` say *which* job of ours this is, from the cluster's own listing: the round
@@ -134,6 +133,16 @@ const MIGRATIONS = [
 
   CREATE INDEX jobs_by_marker ON jobs (marker);
   CREATE INDEX jobs_by_outcome ON jobs (outcome, state);
+  `,
+
+  // 3 — the ledger says what kind of job a row is (ticket 30).
+  //
+  // A baseline job and a candidate job are both real jobs: both reserve budget, both are polled,
+  // both can fail, both carry a marker. They differ in *what they are for*, and a ledger that cannot
+  // say so is a ledger in which the denominator can be counted as a candidate and dispatched twice.
+  // `candidate_id` separates them by accident; this column says it on purpose.
+  `
+  ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'candidate';
   `,
 ]
 
@@ -370,13 +379,19 @@ export class Store {
 
   // ------------------------------------------------------------ job ledger
 
+  /**
+   * Record a job.
+   *
+   * `kind` is `'candidate'` unless the caller says otherwise — a baseline job is the only other
+   * kind today, and it is a job in every other respect (budget, polling, timeouts, failure).
+   */
   putJob(job) {
     this.db
       .prepare(
         `INSERT INTO jobs (job_id, candidate_id, submission_id, harness, submitted_at_ms, deadline_ms,
                            last_polled_at_ms, next_poll_at_ms, state, error_class, attempts,
-                           round, marker, outcome)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                           round, marker, outcome, kind)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         job.job_id,
@@ -393,6 +408,7 @@ export class Store {
         job.round ?? null,
         job.marker ?? null,
         job.outcome ?? null,
+        job.kind ?? 'candidate',
       )
   }
 
