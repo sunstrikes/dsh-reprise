@@ -26,6 +26,9 @@
 /** The id the frontier gives the frozen baseline. It is not a candidate and never becomes one. */
 export const BASELINE_ID = 'baseline'
 
+/** The one candidate status a parent may have: its change is the one we build on. */
+const DONE = 'done'
+
 const atLeastAsGood = (a, b, direction) => (direction === 'down' ? a <= b : a >= b)
 const strictlyBetter = (a, b, direction) => (direction === 'down' ? a < b : a > b)
 
@@ -113,4 +116,66 @@ export function frontierOf(view, { baseline } = {}) {
     // selection must handle by starting from the baseline, and it is not the same as "no frontier".
     empty: members.length === 0,
   }
+}
+/**
+ * The parents a round starts from: the top `k` on each objective axis, taken in round-robin order.
+ *
+ * Why not one sort. A frontier with two trade-offs has no single winner, and sorting it on the
+ * primary metric throws away the axis nobody made primary — the predecessor's mistake was the mirror
+ * image of this one (every candidate started from the same base ref, so the search was N independent
+ * experiments). Interleaving the per-axis leaders gives the roster one candidate per axis before it
+ * gives any axis a second one.
+ *
+ * `offset` rotates which axis leads. It is an input, not state: two calls with the same set, `k` and
+ * `offset` return the same list, and the round that used an offset records it in its snapshot rather
+ * than leaving "why did loss lead that round" to be re-derived from a counter nobody wrote down.
+ *
+ * A rejected candidate is never a parent even when its numbers are non-dominated: continuing from it
+ * would mean branching off a change the gates refused. A still-running candidate is not a parent
+ * either — the plan that reads this roster runs after its round finished.
+ *
+ * @param {{ contract: any, members: any[] }} set the frontier, as `frontierOf` returns it
+ * @param {{ k: number, offset?: number }} options k > 0 per round; offset rotates the axis that leads
+ * @returns {string[]} candidate ids, or the baseline id alone when nothing is worth continuing from
+ */
+export function parentsOf(set, { k, offset = 0 } = {}) {
+  if (!Number.isSafeInteger(k) || k <= 0) {
+    throw new TypeError('parentsOf: k must be a positive integer — it is the number of candidates this round affords')
+  }
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    throw new TypeError('parentsOf: offset must be a non-negative integer')
+  }
+  const contract = set?.contract
+  const objectives = contract?.ok === true ? contract.objectives : []
+  const eligible = (set?.members ?? []).filter((member) => member.baseline !== true && member.status === DONE)
+
+  /** One list per axis, best first, ties by id: the order is a function of the numbers and the ids. */
+  const perAxis = objectives.map((objective) =>
+    eligible
+      .filter((member) => typeof member.vector?.[objective.name] === 'number')
+      .sort((left, right) => {
+        const a = left.vector[objective.name]
+        const b = right.vector[objective.name]
+        if (a !== b) return strictlyBetter(a, b, objective.direction) ? -1 : 1
+        return left.candidate_id < right.candidate_id ? -1 : 1
+      })
+      .map((member) => member.candidate_id),
+  )
+
+  const start = perAxis.length === 0 ? 0 : offset % perAxis.length
+  const rotated = [...perAxis.slice(start), ...perAxis.slice(0, start)]
+  const parents = []
+  for (let rank = 0; rank < k; rank += 1) {
+    for (const axis of rotated) {
+      const candidateId = axis[rank]
+      if (candidateId !== undefined && !parents.includes(candidateId)) parents.push(candidateId)
+      if (parents.length === k) break
+    }
+    if (parents.length === k) break
+  }
+
+  // Nothing comparable, nothing finished, no contract, or every candidate refused: the baseline is
+  // the only parent a round can honestly start from. Never an empty roster — a round with no parent
+  // is a round with no base ref.
+  return parents.length === 0 ? [BASELINE_ID] : parents
 }
