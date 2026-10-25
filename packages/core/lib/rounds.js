@@ -7,9 +7,9 @@
  *
  * Two of the four phases consult a model — ROUND_PLAN and ROUND_REFLECT — and both must hand back
  * an artifact the contract accepts before the phase moves. The other two call it *zero* times:
- * freezing a baseline the run already produced is arithmetic, and deciding the round budget is spent
- * is a comparison against a number in the configuration. A run that is waiting three days for
- * training jobs must not wake a model four thousand times to be told so.
+ * BASELINE dispatches a job and freezes what it measured (`baseline.js`), and deciding the round
+ * budget is spent is a comparison against a number in the configuration. A run that is waiting three
+ * days for training jobs must not wake a model four thousand times to be told so.
  *
  * Where the state lives: one workspace KV row (`rounds`), not the `workspace` row. The `workspace`
  * row is where pausing and the start time live, and two features writing the same JSON object is how
