@@ -200,8 +200,8 @@ test('a v1 workspace is brought forward in place, and every fact it held survive
   assert.equal(job.deadline_ms, AT + 86_400_000)
   assert.equal(store.ops()[0].op, 'round_planned')
 
-  // And it is a v2 workspace from here on: writing the columns the migration added works, and
-  // reopening does not migrate a second time.
+  // And it is a current-version workspace from here on: the columns the migrations added are
+  // writable, and reopening does not migrate a second time.
   store.updateJob('raysubmit_0001', { outcome: 'succeeded' })
   assert.equal(store.jobFor('r1-h1').outcome, 'succeeded')
   store.close()
