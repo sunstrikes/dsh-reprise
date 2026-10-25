@@ -20,6 +20,8 @@
 
 import { readFileSync } from 'node:fs'
 
+import { BASELINE_SUBJECT } from '../baseline.js'
+import { readRoundsState } from '../rounds.js'
 import { Store } from '../store.js'
 import {
   candidateDetail,
@@ -29,7 +31,7 @@ import {
   overview,
   summariseEvent,
 } from '../projection.js'
-import { frontier, rebuildFrontier } from '../frontier.js'
+import { ranking, rebuildRanking } from '../ranking.js'
 
 const pad = (value, width) => String(value).padEnd(width)
 
@@ -75,6 +77,10 @@ function frontierLines(store, candidateId, { config } = {}) {
 
   const entries = Object.entries(position.vector).map(([name, value]) => `${name}=${value}`)
   lines.push(`  ${pad('vector', 11)}${entries.length === 0 ? '(no objective metric recorded)' : entries.join(' ')}`)
+
+  if (detail.parent !== null && detail.parent !== undefined) {
+    lines.push(`  ${pad('parent', 11)}${detail.parent} — the candidate this one was branched from`)
+  }
 
   if (position.position === 'frontier') {
     const isBest = position.best?.candidate_id === candidateId
@@ -141,7 +147,7 @@ function gateChainLines(detail) {
   const lines = ['', 'gate chain']
   const width = Math.max(...chain.chain.map((step) => step.name.length), 4)
   for (const step of chain.chain) {
-    const reason = step.status === 'missing' ? `   ${step.detail}` : step.detail === '' ? '' : `   ${step.detail}`
+    const reason = step.detail === '' ? '' : `   ${step.detail}`
     lines.push(`  ${pad(step.name, width)}  ${pad(step.status, 7)}${reason}`)
   }
   if (chain.attempts.length > 0) {
@@ -151,6 +157,47 @@ function gateChainLines(detail) {
       const failed = attempt.failed_checks.length === 0 ? '' : `  failed=${attempt.failed_checks.join(',')}`
       lines.push(`  ${pad(attempt.attempt, 3)}${pad(attempt.passed === true ? 'passed' : 'failed', 8)}${verdict}${failed}`)
     }
+  }
+  return lines
+}
+
+/**
+ * The denominator, and which job produced it.
+ *
+ * `dump` answers "why did the run end" from the fact plane alone, and "the run had nothing to compare
+ * against" is one of the answers — so the frozen baseline belongs on the page, with its provenance.
+ * `source` is the distinction that matters: `executor` means a job measured it (and `kind=baseline`
+ * on its ledger row is how a reader tells that job from a candidate's), `configured` means the run
+ * was *told* the number, and an unfrozen workspace says it never got one.
+ */
+function baselineLines(store) {
+  const baseline = readRoundsState(store)?.baseline
+  const job = store.jobFor(BASELINE_SUBJECT)
+  if (baseline === undefined && job === undefined) return []
+
+  const lines = ['', 'baseline']
+  if (baseline === undefined) {
+    lines.push(`  ${pad('state', 11)}not frozen — no denominator was produced`)
+  } else {
+    lines.push(`  ${pad('metric', 11)}${baseline.metric}=${baseline.value}`)
+    if (baseline.unit !== undefined) {
+      lines.push(
+        `  ${pad('samples', 11)}${baseline.windows} window(s) of unit ${baseline.unit}  (${baseline.window_series?.artifact ?? 'no artifact'})`,
+      )
+    }
+    if (baseline.source === 'executor') {
+      lines.push(`  ${pad('source', 11)}executor — measured by job ${baseline.job_id} (kind=baseline)`)
+    } else if (baseline.source === 'configured') {
+      lines.push(`  ${pad('source', 11)}configured — the run was told this number; no job measured it`)
+    } else {
+      lines.push(`  ${pad('source', 11)}${baseline.source ?? 'unknown'}`)
+    }
+    if (baseline.frozen_at_ms !== undefined) lines.push(`  ${pad('frozen', 11)}${iso(baseline.frozen_at_ms)}`)
+  }
+  if (job !== undefined) {
+    lines.push(
+      `  ${pad('job', 11)}${job.job_id}  kind=${job.kind}  state=${job.state}${job.error_class ? `  error_class=${job.error_class}` : ''}`,
+    )
   }
   return lines
 }
@@ -325,6 +372,7 @@ export function renderDump(store, candidateId, { config } = {}) {
   lines.push(...gateChainLines(detail))
   lines.push(...frontierLines(store, candidateId, { config }))
   lines.push(...workspaceStopLines(store, { config }))
+  lines.push(...baselineLines(store))
 
   const kinds = Object.keys(detail.bindings).sort()
   if (kinds.length > 0) {
@@ -338,7 +386,7 @@ export function renderDump(store, candidateId, { config } = {}) {
     lines.push('')
     lines.push('job')
     lines.push(
-      `  ${job.job_id}  state=${job.state}  attempts=${job.attempts}${job.error_class ? `  error_class=${job.error_class}` : ''}`,
+      `  ${job.job_id}  kind=${job.kind ?? 'candidate'}  state=${job.state}  attempts=${job.attempts}${job.error_class ? `  error_class=${job.error_class}` : ''}`,
     )
   }
 
@@ -364,8 +412,8 @@ function signatureOf(view) {
  * old workspace and see whether old facts still read the same way.
  */
 export function renderVerification(store, { config } = {}) {
-  const incremental = frontier(store, config, { persist: false })
-  const rebuilt = rebuildFrontier(store, config)
+  const incremental = ranking(store, config, { persist: false })
+  const rebuilt = rebuildRanking(store, config)
   const match = JSON.stringify(incremental) === JSON.stringify(rebuilt)
 
   const lines = ['', 'verification (full rebuild)']

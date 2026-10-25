@@ -9,10 +9,11 @@
  *      this is *your* training repository; here it is a toy one so the copy is honest and readable.
  *   2. **A frozen priors manifest.** What the run started from, as sha256 over the committed files —
  *      a fact, not a memory. The loop never re-derives it.
- *   3. **A measured baseline.** `metric.mjs` is submitted through the real local executor
- *      (`packages/exec/lib/platform-local.js`): a supervisor process, a real exit code, a real
- *      metrics file. If the baseline were typed in by hand, every later comparison would be against
- *      a number nobody measured.
+ *   3. **A measured baseline, as corroboration.** `metric.mjs` is submitted through the real local
+ *      executor (`packages/exec/lib/platform-local.js`): a supervisor process, a real exit code, a
+ *      real metrics file. The run does not read this number — its BASELINE phase measures its own
+ *      denominator through the same executor and freezes it as a fact — so what is printed here is a
+ *      cross-check a person can read, not the number the run compares against.
  *
  * Re-running rebuilds all three — but only into a workspace with no fact plane yet, so a run you
  * care about cannot be silently overwritten.

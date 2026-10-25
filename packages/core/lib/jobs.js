@@ -48,12 +48,30 @@ export function jobMarker({ candidateId, round }) {
 }
 
 /**
+ * The marker for the baseline job.
+ *
+ * It names neither a candidate nor a round, because the baseline is neither: it is the denominator
+ * every candidate is measured against, dispatched once per workspace. Giving it a candidate marker
+ * with two invented fields would make "which candidate is this" answerable with a lie, and the round
+ * a job was submitted in is exactly what distinguishes two submissions of one candidate.
+ */
+export const BASELINE_MARKER = `${MARKER_PREFIX}:baseline`
+
+export function baselineMarker() {
+  return BASELINE_MARKER
+}
+
+/**
  * Read a marker back. `undefined` for anything that is not ours — including somebody else's job and
  * a value that does not parse, because inventing a candidate from a broken string is how a foreign
  * job becomes eligible for collection.
+ *
+ * The baseline form parses to `baseline: true` and nothing else: a caller that needs a candidate id
+ * gets `undefined` rather than the reserved subject dressed up as one.
  */
 export function parseMarker(text) {
   if (typeof text !== 'string') return undefined
+  if (text === BASELINE_MARKER) return { baseline: true }
   const match = /^reprise:candidate=(.+):round=(\d+)$/.exec(text)
   if (match === null) return undefined
   return { candidateId: match[1], round: Number(match[2]) }
@@ -111,6 +129,7 @@ export function readListingRow(raw) {
     submission_id: submissionId,
     reference: jobId ?? submissionId,
     marker: typeof marker === 'string' ? marker : null,
+    baseline: parsed?.baseline === true,
     candidate_id: parsed?.candidateId ?? (typeof row.metadata?.candidate_id === 'string' ? row.metadata.candidate_id : null),
     round: parsed?.round ?? (Number.isSafeInteger(metadataRound) ? metadataRound : null),
     status,

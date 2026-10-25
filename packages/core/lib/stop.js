@@ -7,7 +7,7 @@
  *   `max_no_improvement_rounds`   N completed rounds failed to beat the best result so far
  *   `consecutive_empty_rounds`    N completed rounds produced nothing comparable
  *
- * Nothing in this module consults a model. The numbers it compares come from `frontier.js`, which
+ * Nothing in this module consults a model. The numbers it compares come from `ranking.js`, which
  * reads only the platform-reported `metrics_collected` facts; a CAND_ANALYZE report saying "this
  * worked" cannot extend a run, and one saying "this failed" cannot shorten it.
  *
@@ -31,7 +31,7 @@
  * @module
  */
 
-import { frontier, roundHistory } from './frontier.js'
+import { ranking, roundHistory } from './ranking.js'
 import { primaryRule, resolveMetricContract } from './metric-contract.js'
 import { WORKSPACE_SUBJECT } from './store.js'
 
@@ -188,6 +188,51 @@ export function describeRules({ limits, view }) {
 }
 
 /**
+ * Record a workspace-level conclusion: the event first, then the state that absorbs it.
+ *
+ * Exported because the stop rules are not the only thing that can end a workspace. A workspace whose
+ * denominator cannot be produced ends too (see `baseline.js`), and a second writer of
+ * `workspace_stopped` that spelled the payload differently would make the same conclusion read two
+ * ways depending on which writer fired. `status` is present only when the *contract* refused
+ * something — a failed run is a stop with a message and no four-state status at all
+ * (CODING_STANDARDS §2).
+ *
+ * @param {{store: any, clock: {now: () => number}, log?: Function}} ports
+ * @param {{rule: string, message: string, limit?: number, observed?: number, best?: object|null,
+ *          rounds?: object, rules?: object[], status?: string, detail?: object}} decision
+ */
+export function recordStop({ store, clock, log }, decision) {
+  const workspace = store.getState(undefined, 'workspace', {}) ?? {}
+  const at = clock.now()
+  const payload = {
+    rule: decision.rule,
+    limit: decision.limit ?? null,
+    observed: decision.observed ?? null,
+    message: decision.message,
+    best: decision.best ?? null,
+    rounds: decision.rounds ?? { considered: 0, last: [] },
+    rules: decision.rules ?? [],
+    ...(decision.status === undefined ? {} : { status: decision.status }),
+    ...(decision.detail === undefined ? {} : { detail: decision.detail }),
+  }
+  // Facts before state, as everywhere else: the event is the reason, the state is the conclusion.
+  const { local_seq: seq } = store.appendEvent({
+    candidate_id: WORKSPACE_SUBJECT,
+    wall_clock_ms: at,
+    event_type: 'workspace_stopped',
+    payload,
+  })
+  store.setState(undefined, 'workspace', {
+    ...workspace,
+    phase: 'FINALIZE',
+    stopped: { ...payload, at_ms: at, event_seq: seq },
+  })
+  log?.(`FINALIZE: ${decision.rule} — ${decision.message}`)
+
+  return { stopped: true, already: false, at_ms: at, event_seq: seq, ...payload }
+}
+
+/**
  * Decide whether the workspace should finalise now, and record the decision if so.
  *
  * @param {{ store: any, clock: { now: () => number }, config?: any, log?: (message: string, detail?: unknown) => void }} ports
@@ -204,7 +249,7 @@ export function evaluateStop({ store, clock, config, log }) {
     return { stopped: true, already: true, ...(workspace.stopped ?? {}), contract }
   }
 
-  const view = frontier(store, config, { persist: true })
+  const view = ranking(store, config, { persist: true })
   const rounds = roundHistory(view)
   const limits = stopConfig(config)
 
@@ -216,31 +261,17 @@ export function evaluateStop({ store, clock, config, log }) {
   const decision = pickRule({ limits, rounds, view })
   if (decision === undefined) return { stopped: false, view, rounds, limits, contract }
 
-  const at = clock.now()
-  const payload = {
-    rule: decision.rule,
-    limit: decision.limit,
-    observed: decision.observed,
-    message: decision.message,
-    best: view.best ?? null,
-    // Enough history to explain the decision later without replaying the whole stream, bounded so
-    // the payload stays far below the one-event size limit.
-    rounds: { considered: rounds.length, last: rounds.slice(-5) },
-    rules: describeRules({ limits, view }),
-  }
-  // Facts before state, as everywhere else: the event is the reason, the state is the conclusion.
-  const { local_seq: seq } = store.appendEvent({
-    candidate_id: WORKSPACE_SUBJECT,
-    wall_clock_ms: at,
-    event_type: 'workspace_stopped',
-    payload,
-  })
-  store.setState(undefined, 'workspace', {
-    ...workspace,
-    phase: 'FINALIZE',
-    stopped: { ...payload, at_ms: at, event_seq: seq },
-  })
-  log?.(`FINALIZE: ${decision.rule} — ${decision.message}`)
+  const recorded = recordStop(
+    { store, clock, log },
+    {
+      ...decision,
+      best: view.best ?? null,
+      // Enough history to explain the decision later without replaying the whole stream, bounded so
+      // the payload stays far below the one-event size limit.
+      rounds: { considered: rounds.length, last: rounds.slice(-5) },
+      rules: describeRules({ limits, view }),
+    },
+  )
 
-  return { stopped: true, already: false, at_ms: at, event_seq: seq, ...payload, view, rounds, limits, contract }
+  return { ...recorded, view, rounds, limits, contract }
 }

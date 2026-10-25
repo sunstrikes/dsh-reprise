@@ -122,6 +122,27 @@ A refusal exits `2` with the reason on stderr and **nothing** on stdout, so a sh
 read an empty series as a successful one. A caller mistake (no `--window-steps`, nothing to parse)
 exits `1` with the usage.
 
+## Where the samples land
+
+The kernel records a series through one path for both subjects (`packages/core/lib/samples.js`), and
+the reason is pairing: a candidate's samples and its baseline's are compared window by window, so two
+different shapes would make the comparison impossible rather than merely awkward.
+
+- **The document** is the artifact `<subject>/window_samples.json` — the `window_series` above, byte
+  for byte, written atomically like every other artifact.
+- **The fact** is the event `window_samples`, on the subject's own id (`r1-h2`, or the reserved
+  `_baseline`), carrying the artifact reference, its sha256, the unit, the window count and the metric
+  names. An artifact with no fact is a file nobody can tell was collected; a fact with no artifact is a
+  claim with no evidence.
+- **The series is found** from the executor's answer: a parsed `window_series` document if the adapter
+  already produced one, otherwise the driver log (the `REPRISE_WINDOWS` line) read by the exec
+  adapter — the kernel decides which artifact to hand the parser, never how to parse it.
+- **A candidate without samples still finishes**: its metric is enough to rank it. **The baseline
+  cannot**: BASELINE is the denominator, so a job that failed, a run that reported no metric, a run
+  that reported no window, a series the contract calls `invalid` and one it calls `conflict` each stop
+  the workspace with that reason named — never with an empty denominator, which would make every later
+  comparison a win.
+
 ## Pairing: the intersection rule
 
 `pairWindows(candidate, baseline)` returns a `Validation`-shaped answer (`status` / `message`, so
