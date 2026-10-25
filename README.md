@@ -28,15 +28,17 @@ kind: "package-bundle"
 </div>
 
 > A DeepSeek Harness bundle: reproduce a published number, then iterate on the reproduction under
-> control — deterministic phases, a baseline frozen at INIT, a spend ledger that reserves before it
-> spends, and a stop decision computed from recorded facts rather than remembered intent.
+> control — deterministic phases, a baseline the run measures itself and then freezes, a spend ledger
+> that reserves before it spends, and a stop decision computed from recorded facts rather than
+> remembered intent.
 
 <a id="summary"></a>
 ## Summary
 
 `dsh-reprise` reproduces a published experiment and then iterates on that reproduction under control:
-deterministic phases, a baseline frozen at INIT, a budget that reserves before it spends, and a stop
-decision computed from recorded facts instead of remembered intent.
+deterministic phases, a baseline the run measures with the same executor path a candidate takes and
+then freezes, a budget that reserves before it spends, and a stop decision computed from recorded facts
+instead of remembered intent.
 
 A candidate is **a structural hypothesis plus the batch of code changes it needs to land** — not a
 hyperparameter value. The loop is ordinary code; the model is consulted in exactly five places, and
@@ -161,7 +163,7 @@ pack, and a pack missing a part is refused by name at boot instead of running ha
 | `candidate.command` | **required for `command`** | argv; `{candidate}` and `{worktree}` are substituted |
 | `runner.repo` / `runner.dir` | **required with `candidate`** | repo inside the workspace; where worktrees are created |
 | `runner.base_ref` | git default | the commit candidates branch from |
-| `model.kind` | `'command'` | how a judgement reaches a model: `dsh` (`dsh --profile headless --json -`), `claude` (`claude -p --output-format stream-json`), or `command` for a wrapper of your own |
+| `model.kind` | `'command'` | how a judgement reaches a model: `dsh` (`dsh --profile headless --json -`), `claude` (`claude -p --output-format stream-json --verbose`), or `command` for a wrapper of your own |
 | `model.command` | **required for `kind: command`** | the wrapper's argv: one JSON question on stdin, one JSON answer (a JSON object) on stdout |
 | `model.timeout_ms` | `600000` | how long one judgement may take before it is killed — a phase never waits for a model without a deadline |
 | `rounds.metric.name` / `.direction` | derived from the metric contract | the one metric the round gate optimises; restating it is how a run points at a different objective, and a restatement that disagrees with `metrics` is warned about |
@@ -248,7 +250,9 @@ node examples/feed-structure/init.mjs .workspace/feed
 
 A real setup, not a fixture: it copies the toy model repository, commits it (candidates branch from that
 commit), freezes a sha256 manifest of what the run starts from, and measures the baseline by running
-`metric.mjs` through the actual local executor.
+`metric.mjs` through the actual local executor. That number is a cross-check: the run measures its own
+baseline at the BASELINE phase — submit, wait, collect — and freezes it as a fact, so the denominator
+comes from the same executor run as everything compared against it.
 
 ### Step 3 — look at the domain pack you own
 
@@ -267,8 +271,8 @@ model.
 node packages/core/lib/cli/run.js --workspace .workspace/feed --config examples/feed-structure/config.json
 ```
 
-One line per phase step, then the winner, its metric, the baseline it beat, and the rule that ended the
-run. This is the same wiring the host plugin uses — `workspace.js` and `tick()` — driven by a loop
+One line per phase step — including the baseline job it submits and the windowed samples it freezes —
+then the winner, its metric, the baseline it beat, and the rule that ended the run. This is the same wiring the host plugin uses — `workspace.js` and `tick()` — driven by a loop
 instead of by the host's timer, so what you just watched is the plugin's behaviour.
 
 ### Step 5 — ask why

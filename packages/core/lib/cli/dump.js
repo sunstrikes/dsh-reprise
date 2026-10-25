@@ -20,6 +20,8 @@
 
 import { readFileSync } from 'node:fs'
 
+import { BASELINE_SUBJECT } from '../baseline.js'
+import { readRoundsState } from '../rounds.js'
 import { Store } from '../store.js'
 import {
   candidateDetail,
@@ -130,6 +132,47 @@ function workspaceStopLines(store, { config } = {}) {
 }
 
 /**
+ * The denominator, and which job produced it.
+ *
+ * `dump` answers "why did the run end" from the fact plane alone, and "the run had nothing to compare
+ * against" is one of the answers — so the frozen baseline belongs on the page, with its provenance.
+ * `source` is the distinction that matters: `executor` means a job measured it (and `kind=baseline`
+ * on its ledger row is how a reader tells that job from a candidate's), `configured` means the run
+ * was *told* the number, and an unfrozen workspace says it never got one.
+ */
+function baselineLines(store) {
+  const baseline = readRoundsState(store)?.baseline
+  const job = store.jobFor(BASELINE_SUBJECT)
+  if (baseline === undefined && job === undefined) return []
+
+  const lines = ['', 'baseline']
+  if (baseline === undefined) {
+    lines.push(`  ${pad('state', 11)}not frozen — no denominator was produced`)
+  } else {
+    lines.push(`  ${pad('metric', 11)}${baseline.metric}=${baseline.value}`)
+    if (baseline.unit !== undefined) {
+      lines.push(
+        `  ${pad('samples', 11)}${baseline.windows} window(s) of unit ${baseline.unit}  (${baseline.window_series?.artifact ?? 'no artifact'})`,
+      )
+    }
+    if (baseline.source === 'executor') {
+      lines.push(`  ${pad('source', 11)}executor — measured by job ${baseline.job_id} (kind=baseline)`)
+    } else if (baseline.source === 'configured') {
+      lines.push(`  ${pad('source', 11)}configured — the run was told this number; no job measured it`)
+    } else {
+      lines.push(`  ${pad('source', 11)}${baseline.source ?? 'unknown'}`)
+    }
+    if (baseline.frozen_at_ms !== undefined) lines.push(`  ${pad('frozen', 11)}${iso(baseline.frozen_at_ms)}`)
+  }
+  if (job !== undefined) {
+    lines.push(
+      `  ${pad('job', 11)}${job.job_id}  kind=${job.kind}  state=${job.state}${job.error_class ? `  error_class=${job.error_class}` : ''}`,
+    )
+  }
+  return lines
+}
+
+/**
  * @param {Store} store
  * @param {string} candidateId
  * @param {{ config?: any }} [options]
@@ -206,6 +249,7 @@ export function renderDump(store, candidateId, { config } = {}) {
 
   lines.push(...frontierLines(store, candidateId, { config }))
   lines.push(...workspaceStopLines(store, { config }))
+  lines.push(...baselineLines(store))
 
   const kinds = Object.keys(detail.bindings).sort()
   if (kinds.length > 0) {
@@ -219,7 +263,7 @@ export function renderDump(store, candidateId, { config } = {}) {
     lines.push('')
     lines.push('job')
     lines.push(
-      `  ${job.job_id}  state=${job.state}  attempts=${job.attempts}${job.error_class ? `  error_class=${job.error_class}` : ''}`,
+      `  ${job.job_id}  kind=${job.kind ?? 'candidate'}  state=${job.state}  attempts=${job.attempts}${job.error_class ? `  error_class=${job.error_class}` : ''}`,
     )
   }
 

@@ -130,7 +130,16 @@ test('INIT and BASELINE are deterministic: no model call, and the baseline is fr
 
   const state = readRoundsState(ports.store)
   assert.equal(state.round, 0, 'no round has been planned yet')
-  assert.deepEqual(state.baseline, { metric: 'auc', value: 0.7012, frozen_at_ms: AT })
+  assert.deepEqual(
+    state.baseline,
+    {
+      metric: 'auc',
+      value: 0.7012,
+      source: 'configured',
+      frozen_at_ms: AT,
+    },
+    'the frozen record says where the denominator came from: a typed-in number is not a measured one',
+  )
   assert.equal(state.plan, undefined)
   ports.store.close()
 })

@@ -371,7 +371,10 @@ export function modelCallRecord({ question, answer = null, response = '', error_
 const KINDS = Object.freeze({
   command: { argv: null, input: (question) => JSON.stringify(question) },
   dsh: { argv: ['--profile', 'headless', '--json', '-'], input: (question) => question.prompt },
-  claude: { argv: ['-p', '--output-format', 'stream-json'], input: (question) => question.prompt },
+  // `--verbose` is not decoration: the CLI refuses `--print` with `--output-format stream-json`
+  // without it (`Error: When using --print, --output-format=stream-json requires --verbose`),
+  // so a run configured with this kind fails every judgement call until it is there.
+  claude: { argv: ['-p', '--output-format', 'stream-json', '--verbose'], input: (question) => question.prompt },
 })
 
 export const MODEL_KINDS = Object.freeze(Object.keys(KINDS))

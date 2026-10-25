@@ -379,3 +379,23 @@ test('every failure is a ModelUnavailable carrying the class, so a caller can br
   assert.equal(error.question.call_site, 'verify', 'the failure knows which question went unanswered')
   assert.ok(questionId(error.question) !== undefined)
 })
+// The CLI refuses this exact combination, so the adapter must not send it (measured 2026-10-25 against
+// claude-code behind a gateway): `-p` with `--output-format stream-json` exits 1 with "When using
+// --print, --output-format=stream-json requires --verbose", and a run configured with
+// `model.kind: claude` then fails every judgement call with cause `exit_non_zero` — which is exactly
+// what happened to the first real exploration run on the cluster.
+test('the claude kind asks for the one argv its CLI accepts', async () => {
+  const seen = []
+  const ask = createModelPort({
+    kind: 'claude',
+    timeout_ms: 5_000,
+    run: async (request) => {
+      seen.push(request)
+      return { code: 0, signal: null, stdout: '{"verdict":"accept"}\n', stderr: '', timedOut: false, overflowed: false, spawnError: null, duration_ms: 1 }
+    },
+  })
+  await ask({ call_site: 'verify', subject: 'cand-1', prompt: 'is this right?', answer_schema: { verdict: 'accept|reject' } })
+  const [request] = seen
+  assert.equal(request.command, 'claude')
+  assert.deepEqual(request.args, ['-p', '--output-format', 'stream-json', '--verbose'])
+})
