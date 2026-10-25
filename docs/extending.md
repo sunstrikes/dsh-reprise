@@ -227,7 +227,7 @@ One question in, one answer out.
 
 A `kind: 'command'` wrapper receives that object on stdin and must print **one JSON object** on stdout.
 `kind: 'dsh'` and `kind: 'claude'` invoke the shipped CLIs (`dsh --profile headless --json -`,
-`claude -p --output-format stream-json`) with the *prompt* as their task; the adapter reads the answer
+`claude -p --output-format stream-json --verbose`) with the *prompt* as their task; the adapter reads the answer
 out of the final stream event, tolerating a fenced block or prose around it.
 
 `question_id` is a digest of the question's content — not a clock, not a counter — which is what makes
