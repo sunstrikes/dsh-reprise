@@ -8,6 +8,7 @@
   "exports": {
     ".": "./lib/index.js",
     "./store": "./lib/store.js",
+    "./jobs": "./lib/jobs.js",
     "./loop": "./lib/loop.js",
     "./budget": "./lib/budget.js",
     "./frontier": "./lib/frontier.js",
@@ -21,6 +22,7 @@
     "./artifacts": "./lib/artifacts.js",
     "./dump": "./lib/cli/dump.js",
     "./cli/intents": "./lib/cli/intents.js",
+    "./cli/jobs": "./lib/cli/jobs.js",
     "./client": "./client/index.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg",

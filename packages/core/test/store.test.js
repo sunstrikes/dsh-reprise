@@ -13,7 +13,8 @@ const openStore = () => Store.open(workspace())
 
 test('a fresh workspace is migrated to the current version', () => {
   const store = openStore()
-  assert.equal(store.version, 1, 'a new file must already be at the version this kernel speaks')
+  // 2 = ticket 16's job-ledger columns (round, marker, outcome) on top of the initial shape.
+  assert.equal(store.version, 2, 'a new file must already be at the version this kernel speaks')
   const tables = store.db
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
     .all()
@@ -28,7 +29,7 @@ test('re-opening an existing workspace is a no-op, not a re-migration', () => {
   const dir = workspace()
   Store.open(dir).close()
   const again = Store.open(dir)
-  assert.equal(again.version, 1)
+  assert.equal(again.version, 2)
   again.close()
 })
 
