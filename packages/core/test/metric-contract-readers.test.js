@@ -21,7 +21,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { frontier } from '../lib/frontier.js'
+import { ranking } from '../lib/ranking.js'
 import { compareMetric, createJudge } from '../lib/judge.js'
 import { tick } from '../lib/loop.js'
 import { describeRules, evaluateStop, stopConfig } from '../lib/stop.js'
@@ -49,12 +49,12 @@ test('one contract resolves to one primary and one guardrail, and the three read
   // 1. the ranking: "best" is decided on the primary, and the view carries the guardrail it may not trade away.
   const ports = openWorkspace()
   await runCandidate(ports, { candidateId: 'c1', metrics: { score: 0.71, cost: 3.2 } })
-  const ranking = frontier(ports.store, { metrics: RANKED })
-  assert.equal(ranking.contract.status, 'ok')
-  assert.equal(ranking.contract.primary, 'score')
-  assert.equal(ranking.best.metric, 'score', 'the ranking reads the resolved primary, not a second interpretation')
+  const view = ranking(ports.store, { metrics: RANKED })
+  assert.equal(view.contract.status, 'ok')
+  assert.equal(view.contract.primary, 'score')
+  assert.equal(view.best.metric, 'score', 'the ranking reads the resolved primary, not a second interpretation')
   assert.deepEqual(
-    ranking.contract.guardrails.map((guardrail) => guardrail.name),
+    view.contract.guardrails.map((guardrail) => guardrail.name),
     ['cost'],
     'the ranking can say which metric a winner may not have traded away',
   )
@@ -115,12 +115,12 @@ test('no contract is `missing` at all three readers, and none of them picks a de
   await runCandidate(ports, { candidateId: 'c1', metrics: { score: 0.71 } })
 
   // 1. the ranking.
-  const ranking = frontier(ports.store, {})
-  assert.equal(ranking.contract.status, 'missing')
-  assert.equal(ranking.contract.ok, false)
-  assert.match(ranking.contract.error, /no metric contract/, 'the dashboard and dump read this sentence')
-  assert.equal(ranking.best, undefined)
-  assert.deepEqual(ranking.frontier, [])
+  const view = ranking(ports.store, {})
+  assert.equal(view.contract.status, 'missing')
+  assert.equal(view.contract.ok, false)
+  assert.match(view.contract.error, /no metric contract/, 'the dashboard and dump read this sentence')
+  assert.equal(view.best, undefined)
+  assert.deepEqual(view.frontier, [])
 
   // 2. the stop rules: the two metric rules cannot run, and say the same status instead of guessing.
   const stop = evaluateStop({ store: ports.store, clock: ports.clock, config: { metrics: { objectives: { score: 'up' } } } })
@@ -155,9 +155,9 @@ test('a self-contradictory contract is `conflict` at all three readers — not `
   const ports = openWorkspace()
   await runCandidate(ports, { candidateId: 'c1', metrics: { score: 0.71 } })
 
-  const ranking = frontier(ports.store, { metrics: contradictory })
-  assert.equal(ranking.contract.status, 'conflict')
-  assert.equal(ranking.best, undefined, 'nothing is ranked by a contract nobody can agree with')
+  const view = ranking(ports.store, { metrics: contradictory })
+  assert.equal(view.contract.status, 'conflict')
+  assert.equal(view.best, undefined, 'nothing is ranked by a contract nobody can agree with')
 
   const stop = evaluateStop({ store: ports.store, clock: ports.clock, config: { metrics: contradictory } })
   assert.equal(stop.contract.status, 'conflict')

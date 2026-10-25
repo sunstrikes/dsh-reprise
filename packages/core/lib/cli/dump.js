@@ -26,7 +26,7 @@ import {
   overview,
   summariseEvent,
 } from '../projection.js'
-import { frontier, rebuildFrontier } from '../frontier.js'
+import { ranking, rebuildRanking } from '../ranking.js'
 
 const pad = (value, width) => String(value).padEnd(width)
 
@@ -241,8 +241,8 @@ function signatureOf(view) {
  * old workspace and see whether old facts still read the same way.
  */
 export function renderVerification(store, { config } = {}) {
-  const incremental = frontier(store, config, { persist: false })
-  const rebuilt = rebuildFrontier(store, config)
+  const incremental = ranking(store, config, { persist: false })
+  const rebuilt = rebuildRanking(store, config)
   const match = JSON.stringify(incremental) === JSON.stringify(rebuilt)
 
   const lines = ['', 'verification (full rebuild)']

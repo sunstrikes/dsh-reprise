@@ -1,6 +1,8 @@
 /**
- * The frontier: which candidate is best, on which numbers, and which candidates are still worth
- * comparing — computed entirely in code from facts.
+ * The ranking: one row per candidate with its numbers, the objective vector, and the single `best` —
+ * computed entirely in code from facts. It is not the frontier (see `frontier.js` and CONTEXT.md
+ * §11): `best` is one row here, chosen on the primary metric, and no member of this view is a
+ * verdict about which candidates are worth comparing.
  *
  * Two rules shape this module:
  *
@@ -18,7 +20,7 @@
  *
  * The view is materialised per candidate in the workspace KV table, stamped with that candidate's
  * `max(local_seq)`. A tick therefore re-derives a candidate only when a new event landed for it,
- * which is what keeps 10k events from costing 9.4 s per tick. `rebuildFrontier` ignores the
+ * which is what keeps 10k events from costing 9.4 s per tick. `rebuildRanking` ignores the
  * materialised rows and folds the whole event stream instead: it is the check that lets a
  * contributor change projection logic and prove old facts still read the same.
  *
@@ -28,8 +30,14 @@
 import { resolveMetricContract } from './metric-contract.js'
 import { WORKSPACE_SUBJECT } from './store.js'
 
-/** Where a candidate's materialised row lives. One KV row, so adding a projection needs no migration. */
-export const FRONTIER_CACHE_KEY = 'derived_frontier'
+/**
+ * Where a candidate's materialised row lives. One KV row, so adding a projection needs no migration.
+ *
+ * The *key string* stays `derived_frontier`: it names rows already on disk in every existing
+ * workspace, and it is data rather than vocabulary — renaming it would buy nothing but a cold
+ * re-derive of every candidate. The exported name says what the row is for.
+ */
+export const RANKING_CACHE_KEY = 'derived_frontier'
 
 /**
  * Subjects in the event stream that are not candidates. `_workspace` carries workspace-level facts
@@ -105,7 +113,7 @@ export function deriveRow(store, candidateId) {
 function rowsOf(store, { persist }) {
   const rows = new Map()
   for (const candidateId of store.eventSubjects().filter((id) => !NOT_A_CANDIDATE.has(id))) {
-    const cached = store.getState(candidateId, FRONTIER_CACHE_KEY)
+    const cached = store.getState(candidateId, RANKING_CACHE_KEY)
     const max = store.maxSeq(candidateId)
 
     let row
@@ -126,7 +134,7 @@ function rowsOf(store, { persist }) {
 
     rows.set(candidateId, row)
     if (persist && (row.stamped_seq !== cached?.stamped_seq || row.version !== cached?.version)) {
-      store.setState(candidateId, FRONTIER_CACHE_KEY, row)
+      store.setState(candidateId, RANKING_CACHE_KEY, row)
     }
   }
   return rows
@@ -158,7 +166,7 @@ function compareByPrimary(left, right, contract) {
   return left.candidate_id < right.candidate_id ? -1 : 1
 }
 
-/** Turn materialised rows into the derived view. Pure: no store access, no clock, no model. */
+/** Turn materialised rows into the ranking: one row per candidate, plus the single best. Pure: no store access, no clock, no model. */
 function viewOf(contract, rows) {
   const candidates = []
   for (const candidateId of [...rows.keys()].sort()) {
@@ -219,25 +227,25 @@ function viewOf(contract, rows) {
 }
 
 /**
- * The derived view, incrementally.
+ * The ranking, incrementally.
  *
  * @param {import('./store.js').Store} store
  * @param {{ metrics?: object } | undefined} config the metric contract (resolved by `resolveMetricContract`)
  * @param {{ persist?: boolean }} [options] persist=false for read-only handles
  */
-export function frontier(store, config, { persist = true } = {}) {
+export function ranking(store, config, { persist = true } = {}) {
   const contract = resolveMetricContract(config?.metrics)
   return viewOf(contract, rowsOf(store, { persist }))
 }
 
 /**
- * The same view, computed from the whole event stream with the materialised rows ignored.
+ * The same ranking, computed from the whole event stream with the materialised rows ignored.
  *
  * This is the verification path: run it over an old workspace after changing projection logic and
  * compare with what the incremental path claims. It never writes, so it is safe on a read-only
  * handle and safe on data you do not want touched.
  */
-export function rebuildFrontier(store, config) {
+export function rebuildRanking(store, config) {
   const contract = resolveMetricContract(config?.metrics)
   const rows = new Map()
   for (const candidateId of store.eventSubjects().filter((id) => !NOT_A_CANDIDATE.has(id))) rows.set(candidateId, deriveRow(store, candidateId))

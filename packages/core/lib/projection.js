@@ -8,7 +8,7 @@
  *
  * Three constraints, all of them testable and all of them asserted in `projection.test.js`:
  *
- *   - **Read-only.** Every function takes the store as a reader: it calls `frontier(…, { persist:
+ *   - **Read-only.** Every function takes the store as a reader: it calls `ranking(…, { persist:
  *     false })` and never writes, so it works on a `readOnly` handle. A dashboard must not be able
  *     to change the run it is watching.
  *   - **Fact-derived.** No clock, no randomness, no model. Two calls over the same facts are equal.
@@ -19,7 +19,7 @@
  */
 
 import { budgetOf, spendOf } from './budget.js'
-import { frontier, roundHistory } from './frontier.js'
+import { ranking, roundHistory } from './ranking.js'
 import { describeRules, stopConfig } from './stop.js'
 import { configWarnings } from './warnings.js'
 
@@ -44,7 +44,7 @@ export function summariseEvent(event) {
   return parts.join('  ')
 }
 
-const view = (store, config) => frontier(store, config, { persist: false })
+const view = (store, config) => ranking(store, config, { persist: false })
 
 /**
  * The configuration the run *recorded into itself* at INIT.

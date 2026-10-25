@@ -34,7 +34,7 @@ folded (`stamped_seq`), and it must be reproducible: `dump --rebuild` replays th
 and refuses to agree with a view that no longer follows from the facts. A view may be deleted and
 rebuilt at any time; deleting a fact is not an operation this system has.
 
-Enforced in `packages/core/lib/frontier.js` (`deriveRow`, `frontier`, `rebuildFrontier`) and
+Enforced in `packages/core/lib/ranking.js` (`deriveRow`, `ranking`, `rebuildRanking`) and
 `packages/core/lib/projection.js` (read-only: `persist: false`, works on a read-only handle).
 
 *Blurred with:* facts. A projection change that alters history without bumping `DERIVED_VERSION` is
@@ -203,8 +203,11 @@ selection reads it — top_k on each objective axis, then rotate. The ranking an
 numbers, and who is ahead"; it is what the rounds page and `dump` print, and `best` belongs to it
 (chosen on the primary metric, ties broken by round then id).
 
-*Status:* not built. Today's `frontier.js` folds one ranked row per candidate and calls the result
-`frontier`; the rename to a ranking and the non-dominated set itself arrive with parent selection.
+*Status:* half built. The thing that folds one row per candidate and answers `best` is now
+`packages/core/lib/ranking.js` (`ranking`, `rebuildRanking`, `roundHistory`) — the mechanical rename
+landed first, with no behaviour change, so the vocabulary could be reviewed on its own. The
+non-dominated set as a module of its own, and parent selection reading it, arrive with the parent
+selection ticket.
 
 *Blurred with:* the injected "current frontier" (see 3), which means the non-dominated set and not the
 ranking; and with `best`, which is one row of the ranking rather than a verdict about the set.

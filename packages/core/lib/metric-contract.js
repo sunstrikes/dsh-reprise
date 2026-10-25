@@ -3,7 +3,7 @@
  * and which way is a run read" has one answer in this kernel.
  *
  * Why this module exists. Three places decide something with the metric contract — the ranking
- * (`frontier.js` chooses `best`), the stop rules (`stop.js` asks whether a round beat the best), and
+ * (`ranking.js` chooses `best`), the stop rules (`stop.js` asks whether a round beat the best), and
  * the gate (`judge.js` compares a candidate against the frozen baseline) — and before this module each
  * of them read the contract its own way: one promoted the first objective to primary, one compared
  * strictly with no tolerance at all, one fell back to whatever number the job happened to report. Three

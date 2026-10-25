@@ -7,7 +7,7 @@
  *   `max_no_improvement_rounds`   N completed rounds failed to beat the best result so far
  *   `consecutive_empty_rounds`    N completed rounds produced nothing comparable
  *
- * Nothing in this module consults a model. The numbers it compares come from `frontier.js`, which
+ * Nothing in this module consults a model. The numbers it compares come from `ranking.js`, which
  * reads only the platform-reported `metrics_collected` facts; a CAND_ANALYZE report saying "this
  * worked" cannot extend a run, and one saying "this failed" cannot shorten it.
  *
@@ -31,7 +31,7 @@
  * @module
  */
 
-import { frontier, roundHistory } from './frontier.js'
+import { ranking, roundHistory } from './ranking.js'
 import { primaryRule, resolveMetricContract } from './metric-contract.js'
 import { WORKSPACE_SUBJECT } from './store.js'
 
@@ -204,7 +204,7 @@ export function evaluateStop({ store, clock, config, log }) {
     return { stopped: true, already: true, ...(workspace.stopped ?? {}), contract }
   }
 
-  const view = frontier(store, config, { persist: true })
+  const view = ranking(store, config, { persist: true })
   const rounds = roundHistory(view)
   const limits = stopConfig(config)
 

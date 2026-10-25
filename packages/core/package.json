@@ -11,7 +11,7 @@
     "./jobs": "./lib/jobs.js",
     "./loop": "./lib/loop.js",
     "./budget": "./lib/budget.js",
-    "./frontier": "./lib/frontier.js",
+    "./ranking": "./lib/ranking.js",
     "./metric-contract": "./lib/metric-contract.js",
     "./stop": "./lib/stop.js",
     "./projection": "./lib/projection.js",

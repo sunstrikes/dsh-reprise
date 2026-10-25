@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { DERIVED_VERSION, frontier, rebuildFrontier, roundHistory } from '../lib/frontier.js'
+import { DERIVED_VERSION, ranking, rebuildRanking, roundHistory } from '../lib/ranking.js'
 import { openWorkspace, runCandidate } from './support/fake-ports.js'
 
 /**
@@ -28,7 +28,7 @@ test('the best candidate is the one with the best platform-reported metric, chos
   await runCandidate(ports, { candidateId: 'c2', metrics: { auc: 0.7301 } })
   await runCandidate(ports, { candidateId: 'c3', metrics: { auc: 0.6802 } })
 
-  const view = frontier(ports.store, AUC_ONLY)
+  const view = ranking(ports.store, AUC_ONLY)
 
   assert.equal(view.best.candidate_id, 'c2', 'the highest auc is the best candidate — no model was asked')
   assert.equal(view.best.value, 0.7301, 'the value is the one the platform reported, to the digit')
@@ -48,7 +48,7 @@ test('the objective vector records the metric names the contract declared, in a 
   const ports = openWorkspace()
   await runCandidate(ports, { candidateId: 'c1', metrics: { auc: 0.71, loss: 0.31, notes: 'warmup' } })
 
-  const view = frontier(ports.store, config({ auc: 'up', loss: 'down' }))
+  const view = ranking(ports.store, config({ auc: 'up', loss: 'down' }))
 
   assert.deepEqual(
     view.contract.objectives.map(({ name, direction, kind }) => ({ name, direction, kind })),
@@ -72,7 +72,7 @@ test('a direction of "down" ranks a lower loss as better', async () => {
   await runCandidate(ports, { candidateId: 'c1', metrics: { auc: 0.71, loss: 0.3 } })
   await runCandidate(ports, { candidateId: 'c2', metrics: { auc: 0.71, loss: 0.25 } })
 
-  const view = frontier(ports.store, config({ loss: 'down' }))
+  const view = ranking(ports.store, config({ loss: 'down' }))
 
   assert.equal(view.best.candidate_id, 'c2', 'lower is better when the contract says the metric goes down')
   assert.deepEqual(view.frontier, ['c2'])
@@ -85,7 +85,7 @@ test('candidates that trade off on different objectives both stay on the frontie
   await runCandidate(ports, { candidateId: 'c2', metrics: { auc: 0.7188, loss: 0.27 } })
   await runCandidate(ports, { candidateId: 'c3', metrics: { auc: 0.7001, loss: 0.35 } })
 
-  const view = frontier(ports.store, config({ auc: 'up', loss: 'down' }))
+  const view = ranking(ports.store, config({ auc: 'up', loss: 'down' }))
 
   assert.deepEqual(view.frontier, ['c1', 'c2'], 'neither trade-off dominates the other, so both are worth keeping')
   assert.equal(view.best.candidate_id, 'c1', 'the best is decided on the primary objective alone')
@@ -102,7 +102,7 @@ test('a candidate missing an objective is reported as incomplete instead of scor
   await runCandidate(ports, { candidateId: 'c1', metrics: { auc: 0.71, loss: 0.3 } })
   await runCandidate(ports, { candidateId: 'c2', metrics: { auc: 0.75 } })
 
-  const view = frontier(ports.store, config({ auc: 'up', loss: 'down' }))
+  const view = ranking(ports.store, config({ auc: 'up', loss: 'down' }))
 
   assert.equal(
     view.best.candidate_id,
@@ -123,7 +123,7 @@ test('a tie is broken by round then id, so a new round must beat the incumbent t
   await runCandidate(ports, { candidateId: 'r1-c2', round: 1, metrics: { auc: 0.72 } })
   await runCandidate(ports, { candidateId: 'r2-c1', round: 2, metrics: { auc: 0.72 } })
 
-  const view = frontier(ports.store, AUC_ONLY)
+  const view = ranking(ports.store, AUC_ONLY)
 
   assert.equal(
     view.best.candidate_id,
@@ -138,7 +138,7 @@ test('rounds are grouped from facts, and a round is complete only when nothing i
   const ports = openWorkspace()
   await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
   await runCandidate(ports, { candidateId: 'r2-c1', round: 2, metrics: { auc: 0.74 } })
-  const view = frontier(ports.store, AUC_ONLY)
+  const view = ranking(ports.store, AUC_ONLY)
 
   const rounds = roundHistory(view)
 
@@ -172,7 +172,7 @@ test('a round whose candidates produced no metrics is empty, which is a differen
     round: 2,
     judge: { verify: () => ({ candidate_id: 'r2-c1', passed: 'yes' }) },
   }).catch(() => {})
-  const view = frontier(ports.store, AUC_ONLY)
+  const view = ranking(ports.store, AUC_ONLY)
 
   const rounds = roundHistory(view)
 
@@ -187,7 +187,7 @@ test('a metric contract that nobody declared yields no ranking and says why', as
   const ports = openWorkspace()
   await runCandidate(ports, { candidateId: 'c1', metrics: { auc: 0.71 } })
 
-  const view = frontier(ports.store, undefined)
+  const view = ranking(ports.store, undefined)
 
   assert.equal(view.contract.ok, false, 'the kernel has no domain knowledge, so it cannot invent a direction')
   assert.equal(
@@ -207,7 +207,7 @@ test('a metric contract that nobody declared yields no ranking and says why', as
 test('a contract with an unknown direction is refused instead of silently treated as "up"', async () => {
   const ports = openWorkspace()
 
-  const view = frontier(ports.store, config({ auc: 'maximize' }))
+  const view = ranking(ports.store, config({ auc: 'maximize' }))
 
   assert.equal(view.contract.ok, false)
   assert.match(view.contract.error, /objectives\.auc/, 'the error names the field that is wrong')
@@ -219,8 +219,8 @@ test('the incremental view and a full rebuild agree on the same facts', async ()
   await runCandidate(ports, { candidateId: 'c2', metrics: { auc: 0.74, loss: 0.33 } })
   const contract = config({ auc: 'up', loss: 'down' })
 
-  const incremental = frontier(ports.store, contract)
-  const rebuilt = rebuildFrontier(ports.store, contract)
+  const incremental = ranking(ports.store, contract)
+  const rebuilt = rebuildRanking(ports.store, contract)
 
   assert.deepEqual(
     rebuilt,
@@ -233,19 +233,19 @@ test('the incremental view and a full rebuild agree on the same facts', async ()
 test('the incremental path re-derives only the candidate that gained an event', async () => {
   const ports = openWorkspace()
   await runCandidate(ports, { candidateId: 'c1', metrics: { auc: 0.71 } })
-  frontier(ports.store, AUC_ONLY) // cold: derives everything
+  ranking(ports.store, AUC_ONLY) // cold: derives everything
 
   // Warm cache: the second call must not read a single event row. A view that "hits the cache" and
   // then re-reads and re-sorts everything is the 9.4 s/tick regression this design exists to avoid.
   const warmGuard = instrument(ports.store)
-  const warm = frontier(warmGuard.store, AUC_ONLY)
+  const warm = ranking(warmGuard.store, AUC_ONLY)
   assert.deepEqual(warmGuard.reads, [], 'no event was read at all')
   assert.equal(warm.best.value, 0.71, 'the answer came from the materialised row')
 
   // One new candidate: only that candidate's events are read, and only the ones since its stamp.
   await runCandidate(ports, { candidateId: 'c2', metrics: { auc: 0.74 } })
   const tracked = instrument(ports.store, { strict: false })
-  const caughtUp = frontier(tracked.store, AUC_ONLY)
+  const caughtUp = ranking(tracked.store, AUC_ONLY)
   assert.deepEqual(
     tracked.reads.map((label) => label.split(':')[1]),
     ['c2'],
@@ -283,20 +283,20 @@ test('a full rebuild catches a materialised row that no longer matches its facts
   const ports = openWorkspace()
   await runCandidate(ports, { candidateId: 'c1', metrics: { auc: 0.71 } })
   await runCandidate(ports, { candidateId: 'c2', metrics: { auc: 0.74 } })
-  frontier(ports.store, AUC_ONLY) // warm the cache
+  ranking(ports.store, AUC_ONLY) // warm the cache
 
   // Hand-edit the derived row — the stand-in for a projection bug, or for a profile that changed
   // how a metric is read after the fact.
   const row = ports.store.getState('c2', 'derived_frontier')
   ports.store.setState('c2', 'derived_frontier', { ...row, metrics: { auc: 0.99 } })
 
-  assert.equal(frontier(ports.store, AUC_ONLY).best.value, 0.99, 'the incremental path trusts its own row')
+  assert.equal(ranking(ports.store, AUC_ONLY).best.value, 0.99, 'the incremental path trusts its own row')
   assert.equal(
-    rebuildFrontier(ports.store, AUC_ONLY).best.value,
+    rebuildRanking(ports.store, AUC_ONLY).best.value,
     0.74,
     'the rebuild ignores the cache, which is the only way the check can fail visibly',
   )
-  assert.equal(rebuildFrontier(ports.store, AUC_ONLY).best.candidate_id, 'c2')
+  assert.equal(rebuildRanking(ports.store, AUC_ONLY).best.candidate_id, 'c2')
   ports.store.close()
 })
 
@@ -309,7 +309,7 @@ test('the view can be computed without writing, so a read-only handle can render
 
   const readOnly = Store.openReadOnly(dir)
   try {
-    const view = frontier(readOnly, AUC_ONLY, { persist: false })
+    const view = ranking(readOnly, AUC_ONLY, { persist: false })
     assert.equal(view.best.candidate_id, 'c1', 'a dashboard must be able to read the frontier without writing to the facts')
   } finally {
     readOnly.close()
@@ -318,7 +318,7 @@ test('the view can be computed without writing, so a read-only handle can render
 test('a materialised row written by a different reader version is discarded, not trusted', async () => {
   const ports = openWorkspace()
   await runCandidate(ports, { candidateId: 'c1', metrics: { auc: 0.7301 } })
-  frontier(ports.store, AUC_ONLY) // warm the cache
+  ranking(ports.store, AUC_ONLY) // warm the cache
 
   // A projection change bumps DERIVED_VERSION; the old row still carries a matching stamp, so the
   // stamp alone would keep serving a view the current code would not produce.
@@ -327,7 +327,7 @@ test('a materialised row written by a different reader version is discarded, not
   ports.store.setState('c1', 'derived_frontier', { ...row, version: DERIVED_VERSION - 1, metrics: { auc: 0.1 } })
 
   assert.equal(
-    frontier(ports.store, AUC_ONLY).best.value,
+    ranking(ports.store, AUC_ONLY).best.value,
     0.7301,
     'a row from an older reader must be re-derived from the facts, or a fixed projection bug keeps serving its own old answer',
   )
