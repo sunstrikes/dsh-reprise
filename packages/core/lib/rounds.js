@@ -23,6 +23,8 @@ import { dirname, join } from 'node:path'
 import { isBlocking, isNonEmptyString, isTerminal, validateArtifact } from '@dsh-reprise/contract'
 
 import { fileArtifacts, memoryArtifacts } from './artifacts.js'
+import { frontierOf, parentSnapshot, parentsOf } from './frontier.js'
+import { ranking } from './ranking.js'
 import { MODEL_UNAVAILABLE, isModelUnavailable, modelFailureOf, recordModelUnavailable } from './model-failure.js'
 // The cycle with loop.js (loop → rounds → loop) is safe by construction: `createCandidate` is a
 // hoisted function declaration, and it is only called while a tick is already running.
@@ -111,13 +113,18 @@ const candidateIdsOfRound = (store, round) =>
  * Deliberately no recommendation, no previous plan and no model output of its own beyond the last
  * reflection — a model re-reading its own past prose converges on it.
  */
-function roundFacts(store, state, settings) {
+function roundFacts(store, state, settings, frontierFacts) {
   return {
     round: state.round ?? 0,
     max_rounds: settings.max_rounds,
     candidates_per_round: settings.candidates_per_round,
     metric_contract: { ...settings.metric },
     baseline: state.baseline === undefined ? null : { metric: state.baseline.metric, value: state.baseline.value },
+    // The non-dominated set and the parents chosen from it are computed in code and handed over
+    // whole: a model that is asked "who should this round build on" answers with prose, and every
+    // number in prose is a number nobody can trace to a fact. `null` means nobody computed it, which
+    // is what a reflection over a legacy workspace sees.
+    frontier: frontierFacts ?? null,
     candidates: candidateOutcomes(store),
     previous_reflection: state.last_reflection ?? null,
   }
@@ -304,6 +311,66 @@ async function roundPlanStep(context, state) {
   return { action: `round ${round} closed`, phase: 'ROUND_PLAN', round }
 }
 
+/**
+ * The contract parent selection compares under.
+ *
+ * The run's metric contract when it declared one; otherwise the round workflow's own metric, which is
+ * what that workflow optimises. An absent contract is not "rank nothing quietly": the ranking reports
+ * `missing` and the roster falls back to the baseline, which is a decision a reader can see.
+ */
+function parentMetricConfig(config, metric) {
+  if (config?.metrics !== undefined) return { metrics: config.metrics }
+  // No contract and no frozen round metric: the ranking says `missing` and the roster is the
+  // baseline. Naming a default metric here would be the kernel inventing what "better" means.
+  if (typeof metric?.name !== 'string' || metric.name === '') return { metrics: undefined }
+  return { metrics: { primary: metric.name, objectives: { [metric.name]: metric.direction === 'lower' ? 'down' : 'up' } } }
+}
+
+/** The frontier-relevant fork point: the highest event sequence any candidate had reached. */
+function eventPrefixOf(store) {
+  let last = 0
+  for (const subject of store.eventSubjects()) last = Math.max(last, store.maxSeq(subject))
+  return { last_local_seq: last }
+}
+
+/**
+ * The parents this round starts from, and the snapshot that says so.
+ *
+ * Computed from facts alone: the ranking over every candidate, the non-dominated set over that, the
+ * per-axis top-k rotation over that. The baseline is in the set by construction, so a workspace with
+ * nothing comparable yet plans its first round from the baseline — the behaviour every existing
+ * workspace already had, now as a decision instead of an omission.
+ */
+function parentRoster({ store, config }, state, round, settings) {
+  const view = ranking(store, parentMetricConfig(config, state.metric), { persist: true })
+  const set = frontierOf(view, { baseline: state.baseline })
+  const parents = parentsOf(set, { k: settings.candidates_per_round })
+  const snapshot = parentSnapshot({ round, events_prefix: eventPrefixOf(store), set, parents })
+  return {
+    set,
+    parents,
+    snapshot,
+    // What the planner is told: the set with its vectors, and the roster. Whole, unranked, untrimmed.
+    facts: {
+      members: set.members.map((member) => ({
+        candidate_id: member.candidate_id,
+        round: member.round ?? null,
+        vector: { ...member.vector },
+        baseline: member.baseline === true,
+      })),
+      parents: [...parents],
+      empty: set.empty,
+    },
+  }
+}
+
+/** A frozen roster, reshaped for a prompt: the reflection sees the parents its round actually used. */
+function frozenRoster(state) {
+  const frozen = state.plan?.parent_snapshot?.content
+  if (frozen === undefined) return undefined
+  return { members: frozen.frontier, parents: frozen.parents, empty: frozen.empty }
+}
+
 async function planNextRound(context, state) {
   const { store, clock, now, settings, judge } = context
   const round = (state.round ?? 0) + 1
@@ -313,9 +380,13 @@ async function planNextRound(context, state) {
     return { action: 'finalize', phase: 'FINALIZE', round: state.round ?? 0 }
   }
 
+  // Who this round starts from is decided from the facts, before any model is asked. The plan then
+  // proposes hypotheses *on* those parents; it does not get to pick its own base refs.
+  const roster = parentRoster(context, state, round, settings)
+
   let artifact
   try {
-    artifact = await judge.plan({ round, facts: roundFacts(store, state, settings) })
+    artifact = await judge.plan({ round, facts: roundFacts(store, state, settings, roster.facts) })
   } catch (error) {
     // No model answered: not a refused artifact. Refusing here would spend the round's retry budget
     // and then ask a human to fix a provider, and the plan would look like a bad hypothesis.
@@ -361,8 +432,15 @@ async function planNextRound(context, state) {
   // Facts first: the plan is on disk before a candidate exists, so a crash cannot leave candidates
   // whose round has no recorded plan. Re-planning after such a crash re-creates the same candidate
   // ids, and `createCandidate` treats that as `exists`.
+  // Freeze who this round starts from. Content-addressed, so a crash and a re-plan land on the same
+  // address, and any change in the facts lands on a different one — see `parentSnapshot`.
+  const frozenParents = context.artifacts.write(`round-${round}/parents`, {
+    address: roster.snapshot.address,
+    content: roster.snapshot.content,
+  })
+
   const stored = context.artifacts.write(`round-${round}/candidate_plan`, artifact)
-  for (const landing of landings) {
+  for (const [index, landing] of landings.entries()) {
     const frozen = context.artifacts.write(`round-${round}/land-${landing.candidateId}`, landing.artifact)
     const created = createCandidate({ store, clock }, { candidateId: landing.candidateId, round, hypothesis: landing.artifact.statement })
     // `createCandidate` records the hypothesis in the event but not in the phase state, and every
@@ -370,7 +448,11 @@ async function planNextRound(context, state) {
     // candidate had one at all). Written from here so this ticket's edit to loop.js stays the phase
     // wiring only; a one-line fix in loop.js would make this redundant.
     const phase = store.getState(landing.candidateId, 'phase') ?? {}
-    store.setState(landing.candidateId, 'phase', { ...phase, hypothesis: landing.artifact.statement })
+    // Candidate i starts from parent i of the roster, wrapping when the round affords more candidates
+    // than the frontier holds. Written where LAND reads it (`state.parent_id`), so the parent is a
+    // fact of the candidate rather than something the plan text claimed.
+    const parentId = roster.parents[index % roster.parents.length]
+    store.setState(landing.candidateId, 'phase', { ...phase, hypothesis: landing.artifact.statement, parent_id: parentId })
     store.setState(landing.candidateId, 'land', {
       artifact: landing.artifact,
       prompt: landing.prompt,
@@ -383,14 +465,29 @@ async function planNextRound(context, state) {
   writeState(store, {
     ...state,
     round,
-    plan: { round, path: stored.path, sha256: stored.sha256, at_ms: now },
+    plan: {
+      round,
+      path: stored.path,
+      sha256: stored.sha256,
+      at_ms: now,
+      // The address is the identity of the decision; the path is where the bytes live. Both are kept
+      // so "this round started from whom" is answerable from the fact plane alone.
+      parent_snapshot: { address: roster.snapshot.address, path: frozenParents.path, sha256: frozenParents.sha256 },
+    },
     reflection: undefined,
     attempts: 0,
     next_action_at: 0,
   })
   store.logOp(
     'round_plan_accepted',
-    { round, hypotheses: artifact.hypotheses.length, candidates: landings.map((landing) => landing.candidateId), artifact: stored.path },
+    {
+      round,
+      hypotheses: artifact.hypotheses.length,
+      candidates: landings.map((landing) => landing.candidateId),
+      artifact: stored.path,
+      parents: roster.parents,
+      parent_snapshot: roster.snapshot.address,
+    },
     now,
   )
   return { action: `planned round ${round}`, phase: 'ROUND_PLAN', round }
@@ -402,7 +499,7 @@ async function reflectRound(context, state) {
 
   let artifact
   try {
-    artifact = await judge.reflect({ round, facts: roundFacts(store, state, settings), now })
+    artifact = await judge.reflect({ round, facts: roundFacts(store, state, settings, frozenRoster(state)), now })
   } catch (error) {
     if (isModelUnavailable(error)) return modelOut(context, state, 'round_reflect', error)
     return refuse(context, state, { step: 'round_reflect', status: 'invalid', message: `the reflection could not be produced: ${messageOf(error)}` })

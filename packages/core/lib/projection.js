@@ -261,6 +261,11 @@ export function candidateDetail(store, candidateId, { config } = {}) {
     phase: state?.phase ?? null,
     round: state?.round ?? position?.round ?? null,
     status: position?.status ?? 'active',
+    // Who this candidate was branched from. Written by the round planner from the frontier when it
+    // created the candidate (`parent_id` in the phase state), so "this round started from whom" is
+    // answerable per candidate and not only per round. `null` is the honest answer for a candidate a
+    // human proposed: nobody chose a parent for it.
+    parent: state?.parent_id ?? null,
     // A candidate-level pause marker if anything ever writes one. Workspace pauses live in the
     // workspace record and are rendered once, not per candidate.
     paused: state?.paused ?? null,

@@ -23,6 +23,8 @@
  * @module
  */
 
+import { createHash } from 'node:crypto'
+
 /** The id the frontier gives the frozen baseline. It is not a candidate and never becomes one. */
 export const BASELINE_ID = 'baseline'
 
@@ -178,4 +180,72 @@ export function parentsOf(set, { k, offset = 0 } = {}) {
   // the only parent a round can honestly start from. Never an empty roster — a round with no parent
   // is a round with no base ref.
   return parents.length === 0 ? [BASELINE_ID] : parents
+}
+
+/**
+ * JSON with its object keys sorted, so the same content is always the same bytes.
+ *
+ * `JSON.stringify` preserves insertion order, and insertion order is a property of whoever built the
+ * object — the one thing a content-addressed record must not depend on.
+ */
+function canonicalJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  const keys = Object.keys(value).sort()
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+}
+
+/**
+ * The round's parent snapshot: who this round starts from, as one content-addressed record.
+ *
+ * Content-addressed means the address *is* a digest of the contents, so it answers two questions the
+ * run must be able to answer after the fact:
+ *
+ *   - "which round started from whom" — read the content back, by address;
+ *   - "did the facts change under me" — the same inputs give the same address, and any difference
+ *     (a different parent order, one more frontier member, another contract, another event prefix)
+ *     gives a different one. A counter or a timestamp could not do that: it would be different every
+ *     call and prove nothing.
+ *
+ * `events_prefix` is the frontier-relevant fork point: the highest `local_seq` any candidate had
+ * reached. `pending` is what a recovery uses to decide whether the snapshot still describes the
+ * facts it was taken over, and it is a number rather than a wall clock for the same reason.
+ *
+ * @param {{
+ *   round: number,
+ *   events_prefix: { last_local_seq: number },
+ *   set: { contract: any, members: any[], empty: boolean },
+ *   parents: string[],
+ *   offset?: number,
+ * }} input
+ * @returns {{ address: string, content: object }} address is the sha256 of the canonical content
+ */
+export function parentSnapshot({ round, events_prefix, set, parents, offset = 0 }) {
+  const contract = set?.contract
+  const content = {
+    round,
+    events_prefix: { last_local_seq: events_prefix?.last_local_seq ?? 0 },
+    frontier: (set?.members ?? []).map((member) => ({
+      candidate_id: member.candidate_id,
+      round: member.round ?? null,
+      vector: { ...(member.vector ?? {}) },
+      baseline: member.baseline === true,
+    })),
+    empty: set?.empty ?? true,
+    parents: [...(parents ?? [])],
+    rotation: {
+      axes: contract?.ok === true ? contract.objectives.map((objective) => objective.name) : [],
+      offset,
+    },
+    contract: {
+      ref: contract?.ref ?? null,
+      primary: contract?.primary ?? null,
+      status: contract?.status ?? null,
+      objectives:
+        contract?.ok === true
+          ? contract.objectives.map((objective) => ({ name: objective.name, direction: objective.direction }))
+          : [],
+    },
+  }
+  return { address: createHash('sha256').update(canonicalJson(content)).digest('hex'), content }
 }

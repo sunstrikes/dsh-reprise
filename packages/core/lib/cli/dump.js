@@ -73,6 +73,10 @@ function frontierLines(store, candidateId, { config } = {}) {
   const entries = Object.entries(position.vector).map(([name, value]) => `${name}=${value}`)
   lines.push(`  ${pad('vector', 11)}${entries.length === 0 ? '(no objective metric recorded)' : entries.join(' ')}`)
 
+  if (detail.parent !== null && detail.parent !== undefined) {
+    lines.push(`  ${pad('parent', 11)}${detail.parent} — the candidate this one was branched from`)
+  }
+
   if (position.position === 'frontier') {
     const isBest = position.best?.candidate_id === candidateId
     lines.push(`  ${pad('position', 11)}${isBest ? 'on the frontier, and the best result in the run' : 'on the frontier'}`)
