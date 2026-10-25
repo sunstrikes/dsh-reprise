@@ -395,3 +395,46 @@ test('log signatures are only consulted when the task records say nothing', () =
   assert.equal(classifyRayLogs('everything is fine'), undefined)
   assert.equal(classifyRayLogs(''), undefined)
 })
+// The driver log is the only channel back from a cluster with no shared filesystem, so the windowed
+// sample series a job summarises itself must survive `collect()` — otherwise every cluster baseline
+// and every candidate series ends as `baseline_no_windows` / no samples while the numbers sit in the
+// log. A job that printed no marker must come back with NO series, never an empty one: "no windows"
+// and "windows that were all dropped" are different failures (ticket 19's adapter, ticket 30's use).
+test('the window series a job printed in its log comes back from collect, and an absence is not an empty series', async () => {
+  const { metricsDir, fake } = rayWorld()
+  const series = {
+    schema_version: 1,
+    unit: 'epoch',
+    windows: [
+      { index: 0, start: 0, end: 1, metrics: { score: 0.5 } },
+      { index: 1, start: 1, end: 2, metrics: { score: 0.6 } },
+    ],
+  }
+  const platform = makePlatform({
+    fake,
+    metricsDir,
+    plan: () => {
+      fake.script('cand_windows', {
+        outcome: 'succeed',
+        metrics: { score: 0.6 },
+        logs: `epoch 1\nREPRISE_WINDOWS ${JSON.stringify(series)}\n`,
+      })
+      fake.script('cand_silent', { outcome: 'succeed', metrics: { score: 0.6 }, logs: 'epoch 1\n' })
+      return { entrypoint: ['python', '-m', 'train'], metadata: {} }
+    },
+  })
+
+  const withSeries = await submitJob(platform, { submissionId: 'cand_windows', candidateId: 'cand_windows' })
+  const done = await pollUntilTerminal(platform, withSeries.job_id)
+  const collected = await platform.collect(done)
+  assert.deepEqual(collected.window_series, series, 'the series the job printed must come back intact')
+
+  const silent = await submitJob(platform, { submissionId: 'cand_silent', candidateId: 'cand_silent' })
+  const silentDone = await pollUntilTerminal(platform, silent.job_id)
+  const silentCollected = await platform.collect(silentDone)
+  assert.equal(
+    'window_series' in silentCollected,
+    false,
+    'a job that printed no series must answer without one — an empty series would read as a measured run with no windows',
+  )
+})

@@ -120,6 +120,9 @@ export async function jobsCommand(argv, { out = (line) => process.stdout.write(`
         out('ledger (facts written by this workspace)')
         for (const line of table(report.ledger, [
           { label: 'candidate', value: (row) => row.candidate_id },
+          // What the job is *for*: the baseline is a job like any other, but counting it as a
+          // candidate is how a denominator gets dispatched twice.
+          { label: 'kind', value: (row) => row.kind ?? 'candidate' },
           { label: 'round', value: (row) => row.round ?? '-' },
           { label: 'job', value: (row) => row.job_id },
           { label: 'state', value: (row) => row.state },

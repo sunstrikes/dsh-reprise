@@ -37,6 +37,7 @@ import {
 } from './archive.js'
 import { DEFAULTS, TERMINAL_STATES, resolveJobId, safeSlug } from './platform.js'
 import { createHttpRequest, isBrowserTraffic } from './ray-http.js'
+import { parseWindowLog } from './window-samples.js'
 
 const CLIP = 2_048
 
@@ -71,6 +72,20 @@ const LOG_SIGNATURES = [
   ['data', /FileNotFoundError|No such file or directory|JSONDecodeError|TOMLDecodeError|EmptyDataError|PermissionError/i],
   ['code', /Traceback \(most recent call last\)|SyntaxError|AssertionError|ModuleNotFoundError|ImportError|Segmentation fault/i],
 ]
+
+/**
+ * The windowed sample series a job summarised in its driver log, when it printed one.
+ *
+ * `parseWindowLog` refuses with a reason (`error_class: 'data'`) rather than answering with an empty
+ * series, and a refusal here is not this adapter's business: `collect()` reports the job's own
+ * outcome, and the kernel's sample reader decides what a missing series means for the run. What the
+ * adapter must not do is invent one, or throw on a log that simply never printed the marker.
+ */
+function windowsFrom(logs) {
+  if (typeof logs !== 'string' || logs === '') return undefined
+  const parsed = parseWindowLog(logs)
+  return parsed?.ok === true ? parsed.series : undefined
+}
 
 /** What a failed job's logs say, when the task records say nothing. */
 export function classifyRayLogs(logs) {
@@ -778,18 +793,24 @@ export function createRayPlatform({
         artifacts.push({ name: 'metrics.json', uri: `file://${metricsPath}`, bytes: statSync(metricsPath).size })
       }
 
-      if (artifactsDir !== undefined) {
-        const logs = await fetchLogs(ref)
-        if (logs !== undefined) {
+      // The driver log is the only channel back from a cluster with no shared filesystem, so it is
+      // read for two reasons: to keep it as an artifact when a directory was configured, and to
+      // recover the windowed sample series the job summarised itself (`REPRISE_WINDOWS`). Reading it
+      // only for the artifact would leave every cluster baseline without windows — the samples exist
+      // in the log and nowhere else.
+      const logs = await fetchLogs(ref)
+      if (logs !== undefined) {
+        if (artifactsDir !== undefined) {
           mkdirSync(artifactsDir, { recursive: true })
           const path = join(artifactsDir, `${safeSlug(ref)}.driver.log`)
           writeFileSync(path, logs)
           artifacts.push({ name: 'driver.log', uri: `file://${path}`, bytes: Buffer.byteLength(logs) })
         }
       }
+      const series = windowsFrom(logs)
 
       if (!TERMINAL_STATES.includes(observed.state)) {
-        return { state: observed.state, metrics: undefined, artifacts }
+        return { state: observed.state, metrics: undefined, artifacts, ...(series === undefined ? {} : { window_series: series }) }
       }
       return {
         state: observed.state,
@@ -797,6 +818,7 @@ export function createRayPlatform({
         error_class: observed.error_class,
         error_detail: observed.error_detail,
         artifacts,
+        ...(series === undefined ? {} : { window_series: series }),
       }
     },
 
