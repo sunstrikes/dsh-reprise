@@ -19,17 +19,19 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { fileArtifacts } from '../lib/artifacts.js'
+import { loadDomainPack } from '../lib/domain.js'
 import { createCandidate, tick } from '../lib/loop.js'
-import { candidateDetail, overview } from '../lib/projection.js'
+import { candidateDetail, conclusion, overview } from '../lib/projection.js'
 import { Store } from '../lib/store.js'
 import { judgeFor } from './support/domain.js'
-import { FakeClock, fakePlatform, openWorkspace } from './support/fake-ports.js'
+import { FakeClock, fakePlatform, openWorkspace, runCandidate, seedMetrics } from './support/fake-ports.js'
 
 const CONFIG = {
   metrics: { primary: 'auc', objectives: { auc: 'up' } },
@@ -286,4 +288,96 @@ test('a check that ran and refused is failed even when the review approved — t
   assert.equal(byName.get('adversarial_review').status, 'passed', 'the review approved, which is why this is a conflict')
   assert.equal(detail.gateChain.chain.filter((step) => step.status === 'missing').length, 0, 'nothing here is absent')
   rig.store.close()
+})
+
+// --------------------------------------------------- 结论页: measured vs published
+
+/** A contract that ranks one metric and publishes nothing: the shape of every pack but one. */
+const CONTRACT_WITHOUT_PUBLISHED = { name: 'auc-contract', primary: 'auc', direction: 'higher', objectives: { auc: 'up' } }
+
+const GENERATIVE_PACK_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'examples', 'generative-recommenders')
+
+/** A finished run whose metric contract is the domain's — the shipped pack, or a copy of it. */
+async function runUnder(contract, results) {
+  const ports = openWorkspace({ config: { metrics: contract, stop: { max_rounds: 0 } } })
+  seedMetrics(ports.store, contract)
+  for (const [candidateId, metrics] of results) {
+    await runCandidate(ports, { candidateId, round: 1, metrics })
+  }
+  return ports
+}
+
+test('the conclusion reads the published number from the pack, not from the kernel', async () => {
+  const pack = loadDomainPack(GENERATIVE_PACK_DIR)
+  const published = pack.metricContract.published
+  const row = published.rows.find((entry) => entry.method === published.reference)
+  const ports = await runUnder(pack.metricContract, [['r1-c1', { 'hr@10': 0.3001, 'ndcg@10': 0.17 }]])
+
+  const page = conclusion(ports.store, { config: { metrics: pack.metricContract } })
+
+  assert.equal(page.comparison.metric, 'hr@10')
+  assert.equal(page.comparison.measured.candidate_id, 'r1-c1')
+  assert.equal(page.comparison.measured.value, 0.3001)
+  assert.equal(
+    page.comparison.published.value,
+    row.metrics['hr@10'],
+    'the published side is the pack\'s own row, read from its file — not a literal in the kernel',
+  )
+  assert.equal(page.comparison.published.method, 'HSTU')
+  assert.equal(page.comparison.published.dataset, 'ml-1m')
+  assert.equal(page.comparison.published.source.file, published.source.file, 'and it says which file the number came from')
+  assert.equal(
+    Number((page.comparison.measured.value - page.comparison.published.value).toFixed(6)),
+    Number((0.3001 - row.metrics['hr@10']).toFixed(6)),
+    'the line a reader wants: what we measured, next to what they published',
+  )
+  ports.store.close()
+})
+
+test('editing the pack changes the published number the conclusion shows', async () => {
+  const copy = mkdtempSync(join(tmpdir(), 'reprise-pack-copy-'))
+  cpSync(GENERATIVE_PACK_DIR, copy, { recursive: true })
+  const contractPath = join(copy, 'metric-contract.json')
+  const edited = JSON.parse(readFileSync(contractPath, 'utf8'))
+  const reference = edited.published.rows.find((entry) => entry.method === edited.published.reference)
+  // A number no kernel module could have been written with: if the panel showed 0.3097 after this,
+  // the number would be hard-coded rather than read.
+  reference.metrics[edited.primary] = 0.1234
+  writeFileSync(contractPath, JSON.stringify(edited, null, 2))
+  const pack = loadDomainPack(copy)
+  const ports = await runUnder(pack.metricContract, [['r1-c1', { 'hr@10': 0.2, 'ndcg@10': 0.1 }]])
+
+  const page = conclusion(ports.store, { config: { metrics: pack.metricContract } })
+
+  assert.equal(page.comparison.published.value, 0.1234, 'the pack is the source of truth for what "they published"')
+  ports.store.close()
+})
+
+test('a contract that publishes nothing says so instead of inventing a comparison', async () => {
+  const ports = await runUnder(CONTRACT_WITHOUT_PUBLISHED, [['r1-c1', { auc: 0.71 }]])
+
+  const page = conclusion(ports.store, { config: { metrics: CONTRACT_WITHOUT_PUBLISHED } })
+
+  assert.equal(page.comparison.published, null)
+  assert.match(page.comparison.publishedAbsent, /publishes no numbers/, 'the page says the pack published nothing to compare against')
+  assert.equal(page.comparison.measured.value, 0.71, 'and it still reports what we measured')
+  ports.store.close()
+})
+
+test('the conclusion names the comparison group and the net change against it', async () => {
+  const contract = CONTRACT_WITHOUT_PUBLISHED
+  const ports = await runUnder(contract, [['r1-c1', { auc: 0.7 }]])
+  // A frozen baseline value, the same fact the gate compares against (ticket 30's file, read by
+  // `baselinePort`). Written here because this ticket does not own producing it.
+  writeFileSync(join(dirname(ports.store.path), 'baseline.json'), JSON.stringify({ metric: 'auc', value: 0.65 }))
+  await runCandidate(ports, { candidateId: 'r2-c1', round: 2, metrics: { auc: 0.72 } })
+
+  const page = conclusion(ports.store, { config: { metrics: contract } })
+
+  assert.equal(page.comparison.measured.candidate_id, 'r2-c1')
+  assert.deepEqual(page.comparison.group, { kind: 'baseline', candidate_id: 'baseline-0', value: 0.65 })
+  assert.equal(Number(page.comparison.change.toFixed(4)), 0.07, 'the net change over what we compared against')
+  assert.equal(page.comparison.better, true)
+  assert.equal(page.comparison.net.gpuHours, 1, 'and what the run spent to get there: two candidates at half an hour')
+  ports.store.close()
 })

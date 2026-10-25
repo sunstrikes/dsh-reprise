@@ -12,6 +12,22 @@
     "direction": "higher",
     "rule": "hr@10 up by more than 0.005 while ndcg@10 is down by more than 0.004 is a re-ranking, not a better model: one or two newly hit targets pushed other hits down the list. Record it as a regression on position and do not spend the next round extrapolating from it."
   },
+  "published": {
+    "why": "The conclusion page prints one line of the form \"what we measured / what they published\". These are the published side: the domain repository's own README numbers, carried here so the comparison is data a pack author can correct, not a constant inside the kernel. `reference` names the row whose configuration this pack's executor runs — the HSTU rows use identical configurations to the SASRec rows, per the note under that table — and the panel compares against that row only, because comparing a run against a differently-shaped row is a category error (priors.json, anti_patterns).",
+    "dataset": "ml-1m",
+    "reference": "HSTU",
+    "source": {
+      "file": "README.md",
+      "section": "## Experiments › ### Public Experiments › #### Verify results. — the ML-1M table, rows SASRec, HSTU and HSTU-large",
+      "quote": "| HSTU | 0.3097 (+8.6%) | 0.1720 (+7.3%) | … | HSTU-large | **0.3294 (+15.5%)** | **0.1893 (+18.1%)** |"
+    },
+    "rows": [
+      { "method": "SASRec", "metrics": { "hr@10": 0.2853, "ndcg@10": 0.1603 } },
+      { "method": "HSTU", "metrics": { "hr@10": 0.3097, "ndcg@10": 0.1720 } },
+      { "method": "HSTU-large", "metrics": { "hr@10": 0.3294, "ndcg@10": 0.1893 } }
+    ],
+    "note": "Full-eval numbers on the dataset named above. A candidate measured on a truncated epoch is not comparable to any row here (see `window`), and these numbers are the README's, not the paper's: the same rule as priors.json."
+  },
   "role": {
     "hr@10": "primary — the number the gate compares against the frozen baseline, the axis the ranking's `best` is chosen on, and the first column of the README's published tables",
     "ndcg@10": "guardrail — ranked on the frontier and read as a constraint: position-sensitive credit for the same hit, so it fails when a change reorders without improving",

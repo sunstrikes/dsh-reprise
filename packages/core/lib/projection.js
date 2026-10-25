@@ -18,6 +18,7 @@
  * @module
  */
 
+import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 import { fileArtifacts } from './artifacts.js'
@@ -26,10 +27,13 @@ import { frontier, roundHistory } from './frontier.js'
 import { GATE_CHECKS } from './gate.js'
 import { cudaVisibleDevicesOf, gpuExclusivityOf, jobReport } from './jobs.js'
 import { defaultStaticChecks } from './judge.js'
+import { readRoundsState } from './rounds.js'
 import { describeRules, stopConfig } from './stop.js'
 import { configWarnings } from './warnings.js'
 
 const FOUR_STATES = ['ok', 'missing', 'conflict', 'invalid']
+
+const describe = (error) => (error instanceof Error ? error.message : String(error))
 
 /** A one-line summary of an event, chosen from the payload rather than from the event type list. */
 export function summariseEvent(event) {
@@ -558,6 +562,213 @@ export function candidateDetail(store, candidateId, { config, artifacts } = {}) 
   }
 }
 
+// ------------------------------------------------------------- the audit
+
+/** Every model call is filed under this artifact name; the panel lists and opens nothing else. */
+const MODEL_CALL = 'model_call'
+
+/**
+ * A reference this view may open: `model_call:<call site>:<subject>[:<ref>]`.
+ *
+ * Deliberately a whitelist rather than "starts with model_call": the route's `?ref=` is a string a
+ * caller controls, and a read endpoint that turned it into a path would be a directory traversal with
+ * a friendly name. Colons cannot climb out of a directory, `..` never matches, and anything else is
+ * simply not one of our records.
+ */
+const MODEL_CALL_REF = /^model_call(:[A-Za-z0-9_.@-]+)+$/
+
+/** The list row for one record: who was asked, what happened, and no prompt bodies (those are on open). */
+function callRow(ref, record) {
+  return {
+    ref,
+    call_site: record?.call_site ?? null,
+    subject: record?.subject ?? null,
+    ref_of_call: record?.ref ?? null,
+    status: record?.status ?? null,
+    error_class: record?.error_class ?? null,
+    question_id: record?.question_id ?? null,
+    answered: record?.answer !== null && record?.answer !== undefined,
+  }
+}
+
+/**
+ * The audit page: every judgement the run asked a model for, name order.
+ *
+ * A call that never answered is on this list. It is not noise: "the provider was down for two hours"
+ * is answered by the outage records and by nothing else, and a panel that listed only answers would
+ * show a run that did nothing rather than a run nobody could reach.
+ *
+ * @param {{ artifacts?: { list: Function, read: Function }, callSite?: string }} [options]
+ */
+export function modelCalls(store, { artifacts, callSite } = {}) {
+  const reader = artifacts ?? workspaceArtifacts(store)
+  const prefix = typeof callSite === 'string' && callSite !== '' ? `${MODEL_CALL}:${callSite}` : MODEL_CALL
+  let names
+  try {
+    names = typeof reader?.list === 'function' ? reader.list(prefix) : []
+  } catch (error) {
+    // A directory that cannot be read is reported, not rendered as "no model was ever asked".
+    return {
+      calls: [],
+      count: 0,
+      call_site: callSite ?? null,
+      reason: `the model-call records could not be read: ${describe(error)}`,
+    }
+  }
+  const calls = names
+    .filter((ref) => MODEL_CALL_REF.test(ref))
+    .map((ref) => callRow(ref, typeof reader?.read === 'function' ? reader.read(ref) : undefined))
+  return { calls, count: calls.length, call_site: callSite ?? null, reason: null }
+}
+
+/**
+ * One call, full: the prompt, the facts it was given, the raw return, and the object that return
+ * became. This is the "click to open the original text" half of the audit panel.
+ *
+ * @returns {object | undefined} `undefined` for a reference that is not a record this view may open
+ */
+export function modelCall(store, ref, { artifacts } = {}) {
+  if (typeof ref !== 'string' || !MODEL_CALL_REF.test(ref)) return undefined
+  const reader = artifacts ?? workspaceArtifacts(store)
+  const record = typeof reader?.read === 'function' ? reader.read(ref) : undefined
+  if (record === null || typeof record !== 'object') return undefined
+  return {
+    ref,
+    ...callRow(ref, record),
+    prompt: record.prompt ?? '',
+    facts: record.facts ?? null,
+    answer_schema: record.answer_schema ?? '',
+    answer: record.answer ?? null,
+    response: record.response ?? '',
+    cause: record.cause ?? null,
+    message: record.message ?? null,
+  }
+}
+
+/** The baseline the gate compares against, frozen into the workspace (or the `baseline.json` file). */
+function frozenBaseline(store) {
+  const frozen = readRoundsState(store)?.baseline
+  if (frozen !== undefined && typeof frozen.value === 'number') return { metric: frozen.metric ?? null, value: frozen.value }
+  try {
+    const document = JSON.parse(readFileSync(join(dirname(store.path), 'baseline.json'), 'utf8'))
+    const value = typeof document === 'number' ? document : document?.value
+    if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+    return { metric: typeof document?.metric === 'string' ? document.metric : null, value }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The number the domain published for one metric — read out of the run's own metric contract.
+ *
+ * This is the "what they published" half of the conclusion line, and it is deliberately *not* a
+ * constant in this module: the published tables of a domain belong to that domain, they have a file
+ * and a quote, and a pack author who finds a transposed digit fixes a JSON file rather than the
+ * kernel. `published.reference` names the row whose configuration the pack's executor runs, so the
+ * comparison is against one row and never against a differently-shaped one (a category error the
+ * pack's own anti-patterns name).
+ *
+ * @returns {{ metric: string, method: string, dataset: string|null, value: number,
+ *             source: object|null, rows: object[] } | { absent: string }}
+ */
+export function publishedOf(contract, metric) {
+  const block = contract?.published
+  if (block === undefined || block === null) {
+    return { absent: 'this run\'s metric contract publishes no numbers to compare against' }
+  }
+  if (typeof block !== 'object' || !Array.isArray(block.rows) || block.rows.length === 0) {
+    return { absent: 'the contract\'s published block carries no rows of numbers' }
+  }
+  const rows = block.rows.filter(
+    (row) => row !== null && typeof row === 'object' && typeof row.method === 'string' && typeof row.metrics === 'object',
+  )
+  const reference = typeof block.reference === 'string' ? rows.find((row) => row.method === block.reference) : undefined
+  if (reference === undefined) {
+    return {
+      absent:
+        `the contract names no published row to compare against ` +
+        `(published.reference is ${JSON.stringify(block.reference ?? null)})`,
+    }
+  }
+  if (!Number.isFinite(reference.metrics?.[metric])) {
+    return { absent: `the published row for ${reference.method} reports no ${metric}` }
+  }
+  return {
+    metric,
+    method: reference.method,
+    dataset: typeof block.dataset === 'string' ? block.dataset : null,
+    value: reference.metrics[metric],
+    source: block.source ?? null,
+    rows: rows.map((row) => ({ method: row.method, metrics: { ...row.metrics } })),
+  }
+}
+
+/**
+ * The comparison block: what we measured, what we compare it against, and what the domain published.
+ *
+ * Three quantities a reader has to keep apart, so they are three fields and never one number:
+ * `measured` is our own best result, `group` is the baseline (the frozen one the gate compares
+ * against, or the previous best when no baseline was measured), and `published` is somebody else's
+ * number from the pack. `change` is only ever measured-minus-group; the published difference is its
+ * own field, because mixing "better than our baseline" with "closer to their table" is how a run
+ * reports a win it did not have.
+ */
+function comparison(store, { workspace, config, rows, best, against }) {
+  const contract = config?.metrics ?? workspace.metrics
+  const metric = rows.contract.primary
+  const direction = rows.contract.objectives.find((objective) => objective.name === metric)?.direction ?? null
+  const spend = spendOf(store)
+
+  const published = publishedOf(contract, metric)
+  const publishedBlock = published.absent === undefined ? published : null
+
+  if (best === undefined) {
+    return {
+      metric: metric ?? null,
+      measured: null,
+      group: null,
+      change: null,
+      better: null,
+      published: publishedBlock,
+      publishedAbsent: published.absent ?? null,
+      publishedChange: null,
+      net: null,
+    }
+  }
+
+  const measured = { candidate_id: best.candidate_id, value: best.value }
+  const baseline = frozenBaseline(store)
+  const parentId = against?.parent ?? null
+  let group
+  if (baseline !== undefined && (baseline.metric === null || baseline.metric === metric)) {
+    group = { kind: 'baseline', candidate_id: parentId, value: baseline.value }
+  } else if (against?.best !== undefined) {
+    group = { kind: 'previous-best', candidate_id: against.best.candidate_id ?? null, value: against.best.value }
+  } else {
+    group = null
+  }
+
+  const change = group === null ? null : Number((measured.value - group.value).toFixed(12))
+  const gpuHours = spend.settledGpuHours
+  return {
+    metric,
+    measured,
+    group,
+    change,
+    better: change === null || direction === null ? null : direction === 'up' ? change > 0 : change < 0,
+    published: publishedBlock,
+    publishedAbsent: published.absent ?? null,
+    publishedChange:
+      publishedBlock === null ? null : Number((measured.value - publishedBlock.value).toFixed(12)),
+    // "Net output": the change we bought, next to the GPU hours the run spent buying it.
+    net: {
+      gpuHours,
+      changePerGpuHour: change === null || !(gpuHours > 0) ? null : Number((change / gpuHours).toFixed(6)),
+    },
+  }
+}
+
 /**
  * The conclusion page: what this run established, on which number, and against what.
  *
@@ -586,6 +797,8 @@ export function conclusion(store, { config } = {}) {
   return {
     stopped: stopRecord(workspace),
     best,
+    // What we measured, against what, and against what the domain published — see `comparison()`.
+    comparison: comparison(store, { workspace, config, rows, best, against }),
     objectives: rows.contract.objectives,
     metricContract: { ok: rows.contract.ok, status: rows.contract.status, error: rows.contract.error },
     frontier: { members: rows.frontier, size: rows.frontier.length },
