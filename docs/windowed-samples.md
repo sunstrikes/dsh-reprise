@@ -31,8 +31,9 @@ with a fixed shape, produced by an adapter, and validated before anything compar
 | `windows[].metrics` | object of finite numbers | what that window measured, keyed by the metric's own name |
 
 Nothing in the shape names a specific metric. Which metric is primary, and whether a run is read as
-the mean of its windows or as its last window, belong to the metric contract (ticket 20); the shape
-only guarantees that such a rule can be applied to both sides of a comparison.
+the mean of its windows or as its last window, belong to the metric contract — `window_mode` — and are
+resolved in one place, `packages/core/lib/metric-contract.js` (`resolveMetricContract`, `readMetric`);
+the shape only guarantees that such a rule can be applied to both sides of a comparison.
 
 `schema_version` is the document's own, not the database's: the samples get carried away by git and
 read by tools outside this process, exactly like every other artifact.
@@ -254,7 +255,10 @@ a `data failure` reason and an empty stdout.
 ## What this page does not decide
 
 - **Which metric counts, and how windows collapse to one number** (mean of windows, or the last one) —
-  the metric contract and ticket 20.
+  the metric contract's `window_mode`, applied by `readMetric` in `packages/core/lib/metric-contract.js`.
+  "Last" means the last window of the series: if that window carries no finite number for the metric,
+  the answer is "not measured", with the window named — an earlier window is never substituted, because
+  then one reader would call it the last measurement and another the last window.
 - **What an improvement is** — the comparison, tickets 21/30, computed from a pairing.
 - **Tensor-valued scalars** — only `simple_value` scalars are read today; a run that logs tensors needs
   an adapter change here, not a kernel change.

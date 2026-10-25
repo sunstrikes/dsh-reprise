@@ -19,18 +19,27 @@ export const FEED_PACK_DIR = join(dirname(fileURLToPath(import.meta.url)), '..',
 /** The five prompts, as the pack names them. */
 export const FEED_PROMPTS_DIR = join(FEED_PACK_DIR, 'prompts')
 
-/** The metric this example optimises. A test may name it; a kernel module may not. */
-export const FEED_METRIC = Object.freeze({ name: 'auc', direction: 'higher' })
+/**
+ * The metric contract this example optimises, as its own file states it. A test may name it; a kernel
+ * module may not. A judge takes the contract, not a pre-resolved binding: it resolves it the same way
+ * the ranking and the stop rules do (`metric-contract.js`, ticket 20).
+ */
+export const FEED_METRIC_CONTRACT = Object.freeze({
+  name: 'feed-click-auc',
+  primary: 'auc',
+  direction: 'higher',
+  objectives: { auc: 'up' },
+})
 
 /** A second pack that is only configuration, used to prove a new domain needs no kernel change. */
 export const CONFIG_ONLY_PACK_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'config-only-domain')
 
 /**
  * `createJudge` with the shipped domain filled in, so a test states only what it is about.
- * Anything it passes wins — including `skillsDir`, `metric` and `surface`.
+ * Anything it passes wins — including `skillsDir`, `metricContract` and `surface`.
  *
  * @param {object} [options]
  */
 export function judgeFor(options = {}) {
-  return createJudge({ skillsDir: FEED_PROMPTS_DIR, metric: FEED_METRIC, ...options })
+  return createJudge({ skillsDir: FEED_PROMPTS_DIR, metricContract: FEED_METRIC_CONTRACT, ...options })
 }

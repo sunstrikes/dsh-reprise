@@ -166,7 +166,7 @@ pack, and a pack missing a part is refused by name at boot instead of running ha
 | `model.kind` | `'command'` | how a judgement reaches a model: `dsh` (`dsh --profile headless --json -`), `claude` (`claude -p --output-format stream-json`), or `command` for a wrapper of your own |
 | `model.command` | **required for `kind: command`** | the wrapper's argv: one JSON question on stdin, one JSON answer (a JSON object) on stdout |
 | `model.timeout_ms` | `600000` | how long one judgement may take before it is killed — a phase never waits for a model without a deadline |
-| `rounds.metric.name` / `.direction` | the pack's contract | the one metric the round gate optimises; restating it is how a run points at a different objective |
+| `rounds.metric.name` / `.direction` | derived from the metric contract | the one metric the round gate optimises; restating it is how a run points at a different objective, and a restatement that disagrees with `metrics` is warned about |
 | `rounds.metric.contract_ref` | the contract's `name` | pointer to the frozen metric contract |
 | `rounds.max_rounds` / `.candidates_per_round` | `3` / `2` | round workflow shape |
 | `rounds.retry.base_ms` / `.max_ms` / `.max_attempts` | `60000` / `3600000` / `3` | backoff for a refused artifact, then a human |
@@ -175,7 +175,7 @@ pack, and a pack missing a part is refused by name at boot instead of running ha
 | `budget.gpu_hours_limit` | `0` (unlimited) | hard cap; an uncapped remote executor is warned about, every read |
 | `budget.soft_ratio` / `.candidate_gpu_hours` | `0.8` / `0.5` | stop dispatching at this fraction; what a dispatch reserves |
 | `budget.max_runtime_hours` / `.judge_tokens` | `0` (unlimited) / `false` | wall-clock gate; tokens are recorded, never judged |
-| `metrics.primary` / `.objectives` | the pack's contract | recorded at INIT; cross-checked against the round contract |
+| `metrics` | the pack's whole contract | one account of "better" — `primary`, `objectives`, `guardrail`, `minimum_effective_delta`, `window_mode` — resolved by `packages/core/lib/metric-contract.js` for the ranking, the stop rules and the gate; a partial or self-contradictory restatement is refused at boot |
 | `poll.base_ms` / `.max_ms` / `.grace_attempts` | `1000` / `60000` / `2` | job poll backoff |
 | `gate.max_attempts` / `.base_ms` / `.max_ms` | `3` / `1000` / `60000` | how many times gate two may run before a candidate stops, and the backoff between attempts; `1` restores a single shot |
 | `limits.max_wall_ms` / `.max_idle_ms` | `3600000` / `1800000` | per-job wall-clock and silence deadlines |
@@ -218,6 +218,7 @@ afterwards, so editing the patch mid-run changes nothing the dashboard reports.
 | CLI | `node packages/core/lib/cli/run.js --workspace <dir> --config <file>` | the same wiring the host ticks, driven by a loop; exit 0 conclusion, 1 no comparable metric, 2 usage, 3 timeout |
 | CLI | `node packages/core/lib/cli/dump.js --candidate <id>` | timeline, every gate verdict, identity bindings, frontier position, and why the run stopped |
 | CLI | `node packages/core/lib/cli/intents.js place <kind>` / `list` | human intents (`proposal`, `grant`, `anchor`, `pause`, `resume`, `approval`, `experience`) written into `<workspace>/pending/` |
+| CLI | `node packages/core/lib/cli/jobs.js list` / `reap --job <id>` | the cluster job ledger: our jobs as the cluster lists them, the orphans (our marker, no ledger row), and the only way an orphan is ever stopped |
 | Skills | `<domain>/prompts/{land,verify,cand-analyze,round-plan,round-reflect}/SKILL.md` | what the model is told at each of the five call sites; markdown on disk, part of the domain pack, read fresh on every call — **not** DSH skills and not registered as such |
 
 The bundle provides no service and emits no event: it consumes `timer`, `connection` and `tools`.

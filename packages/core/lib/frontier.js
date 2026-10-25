@@ -10,8 +10,11 @@
  *      code path in this file reads a payload field written by a model. `stop.js` inherits the same
  *      guarantee by consuming this view and nothing else.
  *   2. **Domain differences are data.** Which metrics exist, which direction is better, and which
- *      one decides "best" all come from the metric contract. The kernel knows the words `up` and
- *      `down` and nothing else about which metric it is or what it measures.
+ *      one decides "best" all come from the metric contract, resolved once in `metric-contract.js`.
+ *      The kernel knows the words `up` and `down` and nothing else about which metric it is or what
+ *      it measures — and when the contract is absent or contradicts itself, this view ranks nothing
+ *      and carries the name of that reason (`missing` / `conflict`) for the stop rules and the gate
+ *      to say in their own answers.
  *
  * The view is materialised per candidate in the workspace KV table, stamped with that candidate's
  * `max(local_seq)`. A tick therefore re-derives a candidate only when a new event landed for it,
@@ -23,6 +26,7 @@
  */
 
 import { BASELINE_SUBJECT } from './baseline.js'
+import { resolveMetricContract } from './metric-contract.js'
 import { WORKSPACE_SUBJECT } from './store.js'
 
 /** Where a candidate's materialised row lives. One KV row, so adding a projection needs no migration. */
@@ -46,77 +50,9 @@ const NOT_A_CANDIDATE = new Set([WORKSPACE_SUBJECT, BASELINE_SUBJECT])
  */
 export const DERIVED_VERSION = 1
 
-const DIRECTIONS = ['up', 'down']
-
 const ACTIVE = 'active'
 const DONE = 'done'
 const REJECTED = 'rejected'
-
-/**
- * Normalise the metric contract. A malformed contract is reported, never guessed at: if the kernel
- * picked a direction for an undeclared metric it would be making the one decision the spec reserves
- * for configuration.
- *
- * @param {{ metrics?: { primary?: string, objectives?: Record<string, 'up' | 'down'> } } | undefined} config
- * @returns {{ ok: boolean, primary: string | undefined, objectives: { name: string, direction: string }[], error: string | undefined }}
- */
-export function metricContractOf(config) {
-  const declared = config?.metrics
-  if (declared === undefined || declared === null) {
-    return {
-      ok: false,
-      primary: undefined,
-      objectives: [],
-      error: 'no metric contract configured — the frontier has no objectives, so nothing can be ranked',
-    }
-  }
-
-  const objectives = declared.objectives
-  if (objectives === undefined || typeof objectives !== 'object' || Array.isArray(objectives)) {
-    return {
-      ok: false,
-      primary: undefined,
-      objectives: [],
-      error: 'metric contract: "objectives" must be an object mapping metric name to "up" or "down"',
-    }
-  }
-
-  const names = Object.keys(objectives)
-  if (names.length === 0) {
-    return {
-      ok: false,
-      primary: undefined,
-      objectives: [],
-      error: 'metric contract: "objectives" is empty — a frontier with no objectives cannot rank anything',
-    }
-  }
-
-  const normalised = []
-  for (const name of names) {
-    const direction = objectives[name]
-    if (!DIRECTIONS.includes(direction)) {
-      return {
-        ok: false,
-        primary: undefined,
-        objectives: [],
-        error: `metric contract: objective ${JSON.stringify(name)} must declare direction "up" or "down", got ${JSON.stringify(direction)}`,
-      }
-    }
-    normalised.push({ name, direction })
-  }
-
-  const primary = declared.primary ?? names[0]
-  if (!names.includes(primary)) {
-    return {
-      ok: false,
-      primary: undefined,
-      objectives: normalised,
-      error: `metric contract: primary ${JSON.stringify(primary)} is not one of the declared objectives (${names.join(', ')})`,
-    }
-  }
-
-  return { ok: true, primary, objectives: normalised, error: undefined }
-}
 
 /** Only finite numbers count as a metric. `NaN` from a parser is absence, not a value to compare. */
 function numericMetrics(input) {
@@ -289,11 +225,11 @@ function viewOf(contract, rows) {
  * The derived view, incrementally.
  *
  * @param {import('./store.js').Store} store
- * @param {{ metrics?: object } | undefined} config the metric contract (see `metricContractOf`)
+ * @param {{ metrics?: object } | undefined} config the metric contract (resolved by `resolveMetricContract`)
  * @param {{ persist?: boolean }} [options] persist=false for read-only handles
  */
 export function frontier(store, config, { persist = true } = {}) {
-  const contract = metricContractOf(config)
+  const contract = resolveMetricContract(config?.metrics)
   return viewOf(contract, rowsOf(store, { persist }))
 }
 
@@ -305,7 +241,7 @@ export function frontier(store, config, { persist = true } = {}) {
  * handle and safe on data you do not want touched.
  */
 export function rebuildFrontier(store, config) {
-  const contract = metricContractOf(config)
+  const contract = resolveMetricContract(config?.metrics)
   const rows = new Map()
   for (const candidateId of store.eventSubjects().filter((id) => !NOT_A_CANDIDATE.has(id))) rows.set(candidateId, deriveRow(store, candidateId))
   return viewOf(contract, rows)

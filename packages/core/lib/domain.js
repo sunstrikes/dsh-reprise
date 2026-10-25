@@ -8,7 +8,8 @@
  *
  * A pack is a directory with a manifest (`domain.json`) that names its five parts by relative path:
  *
- *   metric_contract   what "better" means: the primary metric, its direction, the ranked objectives
+ *   metric_contract   what "better" means: the primary metric, the guardrail, the ranked objectives,
+ *                     how large a difference counts, and how a windowed series is read
  *   priors            the search space, the starting beliefs, the hypothesis classes a plan may use
  *   surface           the adjustable-surface whitelist: the files a candidate may edit, and the
  *                     knobs / symbols inside them
@@ -33,6 +34,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 
+import { resolveMetricContract } from './metric-contract.js'
 import { CALL_SITES, loadSkill, skillPath } from './skills.js'
 import { EXECUTOR_KINDS } from './warnings.js'
 
@@ -54,17 +56,10 @@ const PART_LABELS = Object.freeze({
   executor: 'executor entry',
 })
 
-/** `up` / `down` is the frontier's vocabulary, `higher` / `lower` is the judge's. One table converts. */
-const DIRECTIONS = Object.freeze({ up: 'up', down: 'down', higher: 'up', lower: 'down' })
-const JUDGE_DIRECTION = Object.freeze({ up: 'higher', down: 'lower' })
-
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isText = (value) => typeof value === 'string' && value.trim() !== ''
 const isTextList = (value) => Array.isArray(value) && value.length > 0 && value.every(isText)
 const textList = (value) => (Array.isArray(value) ? value.every(isText) : false)
-
-/** The normalised direction of a declared value, or undefined when it is not one. */
-const normalise = (value) => (isText(value) ? DIRECTIONS[value.trim().toLowerCase()] : undefined)
 
 /**
  * A pack that cannot be used, with every problem found rather than only the first.
@@ -87,26 +82,6 @@ export class DomainPackError extends Error {
     this.packDir = dir
     this.manifestPath = manifestPath
     this.problems = problems
-  }
-}
-
-/**
- * The metric binding the judge and the frontier both need, from the pack's contract.
- *
- * One mapping, in one place: `rounds.metric` in a run configuration is the same shape, so a run may
- * override the contract's primary metric without inventing a second vocabulary for it.
- *
- * @param {{primary?: string, direction?: string, name?: string}} contract
- * @returns {{name: string, direction: 'higher' | 'lower', contract_ref: string}}
- */
-export function metricFromContract(contract = {}) {
-  const normalised = normalise(contract.direction) ?? 'up'
-  return {
-    name: contract.primary,
-    direction: JUDGE_DIRECTION[normalised],
-    // The contract's own name is the ref frozen artifacts quote: a path would be machine-specific,
-    // and these artifacts are carried away by git.
-    contract_ref: isText(contract.name) ? contract.name : contract.primary,
   }
 }
 
@@ -144,114 +119,18 @@ export function executorProblems(value, { label = 'executor' } = {}) {
 
 function metricContractProblems(value) {
   if (!isObject(value)) return ['the metric contract must be a JSON object']
-  const problems = []
 
+  const problems = []
   if (!isText(value.name)) {
     problems.push('name is required — it is the ref every frozen artifact quotes')
   }
-  if (!isText(value.primary)) {
-    problems.push('primary is required — the one metric the gate compares against the baseline')
-  }
 
-  if (!isObject(value.objectives) || Object.keys(value.objectives).length === 0) {
-    problems.push('objectives must be a non-empty object of {metric: "up" | "down"} — the frontier ranks exactly these')
-  } else {
-    for (const [name, direction] of Object.entries(value.objectives)) {
-      if (normalise(direction) === undefined) {
-        problems.push(`objectives.${name} must be "up" or "down" (got ${JSON.stringify(direction)})`)
-      }
-    }
-    if (isText(value.primary) && value.objectives[value.primary] === undefined) {
-      problems.push(
-        `primary ${JSON.stringify(value.primary)} is not among objectives (${Object.keys(value.objectives).join(', ')}) — ` +
-          'the gate would compare a metric the frontier cannot rank',
-      )
-    }
-  }
-
-  if (!isText(value.direction)) {
-    problems.push('direction is required ("higher" or "lower") — a contract that does not say which way is better cannot compare candidates')
-  } else if (normalise(value.direction) === undefined) {
-    problems.push(`direction must be "higher" or "lower" (got ${JSON.stringify(value.direction)})`)
-  } else if (isObject(value.objectives) && isText(value.primary)) {
-    const objective = normalise(value.objectives[value.primary])
-    if (objective !== undefined && objective !== normalise(value.direction)) {
-      problems.push(
-        `direction is ${JSON.stringify(value.direction)} but objectives.${value.primary} is ` +
-          `${JSON.stringify(value.objectives[value.primary])} — two accounts of "better" in one contract`,
-      )
-    }
-  }
-
-  if (value.role !== undefined && !isObject(value.role)) {
-    problems.push('role must be an object of {metric: "<what it is for>"} when present')
-  }
-
-  // How much of a difference counts is the contract's question, not the kernel's — `judge.compareMetric`
-  // deliberately has no threshold of its own, so a pack that answers it here is the only place the
-  // answer can live. Two rules make that answer checkable rather than decorative: a tolerance for a
-  // metric nobody ranks, and a tolerance that is zero or negative, both state nothing and are refused.
-  if (value.minimum_effective_delta !== undefined) {
-    const tolerance = value.minimum_effective_delta
-    if (!isObject(tolerance) || Object.keys(tolerance).length === 0) {
-      problems.push(
-        'minimum_effective_delta must be a non-empty object of {metric: <absolute delta>} when present — ' +
-          'a tolerance with no entry says every difference counts',
-      )
-    } else {
-      for (const [name, delta] of Object.entries(tolerance)) {
-        if (typeof delta !== 'number' || !Number.isFinite(delta) || delta <= 0) {
-          problems.push(
-            `minimum_effective_delta.${name} must be a positive finite number (got ${JSON.stringify(delta)}) — ` +
-              'zero makes every difference count and a negative counts the wrong way',
-          )
-        }
-        if (isObject(value.objectives) && value.objectives[name] === undefined) {
-          problems.push(
-            `minimum_effective_delta.${name} names a metric the objectives do not rank ` +
-              `(${Object.keys(value.objectives).join(', ') || 'none'}) — a tolerance for a metric nobody ranks decides nothing`,
-          )
-        }
-      }
-      if (isText(value.primary) && tolerance[value.primary] === undefined) {
-        problems.push(
-          `minimum_effective_delta has no entry for primary ${JSON.stringify(value.primary)} — ` +
-            'the metric the gate compares against the baseline needs the tolerance most',
-        )
-      }
-    }
-  }
-
-  // A guardrail is "the second metric that must not go backwards while the primary improves". Restating
-  // the primary there is the objective twice, and naming a metric the frontier does not carry makes the
-  // guardrail a comment.
-  if (value.guardrail !== undefined) {
-    const guardrail = value.guardrail
-    if (!isObject(guardrail) || !isText(guardrail.metric)) {
-      problems.push('guardrail must be an object naming the metric it protects (guardrail.metric) when present')
-    } else if (isObject(value.objectives) && value.objectives[guardrail.metric] === undefined) {
-      problems.push(
-        `guardrail.metric ${JSON.stringify(guardrail.metric)} is not among objectives ` +
-          `(${Object.keys(value.objectives).join(', ')}) — the frontier cannot rank it, so the guardrail is a comment`,
-      )
-    } else if (isText(value.primary) && guardrail.metric === value.primary) {
-      problems.push(
-        `guardrail.metric is the primary ${JSON.stringify(value.primary)} — a guardrail has to be a second metric, ` +
-          'or it is the objective restated',
-      )
-    } else if (guardrail.direction !== undefined) {
-      const declared = normalise(guardrail.direction)
-      const objective = normalise(value.objectives[guardrail.metric])
-      if (declared === undefined) {
-        problems.push(`guardrail.direction must be "higher" or "lower" (got ${JSON.stringify(guardrail.direction)})`)
-      } else if (objective !== undefined && declared !== objective) {
-        problems.push(
-          `guardrail.direction is ${JSON.stringify(guardrail.direction)} but objectives.${guardrail.metric} is ` +
-            `${JSON.stringify(value.objectives[guardrail.metric])} — two accounts of "better" for one metric`,
-        )
-      }
-    }
-  }
+  // Everything else is read by the one resolver the ranking, the stop rules and the gate also call. The
+  // loader used to carry its own copy of those rules — same intent, different sentences — which is how a
+  // pack passes boot and then gets interpreted differently by three readers. So it delegates: the
+  // findings below are the resolver's, and the only rule kept here is the one about a *pack* (a manifest
+  // part must carry the name frozen artifacts quote, which a run-level restatement need not).
+  problems.push(...resolveMetricContract(value).problems.map((problem) => problem.message))
   return problems
 }
 

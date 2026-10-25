@@ -127,7 +127,9 @@ test('an uncapped spend on a real executor is a warning the boot log carries, no
     budget: { gpu_hours_limit: 0 },
   })
   assert.equal(resolved.ok, true, 'the shipped default must remain runnable — it must only be loud')
-  assert.deepEqual(resolved.warnings.map((warning) => warning.code), ['no_gpu_hours_limit'])
+  // Two warnings, both about spending a shared cluster without saying how much of it is ours: the
+  // uncapped hours (ticket 13) and the undeclared GPU exclusivity (ticket 16).
+  assert.deepEqual(resolved.warnings.map((warning) => warning.code), ['no_gpu_hours_limit', 'gpu_exclusivity_undeclared'])
 })
 
 test('a nonsensical interval is refused instead of becoming a busy loop', () => {
@@ -190,7 +192,13 @@ test('the pack supplies the metric contract when the run does not restate it, an
     { cwd: ROOT },
   )
   assert.equal(resolved.ok, true, resolved.problems?.join('; '))
-  assert.deepEqual(resolved.config.metrics, { primary: 'score', objectives: { score: 'up' } })
+  const packContract = JSON.parse(readFileSync(join(CONFIG_ONLY_PACK_DIR, 'metric-contract.json'), 'utf8'))
+  assert.deepEqual(
+    resolved.config.metrics,
+    packContract,
+    'the whole contract travels verbatim, not a two-field summary: the tolerance, the guardrail and the ' +
+      'window reading are part of "which metric decides", and the reader that dropped them would be reading a contract nobody wrote',
+  )
   assert.deepEqual(
     resolved.config.rounds.metric,
     { name: 'score', direction: 'higher', contract_ref: 'config-only-score' },

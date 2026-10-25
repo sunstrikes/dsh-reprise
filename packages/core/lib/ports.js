@@ -44,7 +44,7 @@ import { createRayPlatform } from '@dsh-reprise/exec/platform/ray'
 
 import { fileArtifacts } from './artifacts.js'
 import { BASELINE_SUBJECT } from './baseline.js'
-import { metricFromContract } from './domain.js'
+import { baselineMarker, cudaVisibleDevicesOf, jobMarker, MARKER_KEY } from './jobs.js'
 import { createJudge } from './judge.js'
 import { readRoundsState } from './rounds.js'
 
@@ -189,24 +189,37 @@ export function createModelFromConfig({ model, artifacts, cwd = process.cwd() })
  * baseline subject is the only id that means "the base tree". Ticket 16's cluster marker reads the
  * same distinction from `metadata.kind`, set here so the cluster listing says it too.
  */
-function planFor(config, { workspaceDir, runner }) {
+export function planForConfig(config, { workspaceDir, runner }) {
   const executor = config.executor ?? { kind: 'local' }
   const isBaseline = (candidateId) => candidateId === BASELINE_SUBJECT
 
+  // Two things every job of ours carries, whichever executor runs it:
+  //
+  //  - the **marker**, so the job can be recognised again in the cluster's own listing afterwards
+  //    (`jobs.js` reads it back). `metadata` is where it goes: on Ray a listing row's `job_id` may be
+  //    null while `submission_id` and `metadata` survive.
+  //  - the **device list**, when that is the run's GPU-exclusivity choice — written by the submission
+  //    itself, because nothing in the cluster does it for us.
+  const devices = cudaVisibleDevicesOf(config)
+
   if ((executor.kind ?? 'local') === 'ray') {
-    return ({ candidateId }) => ({
+    return ({ candidateId, round }) => ({
       // Runnable inside the unpacked package: relative paths resolve against the shipped tree, which
       // is the whole point of shipping it. For the baseline that tree is the base ref, unmodified.
       entrypoint: executor.command,
       worktreeDir: runner === undefined ? undefined : isBaseline(candidateId) ? runner.repoDir : runner.worktreeFor(candidateId),
       baseRef: runner?.baseRef,
-      runtimeEnv: { env_vars: { ...(executor.env ?? {}) } },
+      runtimeEnv: {
+        env_vars: { ...(executor.env ?? {}), ...(devices === undefined ? {} : { CUDA_VISIBLE_DEVICES: devices }) },
+      },
       ...(executor.num_gpus === undefined ? {} : { numGpus: executor.num_gpus }),
-      metadata: isBaseline(candidateId) ? { kind: 'baseline' } : {},
+      // The marker says which job of ours this is. The baseline has no candidate and no round, so it
+      // carries its own marker form rather than a candidate marker with two invented fields.
+      metadata: { [MARKER_KEY]: isBaseline(candidateId) ? baselineMarker() : jobMarker({ candidateId, round }) },
     })
   }
 
-  return ({ candidateId }) => ({
+  return ({ candidateId, round }) => ({
     command: executor.command,
     // The candidate's worktree is the execution directory: the job evaluates the candidate's tree,
     // not the checkout the loop happens to live in. The baseline has no worktree by definition, so it
@@ -219,9 +232,12 @@ function planFor(config, { workspaceDir, runner }) {
         : isBaseline(candidateId)
           ? runner.repoDir
           : runner.worktreeFor(candidateId),
-    env: { ...(executor.env ?? {}) },
+    env: { ...(executor.env ?? {}), ...(devices === undefined ? {} : { CUDA_VISIBLE_DEVICES: devices }) },
   })
 }
+
+/** The plan `createPlatform` hands the adapter; exported above so a test can read what a job says. */
+const planFor = planForConfig
 
 /**
  * The external-job port. `local` is the laptop path (a subprocess, no GPU, no cluster); `ray` is the
@@ -422,10 +438,11 @@ export function portsFromConfig({ config, workspaceDir, store, log = () => {}, l
     }
     ports.judge = createJudge({
       model: createModelFromConfig({ model: config.model, artifacts, cwd: launchDir }),
-      // The pack declares "better"; a run may restate the metric it optimises for this round, which
-      // is the shape `rounds.metric` already had. Prompts and the adjustable surface come from the
-      // pack only: there is no second home for them to drift to.
-      metric: { ...metricFromContract(pack.metricContract), ...(config.rounds?.metric ?? {}) },
+      // The one contract the run recorded, resolved inside the judge (`metric-contract.js`). It is
+      // the same object the ranking and the stop rules read, so "improved" means one thing. A caller
+      // that built ports without going through `resolveConfig` still gets the pack's own contract —
+      // never a binding, and never nothing.
+      metricContract: config.metrics ?? pack.metricContract,
       baseline: () => baseline.read()?.value,
       skillsDir: pack.promptsDir,
       surface: pack.surface,

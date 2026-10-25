@@ -35,6 +35,8 @@ import { pairWindows, validateArtifact } from '@dsh-reprise/contract'
 import { fileArtifacts } from '../lib/artifacts.js'
 import { BASELINE_SUBJECT } from '../lib/baseline.js'
 import { renderDump } from '../lib/cli/dump.js'
+import { baselineMarker, jobMarker, jobReport } from '../lib/jobs.js'
+import { planForConfig } from '../lib/ports.js'
 import { createCandidate, tick } from '../lib/loop.js'
 import { readRoundsState, stepWorkspace } from '../lib/rounds.js'
 import { Store } from '../lib/store.js'
@@ -466,5 +468,41 @@ test('a baseline job that never answers is stopped by its limits, not waited on 
     ports.store.eventsFor(BASELINE_SUBJECT).some((event) => event.event_type === 'baseline_timeout'),
     'the timeout is a fact about the baseline, not only a workspace conclusion',
   )
+  ports.store.close()
+})
+
+test('a baseline job is marked as ours and as the baseline, so a cluster listing cannot read it as a candidate', async () => {
+  const ports = setup()
+  await step(ports) // INIT
+  await step(ports) // BASELINE: submit
+
+  // The marker travels in the job's metadata, which is the field that survives in the cluster's own
+  // listing (measured, ticket 14: a row's job_id can be null while metadata is intact).
+  const rayPlan = planForConfig(
+    { executor: { kind: 'ray', command: ['train'], base_url: 'http://127.0.0.1:1/' } },
+    { workspaceDir: ports.workspaceDir },
+  )
+  assert.deepEqual(rayPlan({ candidateId: BASELINE_SUBJECT }).metadata, { marker: baselineMarker() })
+  assert.equal(rayPlan({ candidateId: BASELINE_SUBJECT }).worktreeDir, undefined, 'no runner configured: nothing to ship')
+  assert.equal(
+    rayPlan({ candidateId: 'r1-h1', round: 1 }).metadata.marker,
+    jobMarker({ candidateId: 'r1-h1', round: 1 }),
+    'a candidate keeps the candidate marker: the baseline form is not a shape a candidate can borrow',
+  )
+
+  // The ledger row says the same thing, and the ledger view reads the marker back as the baseline.
+  const row = ports.store.jobFor(BASELINE_SUBJECT)
+  assert.equal(row.marker, baselineMarker())
+  assert.equal(row.round, null, 'the baseline was submitted in no round')
+
+  const report = jobReport({
+    rows: ports.store.allJobs(),
+    listing: { ok: true, jobs: [{ submission_id: 'baseline', marker: baselineMarker(), status: 'SUCCEEDED' }] },
+  })
+  assert.equal(report.read, true)
+  assert.equal(report.ours.length, 1, 'the baseline is one of our jobs')
+  assert.equal(report.ours[0].baseline, true, 'and the listing says it is the denominator, not a candidate')
+  assert.deepEqual(report.orphans, [], 'the ledger knows it, so it is not an orphan')
+  assert.deepEqual(report.foreign, [], 'and it is certainly not somebody else\u2019s work')
   ports.store.close()
 })

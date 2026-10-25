@@ -19,6 +19,12 @@
  *   2. **One rule is recorded, not a vote.** Rules are checked in the declared order and the first
  *      match wins, so the same facts always produce the same recorded reason.
  *
+ * "Did this round beat the best result" is a metric-contract question, not this module's: the resolved
+ * contract (`metric-contract.js`) says which metric decides and how large a move has to be to count, so
+ * a 0.005 gain inside the contract's 0.01 tolerance is not an improvement here *or* at the gate. When
+ * the contract is absent or contradicts itself, both metric rules are skipped — and `describeRules`
+ * says so by name (`missing` / `conflict`) instead of comparing against a threshold nobody declared.
+ *
  * A stop also never fires while a candidate is still in flight: money spent on a running job cannot
  * be refunded by declaring the experiment over, so FINALIZE waits for the work to land.
  *
@@ -26,6 +32,7 @@
  */
 
 import { frontier, roundHistory } from './frontier.js'
+import { primaryRule, resolveMetricContract } from './metric-contract.js'
 import { WORKSPACE_SUBJECT } from './store.js'
 
 /**
@@ -68,10 +75,15 @@ export function stopConfig(config) {
   return { ...limits, error: errors.length === 0 ? undefined : errors.join('; ') }
 }
 
-const strictlyBetter = (a, b, direction) => (direction === 'down' ? a < b : a > b)
-
-const metricDirection = (view) =>
-  view.contract.objectives.find((objective) => objective.name === view.contract.primary)?.direction
+/**
+ * A move that counts: better in the contract's direction by at least the contract's tolerance for
+ * that metric. With no tolerance declared the tolerance is zero, which makes this strictly better —
+ * the behaviour a run without a contract would have had, had it been allowed one.
+ */
+const effectiveImprovement = (value, previous, direction, tolerance = 0) => {
+  const difference = direction === 'down' ? previous - value : value - previous
+  return difference > 0 && difference >= tolerance
+}
 
 /** The trailing streak of completed rounds for which `predicate` held. */
 function trailing(rounds, predicate) {
@@ -101,11 +113,13 @@ function pickRule({ limits, rounds, view }) {
 
   // Both remaining rules are statements about a metric, and the kernel has no domain knowledge of
   // its own: without a metric contract they are skipped, not guessed at.
-  if (!view.contract.ok) return undefined
+  if (view.contract.status !== 'ok') return undefined
   const { primary } = view.contract
+  const rule = primaryRule(view.contract)
+  const tolerance = rule?.minimum_effective_delta ?? 0
 
   if (limits.max_no_improvement_rounds > 0) {
-    const direction = metricDirection(view)
+    const direction = rule?.direction
     let bestSoFar
     let streak = 0
     for (const entry of completed) {
@@ -115,7 +129,7 @@ function pickRule({ limits, rounds, view }) {
         bestSoFar = { ...entry.best, round: entry.round }
         continue
       }
-      if (strictlyBetter(entry.best.value, bestSoFar.value, direction)) {
+      if (effectiveImprovement(entry.best.value, bestSoFar.value, direction, tolerance)) {
         bestSoFar = { ...entry.best, round: entry.round }
         streak = 0
       } else {
@@ -124,11 +138,12 @@ function pickRule({ limits, rounds, view }) {
     }
     if (streak >= limits.max_no_improvement_rounds) {
       const held = bestSoFar === undefined ? `${primary} (no result yet)` : `${primary}=${bestSoFar.value} set by ${bestSoFar.candidate_id} in round ${bestSoFar.round}`
+      const by = tolerance > 0 ? ` by at least ${tolerance}` : ''
       return {
         rule: 'max_no_improvement_rounds',
         limit: limits.max_no_improvement_rounds,
         observed: streak,
-        message: `${streak} completed round(s) without beating ${held} (stop.max_no_improvement_rounds=${limits.max_no_improvement_rounds})`,
+        message: `${streak} completed round(s) without beating ${held}${by} (stop.max_no_improvement_rounds=${limits.max_no_improvement_rounds})`,
       }
     }
   }
@@ -153,10 +168,20 @@ function pickRule({ limits, rounds, view }) {
  * off, and a dashboard or dump that shows only "not stopped" hides the difference.
  */
 export function describeRules({ limits, view }) {
+  const contract = view.contract
   return STOP_RULES.map((rule) => {
     if (limits[rule] === 0) return { rule, enabled: false, limit: 0, reason: 'disabled (0)' }
-    if (rule !== 'max_rounds' && !view.contract.ok) {
-      return { rule, enabled: true, limit: limits[rule], reason: 'needs a metric contract' }
+    if (rule !== 'max_rounds' && contract.status !== 'ok') {
+      // The same name the other two readers use: `missing` when there is no contract, `conflict` when
+      // it disagrees with itself. A rule that cannot run says which, rather than "needs a metric
+      // contract", so a stranger reading a dump does not have to work out which problem it has.
+      return {
+        rule,
+        enabled: true,
+        limit: limits[rule],
+        contract: contract.status,
+        reason: `no contract (${contract.status}): ${contract.message}`,
+      }
     }
     return { rule, enabled: true, limit: limits[rule], reason: null }
   })
@@ -213,11 +238,15 @@ export function recordStop({ store, clock, log }, decision) {
  * @param {{ store: any, clock: { now: () => number }, config?: any, log?: (message: string, detail?: unknown) => void }} ports
  */
 export function evaluateStop({ store, clock, config, log }) {
+  // Resolved before anything else and returned on every path, so "why did this run stop" and "what
+  // was it judging on" are answered by one object even when there was no contract to judge with.
+  const contract = resolveMetricContract(config?.metrics)
+
   const workspace = store.getState(undefined, 'workspace', {}) ?? {}
   if (workspace.stopped !== undefined || workspace.phase === 'FINALIZE') {
     // Already concluded. Absorbing on purpose: a conclusion recorded once must not be re-derived,
     // re-worded, or followed by more work.
-    return { stopped: true, already: true, ...(workspace.stopped ?? {}) }
+    return { stopped: true, already: true, ...(workspace.stopped ?? {}), contract }
   }
 
   const view = frontier(store, config, { persist: true })
@@ -226,11 +255,11 @@ export function evaluateStop({ store, clock, config, log }) {
 
   const inFlight = view.candidates.filter((candidate) => candidate.status === 'active').map((candidate) => candidate.candidate_id)
   if (inFlight.length > 0) {
-    return { stopped: false, blocked_by: inFlight, view, rounds, limits }
+    return { stopped: false, blocked_by: inFlight, view, rounds, limits, contract }
   }
 
   const decision = pickRule({ limits, rounds, view })
-  if (decision === undefined) return { stopped: false, view, rounds, limits }
+  if (decision === undefined) return { stopped: false, view, rounds, limits, contract }
 
   const recorded = recordStop(
     { store, clock, log },
@@ -244,5 +273,5 @@ export function evaluateStop({ store, clock, config, log }) {
     },
   )
 
-  return { ...recorded, view, rounds, limits }
+  return { ...recorded, view, rounds, limits, contract }
 }

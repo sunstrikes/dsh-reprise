@@ -33,6 +33,7 @@
  */
 
 import { DEFAULT_BUDGET } from './budget.js'
+import { gpuExclusivityOf } from './jobs.js'
 
 /** Executors that can rent GPU hours. Anything else is a laptop-class run. */
 export const REMOTE_EXECUTORS = Object.freeze(['ray'])
@@ -69,6 +70,32 @@ export function noGpuHoursLimit(config) {
       `the "${kind}" executor bills real GPU hours and this run has no GPU-hours limit ` +
       '(budget.gpu_hours_limit is 0, which means unlimited). Set budget.gpu_hours_limit to cap the spend, ' +
       'or keep it uncapped deliberately — either way the page says which one it is.',
+  }
+}
+
+/**
+ * The cluster does not reserve the cards (measured, ticket 14: two 8-card jobs ran at once on the
+ * same node), so a run on a GPU-billing executor that has not said which of the two ways it owns
+ * them will quietly share them with itself. Legal, dangerous, and named.
+ *
+ * A laptop run has no cards to share, so it earns nothing here — the check is conditional on the
+ * executor for the same reason `no_gpu_hours_limit` is.
+ */
+export function gpuExclusivityUndeclared(config) {
+  const kind = executorKind(config)
+  if (!REMOTE_EXECUTORS.includes(kind)) return undefined
+  if (gpuExclusivityOf(config) !== undefined) return undefined
+
+  return {
+    code: 'gpu_exclusivity_undeclared',
+    severity: 'warning',
+    about: 'dispatch',
+    where: 'dashboard.overview',
+    label: '未声明 GPU 排他',
+    message:
+      `the "${kind}" executor's cluster does not reserve GPUs, and this run declares neither ` +
+      'executor.gpu_exclusivity: single_job (one training job at a time) nor executor.cuda_visible_devices ' +
+      '(each submission writes its own device list): two of our jobs will share the same cards.',
   }
 }
 
@@ -150,6 +177,8 @@ export function configWarnings(config) {
   const warnings = []
   const gpu = noGpuHoursLimit(config)
   if (gpu !== undefined) warnings.push(gpu)
+  const exclusivity = gpuExclusivityUndeclared(config)
+  if (exclusivity !== undefined) warnings.push(exclusivity)
   warnings.push(...metricWarnings(config))
   warnings.push(...modelWarning(config))
   return warnings

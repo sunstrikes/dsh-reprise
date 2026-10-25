@@ -30,6 +30,7 @@
 import { judgeTimeout } from '@dsh-reprise/exec'
 
 import { budgetOf, canDispatch } from './budget.js'
+import { baselineMarker } from './jobs.js'
 import { recordWindowSamples, seriesOf } from './samples.js'
 
 /**
@@ -170,6 +171,8 @@ async function dispatch(context, state) {
     candidate_id: BASELINE_SUBJECT,
     submission_id: BASELINE_SUBMISSION_ID,
     kind: 'baseline',
+    marker: baselineMarker(),
+    round: null,
     harness: submitted.harness ?? 'unknown',
     submitted_at_ms: now,
     deadline_ms: now + (submitted.deadline_ms ?? 3_600_000),
