@@ -8,7 +8,7 @@
  *
  * Three constraints, all of them testable and all of them asserted in `projection.test.js`:
  *
- *   - **Read-only.** Every function takes the store as a reader: it calls `frontier(…, { persist:
+ *   - **Read-only.** Every function takes the store as a reader: it calls `ranking(…, { persist:
  *     false })` and never writes, so it works on a `readOnly` handle. A dashboard must not be able
  *     to change the run it is watching.
  *   - **Fact-derived.** No clock, no randomness, no model. Two calls over the same facts are equal.
@@ -19,7 +19,7 @@
  */
 
 import { budgetOf, spendOf } from './budget.js'
-import { frontier, roundHistory } from './frontier.js'
+import { ranking, roundHistory } from './ranking.js'
 import { describeRules, stopConfig } from './stop.js'
 import { configWarnings } from './warnings.js'
 
@@ -44,7 +44,7 @@ export function summariseEvent(event) {
   return parts.join('  ')
 }
 
-const view = (store, config) => frontier(store, config, { persist: false })
+const view = (store, config) => ranking(store, config, { persist: false })
 
 /**
  * The configuration the run *recorded into itself* at INIT.
@@ -261,6 +261,11 @@ export function candidateDetail(store, candidateId, { config } = {}) {
     phase: state?.phase ?? null,
     round: state?.round ?? position?.round ?? null,
     status: position?.status ?? 'active',
+    // Who this candidate was branched from. Written by the round planner from the frontier when it
+    // created the candidate (`parent_id` in the phase state), so "this round started from whom" is
+    // answerable per candidate and not only per round. `null` is the honest answer for a candidate a
+    // human proposed: nobody chose a parent for it.
+    parent: state?.parent_id ?? null,
     // A candidate-level pause marker if anything ever writes one. Workspace pauses live in the
     // workspace record and are rendered once, not per candidate.
     paused: state?.paused ?? null,

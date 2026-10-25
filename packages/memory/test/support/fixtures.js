@@ -1,10 +1,10 @@
 /**
  * Fixtures for the injection packet tests.
  *
- * The view below is the *documented* shape of the frontier view (`frontier.js`), written out by hand
+ * The view below is the *documented* shape of the frontier view (`ranking.js`), written out by hand
  * instead of imported from core. Two reasons, both deliberate: `packages/memory` is allowed to
  * depend on `contract` only, and the packet must be testable without a real fact plane, because it
- * is assembled from a view a caller supplies. A test that imported core's `frontier()` would be
+ * is assembled from a view a caller supplies. A test that imported core's `ranking()` would be
  * proving core's arithmetic again and would break the package boundary to do it.
  */
 
@@ -12,7 +12,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-/** A candidate row exactly as `frontier()` renders it. */
+/** A candidate row exactly as `ranking()` renders it. */
 export function row(overrides = {}) {
   return {
     candidate_id: 'c1',

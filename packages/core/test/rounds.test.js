@@ -528,3 +528,105 @@ test('a candidate created by another path is never mistaken for a round candidat
   assert.ok(state.plan !== undefined)
   ports.store.close()
 })
+// ------------------------------------------------------------- parents
+
+/**
+ * A finished candidate with the number it finished on: what the frontier needs to see it.
+ *
+ * Both halves matter. `metrics_collected` is the only source of a metric value, and `cand_analyze`
+ * is what makes the derived row say `done` — a candidate the analysis never reached is not a parent,
+ * however good its number looks.
+ */
+const finishWithMetrics = (store, candidateId, metrics, verdict = 'improved') => {
+  store.appendEvent({
+    candidate_id: candidateId,
+    wall_clock_ms: AT,
+    event_type: 'metrics_collected',
+    payload: { metrics },
+  })
+  store.appendEvent({
+    candidate_id: candidateId,
+    wall_clock_ms: AT,
+    event_type: 'cand_analyze',
+    payload: { verdict, observed: { metric: 'auc', value: Object.values(metrics)[0] } },
+  })
+  finish(store, candidateId)
+}
+
+test('a planned round freezes one parent snapshot, and every candidate names the parent it starts from', async () => {
+  const ports = setup()
+  const state = await toRoundOne(ports)
+
+  const frozen = state.plan.parent_snapshot
+  assert.match(frozen.address, /^[0-9a-f]{64}$/, 'the snapshot is identified by a content address, not by its position in a log')
+  const onDisk = JSON.parse(readFileSync(frozen.path, 'utf8'))
+  assert.equal(onDisk.address, frozen.address, 'the bytes on disk name themselves, so a moved file is still identifiable')
+  assert.equal(onDisk.content.round, 1)
+  assert.deepEqual(onDisk.content.parents, ['baseline'], 'round 1 has nothing comparable yet, so it starts from the baseline')
+  assert.equal(onDisk.content.empty, true)
+
+  // Every candidate carries the parent it will be branched from, where LAND reads it.
+  for (const candidateId of ['r1-h1', 'r1-h2']) {
+    assert.equal(ports.store.getState(candidateId, 'phase').parent_id, 'baseline')
+  }
+
+  // And the decision is on the workspace's own log, next to the plan it belongs to.
+  const accepted = ports.store.ops(20).find((op) => op.op === 'round_plan_accepted')
+  const detail = JSON.parse(accepted.detail)
+  assert.deepEqual(detail.parents, ['baseline'])
+  assert.equal(detail.parent_snapshot, frozen.address)
+  ports.store.close()
+})
+
+test('a round after a finished candidate starts from that candidate, not from the baseline again', async () => {
+  const ports = setup()
+  await toRoundOne(ports)
+  // r1-h1 beat the baseline (0.7012) on auc; r1-h2 also beat it but by less. Both finished.
+  finishWithMetrics(ports.store, 'r1-h1', { auc: 0.73 })
+  finishWithMetrics(ports.store, 'r1-h2', { auc: 0.72 })
+
+  await step(ports) // reflect round 1
+  await step(ports) // close round 1
+  const planned = await step(ports) // plan round 2
+  assert.match(planned.action, /planned round 2/)
+
+  const state = readRoundsState(ports.store)
+  const frozen = state.plan.parent_snapshot
+  const onDisk = JSON.parse(readFileSync(frozen.path, 'utf8'))
+  assert.equal(onDisk.content.round, 2)
+  assert.deepEqual(onDisk.content.parents, ['r1-h1'], 'the non-dominated candidate leads the roster; the baseline does not repeat')
+  assert.deepEqual(
+    onDisk.content.frontier.map((member) => member.candidate_id),
+    ['baseline', 'r1-h1'],
+    'the baseline is still in the set — it is the reference point, not a participant in the roster',
+  )
+  assert.equal(ports.store.getState('r2-h1', 'phase').parent_id, 'r1-h1')
+  assert.equal(ports.store.getState('r2-h2', 'phase').parent_id, 'r1-h1', 'one parent, two hypotheses: both build on it')
+  ports.store.close()
+})
+
+test('the same facts planned twice freeze the same address: the snapshot is content-addressed, not minted', async () => {
+  const first = setup()
+  await toRoundOne(first)
+  finishWithMetrics(first.store, 'r1-h1', { auc: 0.73 })
+  finishWithMetrics(first.store, 'r1-h2', { auc: 0.72 })
+  await step(first) // reflect
+  await step(first) // close
+  await step(first) // plan round 2
+  const a = readRoundsState(first.store).plan.parent_snapshot.address
+  first.store.close()
+
+  // A second workspace with the same facts and the same checkpoints reaches the same address: no
+  // clock, no random id, no counter anywhere in it.
+  const second = setup()
+  await toRoundOne(second)
+  finishWithMetrics(second.store, 'r1-h1', { auc: 0.73 })
+  finishWithMetrics(second.store, 'r1-h2', { auc: 0.72 })
+  await step(second)
+  await step(second)
+  await step(second)
+  const b = readRoundsState(second.store).plan.parent_snapshot.address
+  second.store.close()
+
+  assert.equal(a, b)
+})

@@ -28,7 +28,7 @@ import {
   overview,
   summariseEvent,
 } from '../projection.js'
-import { frontier, rebuildFrontier } from '../frontier.js'
+import { ranking, rebuildRanking } from '../ranking.js'
 
 const pad = (value, width) => String(value).padEnd(width)
 
@@ -74,6 +74,10 @@ function frontierLines(store, candidateId, { config } = {}) {
 
   const entries = Object.entries(position.vector).map(([name, value]) => `${name}=${value}`)
   lines.push(`  ${pad('vector', 11)}${entries.length === 0 ? '(no objective metric recorded)' : entries.join(' ')}`)
+
+  if (detail.parent !== null && detail.parent !== undefined) {
+    lines.push(`  ${pad('parent', 11)}${detail.parent} — the candidate this one was branched from`)
+  }
 
   if (position.position === 'frontier') {
     const isBest = position.best?.candidate_id === candidateId
@@ -285,8 +289,8 @@ function signatureOf(view) {
  * old workspace and see whether old facts still read the same way.
  */
 export function renderVerification(store, { config } = {}) {
-  const incremental = frontier(store, config, { persist: false })
-  const rebuilt = rebuildFrontier(store, config)
+  const incremental = ranking(store, config, { persist: false })
+  const rebuilt = rebuildRanking(store, config)
   const match = JSON.stringify(incremental) === JSON.stringify(rebuilt)
 
   const lines = ['', 'verification (full rebuild)']

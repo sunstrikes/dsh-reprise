@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { frontier } from '../lib/frontier.js'
+import { ranking } from '../lib/ranking.js'
 import { WORKSPACE_SUBJECT } from '../lib/stop.js'
 import { tick } from '../lib/loop.js'
 import { fakeJudge, openWorkspace, reportOf, runCandidate } from './support/fake-ports.js'
@@ -38,7 +38,7 @@ test("a model's claimed metric is in the facts but not in the objective vector",
     'DONE',
     'and it passed the contract — the kernel consumed the artifact that carried 0.99, it did not merely ignore it',
   )
-  const view = frontier(ports.store, AUC)
+  const view = ranking(ports.store, AUC)
   const c1 = view.candidates.find((row) => row.candidate_id === 'c1')
 
   assert.deepEqual(c1.vector, { auc: 0.6821 }, 'the vector carries the platform number, not the one the model wrote')
@@ -87,7 +87,7 @@ test('a model-provided number cannot shorten a run either: a pessimistic claim d
   const result = await tick(ports)
 
   assert.equal(result.stopped?.stopped, false, 'the measured improvement is what decides, not the verdict word or its number')
-  assert.equal(frontier(ports.store, AUC).best.candidate_id, 'r2-c1')
+  assert.equal(ranking(ports.store, AUC).best.candidate_id, 'r2-c1')
   ports.store.close()
 })
 
@@ -96,7 +96,7 @@ test('a metric the platform never reported cannot be invented by the analysis', 
   // The job ran but reported no metric at all; the analysis "knows" the answer anyway.
   await runCandidate(ports, { candidateId: 'c1', metrics: {}, judge: boastingJudge(0.99) })
 
-  const view = frontier(ports.store, AUC)
+  const view = ranking(ports.store, AUC)
 
   assert.deepEqual(view.candidates[0].metrics, {}, 'no platform metric means no metric — the model cannot supply one')
   assert.deepEqual(
@@ -114,7 +114,7 @@ test('the verdict word an analysis chooses is not a comparison', async () => {
   await runCandidate(ports, { candidateId: 'c2', metrics: { auc: 0.7301 }, judge: boastingJudge(0.7301) })
 
   const [first] = analyzePayloads(ports.store, 'c1')
-  const view = frontier(ports.store, AUC)
+  const view = ranking(ports.store, AUC)
 
   assert.equal(first.verdict, 'improved', '"improved" is what the model said about round 1')
   assert.equal(
