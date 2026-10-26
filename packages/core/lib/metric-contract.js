@@ -73,6 +73,8 @@
  * @module
  */
 
+import { isPlainObject } from '@dsh-reprise/contract'
+
 /** The four states a contract can resolve to. `conflict` is never merged into `invalid`. */
 export const CONTRACT_STATUSES = Object.freeze(['ok', 'missing', 'invalid', 'conflict'])
 
@@ -94,7 +96,6 @@ const DIRECTIONS = Object.freeze({ up: 'up', down: 'down', higher: 'up', lower: 
 /** 'up' / 'down' as the judge's 'higher' / 'lower', for the comparison it owns. */
 export const JUDGE_DIRECTION = Object.freeze({ up: 'higher', down: 'lower' })
 
-const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isText = (value) => typeof value === 'string' && value.trim() !== ''
 const isPositive = (value) => typeof value === 'number' && Number.isFinite(value) && value > 0
 const isWindowMode = (value) => isText(value) && WINDOW_MODES.includes(value.trim().toLowerCase())
@@ -148,7 +149,7 @@ function perMetricSetting(declared, { field, ranked, isValue, what, decides }) {
 
   if (declared === undefined) return { value, overrides, problems }
 
-  if (!isObject(declared)) {
+  if (!isPlainObject(declared)) {
     if (isValue(declared)) value = declared
     else reject(field, declared)
     return { value, overrides, problems }
@@ -227,7 +228,7 @@ export function resolveMetricContract(contract) {
     add('missing', 'no metric contract was resolved — nothing declares a primary metric and the objectives it leads')
     return noContract()
   }
-  if (!isObject(contract)) {
+  if (!isPlainObject(contract)) {
     add('invalid', `the metric contract must be a JSON object (got ${describe(contract)})`)
     return noContract()
   }
@@ -238,7 +239,7 @@ export function resolveMetricContract(contract) {
   const directions = new Map()
   if (declaredObjectives === undefined) {
     add('missing', 'objectives is required — the metrics this contract ranks, and the only ones a comparison may use')
-  } else if (!isObject(declaredObjectives)) {
+  } else if (!isPlainObject(declaredObjectives)) {
     add('invalid', `objectives must be an object of {metric: "up" | "down"} (got ${describe(declaredObjectives)})`)
   } else if (Object.keys(declaredObjectives).length === 0) {
     add('invalid', 'objectives is empty — a contract that ranks nothing cannot compare two candidates')
@@ -294,7 +295,7 @@ export function resolveMetricContract(contract) {
   let guardrail
   if (contract.guardrail !== undefined) {
     const declared = contract.guardrail
-    if (!isObject(declared) || !isText(declared.metric)) {
+    if (!isPlainObject(declared) || !isText(declared.metric)) {
       add('invalid', 'guardrail must be an object naming the metric it protects (guardrail.metric)')
     } else if (ranked.length > 0 && !directions.has(declared.metric.trim())) {
       add(
@@ -361,7 +362,7 @@ export function resolveMetricContract(contract) {
   })
   problems.push(...windows.problems)
 
-  if (contract.role !== undefined && !isObject(contract.role)) {
+  if (contract.role !== undefined && !isPlainObject(contract.role)) {
     add('invalid', 'role must be an object of {metric: "<what it is for>"} when present')
   }
 
@@ -371,7 +372,7 @@ export function resolveMetricContract(contract) {
     minimum_effective_delta: deltas.value ?? STRICT_MINIMUM_EFFECTIVE_DELTA,
     window: isText(windows.value) ? asMode(windows.value) : DEFAULT_WINDOW_MODE,
   }
-  const roleOf = (name) => (isObject(contract.role) && isText(contract.role[name]) ? contract.role[name] : undefined)
+  const roleOf = (name) => (isPlainObject(contract.role) && isText(contract.role[name]) ? contract.role[name] : undefined)
 
   const objectives = ranked.map((name) =>
     Object.freeze({
@@ -431,8 +432,8 @@ export function bindingOf(resolved) {
 
 /** The windows of a series, or an empty list when the value is not a series at all. */
 function windowsOf(series) {
-  if (!isObject(series) || !Array.isArray(series.windows)) return []
-  return series.windows.filter(isObject)
+  if (!isPlainObject(series) || !Array.isArray(series.windows)) return []
+  return series.windows.filter(isPlainObject)
 }
 
 /**
@@ -449,7 +450,7 @@ function windowsOf(series) {
  */
 export function windowValues(series, name) {
   return windowsOf(series).map((window) => {
-    const measured = isObject(window.metrics) ? window.metrics[name] : undefined
+    const measured = isPlainObject(window.metrics) ? window.metrics[name] : undefined
     return {
       index: window.index,
       start: window.start,
