@@ -377,6 +377,12 @@ export function createPlatform(config, context) {
  * answered (no binary, a timeout, an unreadable stream): that is the same condition the judgement
  * port reports, and `loop.js` handles both through the same outage path.
  *
+ * The answer carries both halves of a landing: what it left in the tree (`files`, git's inventory)
+ * and whether the landing itself completed (`ok`, `error_class`, `conflict`). They are different
+ * facts — a `command` implementer that prints its own words is filed as an outage *and* may have
+ * made the change — and `landing.js` reads them back to tell a LAND that has already done its work
+ * from one that has not.
+ *
  * @param {object} artifacts the workspace artifact store
  * @param {{candidateId: string, round?: number, hypothesis?: string, parentId?: string|null}} request
  * @param {object} result the harness result (`landWithCli`'s shape)
@@ -411,6 +417,15 @@ export function recordLandCall(artifacts, request, result) {
         files_changed: result.files_changed ?? 0,
         parent_commit: result.parent_commit ?? null,
         cross_check: result.cross_check?.status ?? null,
+        // Whether the landing itself completed, and why not. The rest of the answer says what it
+        // left in the tree, and the two are different questions: a resuming LAND reads this record
+        // to decide whether it has already done its work (`landing.js`), and "the implementer's
+        // stream was unreadable" is not the same fact as "nothing was changed".
+        ok: result.ok === true,
+        error_class: result.error_class ?? null,
+        conflict: result.conflict === true,
+        retryable: result.retryable === true,
+        message: typeof result.message === 'string' && result.message !== '' ? result.message : null,
       },
       response: typeof result.output === 'string' ? result.output : '',
       error_class: unanswered ? MODEL_UNAVAILABLE : null,
