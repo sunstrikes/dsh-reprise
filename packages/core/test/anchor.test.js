@@ -22,13 +22,14 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
 
 import { readRoundsState } from '../lib/rounds.js'
 import { ranking } from '../lib/ranking.js'
 import { Store } from '../lib/store.js'
-import { readAnchor, rollDecision } from '../lib/anchor.js'
+import { pendingProposals, readAnchor, rollDecision } from '../lib/anchor.js'
+import { frontierOf, parentsOf } from '../lib/frontier.js'
 import { openWorkspace, runCandidate } from './support/fake-ports.js'
 
 const TWO_AXES = { metrics: { primary: 'auc', objectives: { auc: 'up', loss: 'down' } } }
@@ -204,6 +205,167 @@ test('a roll leaves the frozen baseline record byte-identical: the denominator n
   ports.store.close()
 })
 
+// ----------------------------------------------------------- human mode (slice 3)
+
+/** The workspace-level facts this file reads: the roll is a workspace conclusion, not a candidate's. */
+const workspaceEvents = (store, eventType) =>
+  store.eventsFor('_workspace').filter((event) => event.event_type === eventType)
+
+test('human mode files a proposal and moves nothing: the answer is the anchor intent', async () => {
+  const ports = await roundsWorkspace({ mode: 'human' })
+  await planFirstRound(ports)
+  const denominatorBefore = JSON.stringify(readRoundsState(ports.store).baseline)
+
+  await planSecondRound(ports) // places the anchor on r1-h1, then plans round 2
+
+  assert.equal(readAnchor(ports.store).candidate_id, 'r1-h1', 'the code base is exactly where the human left it')
+  assert.equal(workspaceEvents(ports.store, 'anchor_rolled').length, 0, 'nothing rolled on its own')
+  assert.equal(workspaceEvents(ports.store, 'anchor_roll_proposed').length, 1)
+
+  const [proposal, ...rest] = pendingProposals(dirname(ports.store.path))
+  assert.deepEqual(rest, [])
+  assert.equal(proposal.candidate_id, 'r1-h3', 'the candidate the rule would have rolled to')
+  assert.equal(proposal.commit, ports.seals.get('r1-h3'), 'named, so approving it is one command')
+  assert.equal(proposal.evidence.reason, 'double_domination')
+  assert.deepEqual(proposal.denominator, { metric: 'auc', value: 0.8 }, 'the proposal quotes the ruler it will not move')
+  assert.equal(JSON.stringify(readRoundsState(ports.store).baseline), denominatorBefore)
+  ports.store.close()
+})
+
+test('a proposal is filed once, however many times the rule is evaluated', async () => {
+  const ports = await roundsWorkspace({ mode: 'human' })
+  await planFirstRound(ports)
+  await planSecondRound(ports)
+
+  const { anchorStep, anchorModeOf } = await import('../lib/anchor.js')
+  const { roundSettings } = await import('../lib/rounds.js')
+  const state = readRoundsState(ports.store)
+  const view = ranking(ports.store, TWO_AXES, { persist: false })
+  const settings = roundSettings(ports.config).settings
+  assert.equal(anchorModeOf(settings), 'human')
+
+  const again = anchorStep(
+    { store: ports.store, clock: ports.clock, now: ports.clock.now(), anchor: ports.anchor },
+    state,
+    view,
+    settings,
+  )
+
+  assert.equal(again.action, 'anchor_roll_proposed')
+  assert.equal(again.written, false, 'the candidate is already waiting for an answer')
+  assert.equal(pendingProposals(dirname(ports.store.path)).length, 1, 'one decision, one file')
+  assert.equal(workspaceEvents(ports.store, 'anchor_roll_proposed').length, 1, 'and one fact, not two')
+  ports.store.close()
+})
+
+test('answering the proposal is the anchor intent, and it is what moves the code base', async () => {
+  const { placeIntent, consumePending } = await import('../lib/intents.js')
+  const ports = await roundsWorkspace({ mode: 'human' })
+  await planFirstRound(ports)
+  await planSecondRound(ports)
+
+  const [proposal] = pendingProposals(dirname(ports.store.path))
+  placeIntent(
+    dirname(ports.store.path),
+    { kind: 'anchor', intent_id: 'approve-r1-h3', candidate_id: proposal.candidate_id, commit: proposal.commit },
+    { now: ports.clock.now() },
+  )
+  consumePending({ store: ports.store, clock: ports.clock, now: ports.clock.now() })
+
+  assert.deepEqual(readAnchor(ports.store), {
+    candidate_id: 'r1-h3',
+    commit: ports.seals.get('r1-h3'),
+    source: 'human',
+    intent_id: 'approve-r1-h3',
+  })
+  assert.equal(
+    JSON.stringify(readRoundsState(ports.store).baseline),
+    JSON.stringify(readRoundsState(ports.store).baseline),
+    'approving the roll still does not touch the denominator',
+  )
+  ports.store.close()
+})
+
+// ------------------------------------------------- the refused candidate (slice 5)
+
+test('a rejected candidate is never nominated again — and the exclusion is read, not remembered', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'reprise-anchor-refused-'))
+  const ports = openWorkspace({ dir })
+  await runCandidate(ports, { candidateId: 'anchor', metrics: { auc: 0.78, loss: 0.3 } })
+  await runCandidate(ports, { candidateId: 'refused', metrics: { auc: 0.85, loss: 0.28 } })
+  // The gate refused its change: it dominates both sides on the numbers, and it is still not a base.
+  ports.store.appendEvent({
+    candidate_id: 'refused',
+    wall_clock_ms: AT,
+    event_type: 'candidate_rejected',
+    payload: { phase: 'VERIFY', reject_reason: 'the adversarial review rejected it' },
+  })
+  ports.store.close()
+
+  // A restart: a new process reads the same workspace and must reach the same conclusion. Anything
+  // the exclusion kept in memory is gone now, which is the point of the assertion.
+  const reopened = Store.open(dir)
+  const view = ranking(reopened, TWO_AXES)
+  const row = view.candidates.find((candidate) => candidate.candidate_id === 'refused')
+  assert.equal(row.status, 'rejected', 'the status is folded from the event stream')
+
+  const set = frontierOf(view, { baseline: BASELINE })
+  assert.equal(
+    set.members.some((member) => member.candidate_id === 'refused'),
+    true,
+    'its numbers are still non-dominated — the set is about numbers, not verdicts',
+  )
+  assert.equal(parentsOf(set, { k: 3 }).includes('refused'), false, 'so the next round is not built on it')
+
+  const decision = rollDecision({ view, baseline: BASELINE, anchor: { candidate_id: 'anchor', commit: 'a'.repeat(40) } })
+  assert.equal(decision.roll, false)
+  assert.equal(decision.reason, 'only_rejected_candidates')
+  assert.equal(decision.evidence.candidate_id, 'refused')
+  assert.equal(decision.evidence.rejected, true)
+  reopened.close()
+})
+
+// ---------------------------------------------------- the operator's view (slice 6)
+
+test('dump prints the code base the run is on, and why it moved', async () => {
+  const { renderWorkspaceDump } = await import('../lib/cli/dump.js')
+  const ports = await roundsWorkspace()
+  await planFirstRound(ports)
+  await planSecondRound(ports)
+
+  const text = renderWorkspaceDump(ports.store, { config: ports.config })
+
+  assert.match(text, /code base/)
+  assert.match(text, /anchor\s+r1-h3\s+commit [0-9a-f]{40}/)
+  assert.match(text, /double_domination/, 'the rule that moved it, not just that it moved')
+  assert.match(text, /automatic/, 'and that no person was asked')
+  ports.store.close()
+})
+
+test('a waiting proposal is on the page a person reads, with the command that answers it', async () => {
+  const { renderWorkspaceDump } = await import('../lib/cli/dump.js')
+  const ports = await roundsWorkspace({ mode: 'human' })
+  await planFirstRound(ports)
+  await planSecondRound(ports)
+
+  const text = renderWorkspaceDump(ports.store, { config: ports.config })
+
+  assert.match(text, /proposal\s+r1-h3/)
+  assert.match(text, new RegExp(`intents anchor --candidate-id r1-h3 --commit ${ports.seals.get('r1-h3')}`))
+  assert.match(text, /anchor\s+r1-h1/, 'the run is still on the old code base, and the page says so')
+  ports.store.close()
+})
+
+test('a run that never rolled prints no code base section: nothing changed is nothing to explain', async () => {
+  const { renderWorkspaceDump } = await import('../lib/cli/dump.js')
+  const store = Store.open(mkdtempSync(join(tmpdir(), 'reprise-anchor-')))
+
+  const text = renderWorkspaceDump(store, {})
+
+  assert.equal(/code base/.test(text), false)
+  store.close()
+})
+
 // ------------------------------------------------------------------ helpers
 
 const AT = 1_761_091_200_000
@@ -255,6 +417,7 @@ async function roundsWorkspace({ mode = 'automatic' } = {}) {
     judge,
     config,
     anchor: { seal: (candidateId) => seals.get(candidateId) ?? 'e'.repeat(40) },
+    seals,
     step: () => stepWorkspace(ports),
   }
   return ports

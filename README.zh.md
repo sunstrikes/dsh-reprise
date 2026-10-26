@@ -151,11 +151,12 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 | `candidate.kind` | `'command'` | `command`、`claude` 或 `dsh`——LAND 的实现者 |
 | `candidate.command` | **`command` 时必填** | argv；`{candidate}` 和 `{worktree}` 会被替换 |
 | `runner.repo` / `runner.dir` | **配置 `candidate` 时必填** | 工作区里的仓库；工作树创建的位置 |
-| `runner.base_ref` | git 默认值 | 候选从中拉分支的那个 commit |
+| `runner.base_ref` | git 默认值 | 候选从中拉分支的那个 commit；代码基滚动之后以锚点为准（见 `rounds.anchor`） |
 | `model.command` | **配置了 `rounds` 时必填** | 每个判断相位都通过这个 argv 触达模型 |
 | `rounds.metric.name` / `.direction` | 取领域包的契约 | 轮次闸门优化的那一个指标；重述它就是让这次运行指向另一个目标 |
 | `rounds.metric.contract_ref` | 契约自己的 `name` | 指向已冻结的指标契约（metric contract）的指针 |
 | `rounds.max_rounds` / `.candidates_per_round` | `3` / `2` | 轮次工作流的形状 |
+| `rounds.anchor` | `'automatic'` | 谁可以把代码基往前滚：`automatic` 在轮次之间按双支配规则（同时支配当前锚点与已冻结的基线）自动滚；`human` 只在 `anchor-pending/` 写一份待审批，等 `dsh-reprise intents anchor --candidate-id … --commit …`。两种模式都不动差分分母 |
 | `rounds.retry.base_ms` / `.max_ms` / `.max_attempts` | `60000` / `3600000` / `3` | artifact 被拒后的退避，退到最后交给人 |
 | `stop.max_rounds` | `3` | `0` 关闭这条规则 |
 | `stop.max_no_improvement_rounds` / `.consecutive_empty_rounds` | `0`（关闭） | 可选启用的判停规则 |
