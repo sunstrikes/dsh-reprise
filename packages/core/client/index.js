@@ -95,6 +95,7 @@ window.__ModuleLoader__.load({
       'panel.title': 'Reprise',
       'panel.mode': 'read-only',
       'panel.loading': 'Reading the fact plane…',
+      'panel.sharedFailed': 'The page modules did not load ({reason}) — asking again.',
 
       'phase.noFacts': 'no facts yet',
       'phase.notRecorded': 'phase not recorded',
@@ -302,6 +303,7 @@ window.__ModuleLoader__.load({
       'panel.title': '复现',
       'panel.mode': '只读',
       'panel.loading': '正在读取事实库…',
+      'panel.sharedFailed': '页面模块没取到（{reason}）——正在重试。',
 
       'phase.noFacts': '还没有任何事实',
       'phase.notRecorded': '相位未记录',
@@ -506,6 +508,12 @@ window.__ModuleLoader__.load({
      * dynamic `import()` is all the browser needs — and it keeps one formatter and one vocabulary in
      * charge of both surfaces. `SHARED` is a module-level cache rather than React state because it
      * never changes: the first mount pays for the import, every render after it is synchronous.
+     *
+     * A failed import is *not* cached: those two routes are mounted by the Host half of the plugin,
+     * and a Host that loaded this bundle before those routes existed (or that was reloaded while the
+     * route table stayed put) answers 404 to them. Caching the rejection would leave the panel
+     * saying "reading the fact plane" for the lifetime of the window — the silent staleness this
+     * whole view exists to remove — so the next attempt asks again, and `Panel` says why meanwhile.
      */
     const SHARED = { format: null, words: null }
     let importing = null
@@ -513,11 +521,17 @@ window.__ModuleLoader__.load({
     function loadShared() {
       if (SHARED.format !== null && SHARED.words !== null) return Promise.resolve(SHARED)
       if (importing === null) {
-        importing = Promise.all([import(FORMAT_URL), import(STATES_URL)]).then(([format, words]) => {
-          SHARED.format = format
-          SHARED.words = words
-          return SHARED
-        })
+        importing = Promise.all([import(FORMAT_URL), import(STATES_URL)]).then(
+          ([format, words]) => {
+            SHARED.format = format
+            SHARED.words = words
+            return SHARED
+          },
+          (error) => {
+            importing = null
+            throw error
+          },
+        )
       }
       return importing
     }
@@ -717,18 +731,40 @@ window.__ModuleLoader__.load({
      */
     function Panel({ t }) {
       const [shared, setShared] = useState(null)
+      const [failure, setFailure] = useState(null)
       useEffect(() => {
         let alive = true
-        void loadShared().then((loaded) => {
-          if (alive) setShared(loaded)
-        })
+        let timer = null
+        const attempt = () => {
+          void loadShared().then(
+            (loaded) => {
+              if (!alive) return
+              setShared(loaded)
+              setFailure(null)
+            },
+            (error) => {
+              if (!alive) return
+              // Say which module and why, in the dictionary's words, and keep asking: the usual cause
+              // is a Host whose route table predates these two files, which a reload of the plugin
+              // repairs. A panel that waits forever instead is the failure nobody can diagnose.
+              setFailure(error instanceof Error ? error.message : String(error))
+              timer = setTimeout(attempt, POLL_MS)
+            },
+          )
+        }
+        attempt()
         return () => {
           alive = false
+          if (timer !== null) clearTimeout(timer)
         }
       }, [])
       if (shared === null) {
         return h('div', { className: 'reprise', 'data-mount': 'panel' }, [
-          h('p', { className: 'empty', key: 'loading' }, say(t, 'panel.loading')),
+          h(
+            'p',
+            { className: failure === null ? 'empty' : 'warning', key: 'loading' },
+            failure === null ? say(t, 'panel.loading') : say(t, 'panel.sharedFailed', { reason: failure }),
+          ),
         ])
       }
       return h(Dashboard, { t, shared })
