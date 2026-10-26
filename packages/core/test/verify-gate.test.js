@@ -324,7 +324,7 @@ test('a recheck of a tree that moved on is not a conflict — it is why the retr
   assert.equal(
     store.eventsFor('c1').some((event) => event.payload?.status === 'conflict'),
     false,
-    'a tree that moved on is stale, not contradictory — nothing was flagged for a human',
+    'a tree that moved on is not reproducible (reason: tree_moved), not contradictory — nothing was flagged for a human',
   )
   store.close()
 })

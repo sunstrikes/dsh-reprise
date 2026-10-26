@@ -486,7 +486,8 @@ async function land(ports, candidateId, state) {
  * Before a second attempt is asked for, the first attempt's record is recomputed from its own
  * evidence. That is what "recomputable" buys: a record that cannot be reproduced from the bytes it
  * claims to have checked is a contradiction (`conflict`), while a tree that simply moved on is
- * `stale` — and that is precisely why a retry can legitimately pass.
+ * `reproducible: false, reason: 'tree_moved'` — not a fifth state, and precisely why a retry can
+ * legitimately pass.
  */
 async function verify(ports, candidateId, state) {
   const { store, clock, judge, log } = ports
@@ -502,8 +503,14 @@ async function verify(ports, candidateId, state) {
     const prior = priorRecord(ports, candidateId, attempt - 1)
     if (prior !== undefined) {
       const recheck = recheckReport(prior, { worktreeDir })
-      log?.(`${candidateId}: attempt ${attempt - 1} rechecks ${recheck.status}`)
-      if (recheck.status === 'conflict') {
+      // The state is one of the four; `reproducible`/`reason` say whether the *tree* still lets the
+      // record be re-derived. Only a contradiction is terminal — a tree that moved on is exactly the
+      // case a second attempt is for, which is why the two are separate fields.
+      log?.(
+        `${candidateId}: attempt ${attempt - 1} rechecks ${recheck.state}` +
+          (recheck.reproducible ? '' : ` (${recheck.reason})`),
+      )
+      if (recheck.state === 'conflict') {
         return rejectCandidate(
           ports,
           candidateId,
