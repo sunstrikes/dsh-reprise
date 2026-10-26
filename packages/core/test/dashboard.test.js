@@ -11,6 +11,10 @@
  * The last test is the integration one: it mounts the **real** `packages/ui` package against a fake
  * connection shaped like the host's registry, which is the only way to know this seam's two halves
  * still agree about the argument names.
+ *
+ * `notice` is asserted as an **argument** here, never as rendered output: it is what this package
+ * promises the UI when a run was refused (`refused-run-dashboard.test.js` mounts the same seam through
+ * a whole cordis root), and where the page puts the sentence is `packages/ui`'s test to make.
  */
 import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
@@ -57,7 +61,28 @@ test('a UI package mounts its routes on the connection service and hands back no
   assert.equal(registered.length, 1)
   assert.equal(registered[0].connection, connection, 'the UI mounts on the host surface; this package never owns a route')
   assert.equal(registered[0].workspace, '/tmp/workspace', 'and it reads one workspace, not a session')
+  assert.equal(registered[0].notice, undefined, 'a run that is ticking has no apology to pass along')
   assert.equal(result.routes, 1)
+})
+
+test('the reason the loop is not ticking reaches the UI as a note, word for word', async () => {
+  // This seam is what mounts the page for a *refused* configuration (`boot.js`'s `displayForHost`), so
+  // the sentence has to arrive unedited: the kernel does not know where a note is rendered, and the
+  // page is the only caller that can decide. What the UI does with it is `packages/ui`'s test.
+  const registered = []
+  const result = await mountDashboard({
+    connection: fakeConnection(),
+    workspace: '/tmp/workspace',
+    notice: 'this run is not ticking: domain must be the directory of one domain pack',
+    importUi: async () => ({
+      registerRoutes: (options) => registered.push(options),
+    }),
+  })
+
+  assert.equal(result.mounted, true)
+  assert.equal(registered.length, 1)
+  assert.equal(registered[0].notice, 'this run is not ticking: domain must be the directory of one domain pack')
+  assert.equal(registered[0].workspace, '/tmp/workspace', 'the notice rides along with the directory, not instead of it')
 })
 
 test('no UI package is a reason, never an exception', async () => {

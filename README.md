@@ -158,6 +158,12 @@ Three absences degrade instead of failing, by design: no `timer` service means t
 points); no `connection` service means no dashboard; a workspace that cannot be opened or a config that
 cannot work is one log line and a host that keeps booting. **None of these three appear as an error.**
 
+A *refused* run configuration is not one of those absences, and it no longer takes the page with it.
+The dashboard mounts on the workspace the configuration still names and says why the loop is silent:
+the reason rides the overview's `notes` — and, on a workspace with no facts yet, the one paragraph that
+page draws — so the page shows the facts already recorded and never pretends the loop is running.
+A configuration that cannot name a workspace at all is the one case that still leaves nothing to mount.
+
 The `@dsh-reprise/memory` bundle is optional and separate (row `reprise-memory`); it adds the injection
 packet as a `dsh-mnemon` Source. Nothing in `packages/core` imports it.
 

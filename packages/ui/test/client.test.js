@@ -143,3 +143,24 @@ test('the page draws the four observability panels, because a value nobody rende
   assert.match(page, /\.badge\[data-state='failed'\]/)
   assert.match(page, /\.calls\s*\{/, 'and a style for the call list')
 })
+
+test('the run-wide notice is drawn on the empty page too, so it rides `reason` and not only `notes`', () => {
+  // CODING_STANDARDS §3: the host's notice is only worth sending if the page paints it. Two things
+  // could break that silently, and both are text in this file:
+  //   - the overview short-circuits an envelope with `data: null` (the state a refused run is in, with
+  //     no `workspace.db` yet) and draws exactly one paragraph there — `answer.reason`. A notice sent
+  //     only as a note would be a string nobody reads in the case it exists for, which is why
+  //     `routes.js` folds it into `reason` as well;
+  //   - a page with data draws `notes`, which is where a notice normally rides.
+  const source = read('dashboard.js')
+  const start = source.indexOf('function renderOverview')
+  const emptyBranch = source.slice(start, source.indexOf('const data = answer.data', start))
+
+  assert.match(emptyBranch, /answer\?\.data === null/, 'the overview still short-circuits an envelope with no data')
+  assert.match(emptyBranch, /answer\?\.reason/, 'and that branch draws `reason`, the field the notice is folded into')
+  assert.match(
+    source,
+    /for \(const note of answer\.notes \?\? \[\]\)/,
+    'a page with data draws `notes`, where a notice normally rides',
+  )
+})

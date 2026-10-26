@@ -15,7 +15,7 @@
  * @module
  */
 
-import { resolveConfig } from './config.js'
+import { declaredWorkspace, resolveConfig } from './config.js'
 import { runnerLayout } from './worktrees.js'
 
 const messageOf = (error) => (error instanceof Error ? error.message : String(error))
@@ -112,14 +112,21 @@ export function describeRunLine(config) {
 }
 
 /**
- * Resolve the configuration, report the verdict, and hand back the normalised config to mount.
+ * Resolve the configuration, report the verdict, and hand back what `resolveConfig` said.
  *
- * `undefined` means "do not tick" — not "something went wrong". Every refusal is already on the log,
- * and the host keeps booting, because a misconfigured workspace is one plugin's problem.
+ * The verdict is returned **whole** — `{ok: true, config, warnings}` or `{ok: false, problem,
+ * problems}` — rather than collapsed to a config or `undefined`. The reason a run may not start is
+ * not only a log line any more: a refused run still mounts its read-only page (`displayForHost`
+ * below), and that page is where the operator reads what is wrong. Answering `undefined` here would
+ * leave the page with the one thing it cannot render — no reason at all.
+ *
+ * Nothing in this function throws: a misconfigured workspace is one plugin's problem, so every
+ * refusal is a value the caller decides about.
  *
  * @param {object} raw the bundle-patch / loader configuration
  * @param {(message: string, detail?: unknown) => void} log
- * @returns {object | undefined} `{ok, config, warnings, problems}` when the run may start
+ * @returns {{ok: true, config: object, problems: string[], warnings: object[]}
+ *         | {ok: false, problem: string, problems: string[], warnings: object[]}}
  */
 export function resolveForHost(raw, log) {
   log('applied', { note: 'the package loaded at host boot; the ticking half waits for the timer' })
@@ -128,14 +135,16 @@ export function resolveForHost(raw, log) {
   try {
     resolved = resolveConfig(raw)
   } catch (error) {
+    // A resolver that throws is a bug, not a configuration — but the display half still needs a
+    // sentence to show, and the sentence the log just got is the honest one.
     log(`refusing to start: ${messageOf(error)}`)
-    return undefined
+    return { ok: false, problem: messageOf(error), problems: [messageOf(error)], warnings: [] }
   }
 
   if (!resolved.ok) {
     log(`not ticking: ${resolved.problem}`)
     for (const problem of resolved.problems.slice(1)) log(`also not ticking: ${problem}`)
-    return undefined
+    return resolved
   }
 
   // "What is this host running?" — answered from the resolved configuration, so the log cannot claim
@@ -146,4 +155,43 @@ export function resolveForHost(raw, log) {
     log(`[${warning.severity}] ${warning.code}: ${warning.message}`, { code: warning.code, label: warning.label })
   }
   return resolved
+}
+
+/**
+ * What the **read-only half** can show, whether or not the run half is allowed to tick.
+ *
+ * The coupling this removes: before it, "the run configuration was refused" and "there is no
+ * dashboard" were the same fact, because `apply` returned early on the refusal and never plugged the
+ * display plugin — every route then answered 404 while the client bundle still drew the page, which
+ * is a blank screen with no explanation, at the one moment an explanation is most useful. A page
+ * that reads a workspace needs a directory, not a working run.
+ *
+ * So: a valid run answers its own workspace and no notice. A refused run answers the directory
+ * `declaredWorkspace` can still name, plus `notice` — one sentence the overview envelope renders as
+ * a note, because a page that shows numbers without saying the loop is stopped is worse than no page.
+ * When not even a directory can be named, the answer is `undefined` and one log line says why: a
+ * dashboard mounted with no workspace would only be a second way of saying "nothing".
+ *
+ * @param {object} raw the same configuration `resolveForHost` was given
+ * @param {{ok: boolean, config?: object, problem?: string}} resolved `resolveForHost`'s answer
+ * @param {(message: string, detail?: unknown) => void} [log]
+ * @param {{cwd?: string, env?: Record<string, string | undefined>,
+ *         readFile?: (path: string) => string}} [options] the same resolution seams `config.js` takes,
+ *   so a test can pin both a configuration and the environment that produced it.
+ * @returns {{workspaceDir: string, notice: string | undefined} | undefined}
+ */
+export function displayForHost(raw, resolved, log = () => {}, { cwd, env, readFile } = {}) {
+  if (resolved?.ok === true) return { workspaceDir: resolved.config.workspaceDir, notice: undefined }
+
+  // The refused path reads the workspace declaration on its own: the run configuration might be
+  // unusable for a reason that has nothing to do with paths (a missing domain pack), and the page
+  // still has a directory to read in that case.
+  const workspace = declaredWorkspace(raw, { cwd, env, readFile })
+  if (workspace.problem !== undefined) {
+    log(`dashboard not mounted: the run was refused and no workspace directory could be named either (${workspace.problem})`)
+    return undefined
+  }
+
+  const problem = resolved?.problem ?? 'the run configuration could not be resolved'
+  return { workspaceDir: workspace.dir, notice: `this run is not ticking: ${problem}` }
 }

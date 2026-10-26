@@ -20,6 +20,10 @@
  *     started. Every other path keeps the host-cwd rule.
  *   - `runner.keep` defaults to `true`: the default run removes nothing, so a finished run's trees are
  *     still on disk when someone asks where they went.
+ *
+ * The workspace precedence is pinned twice on purpose: through `resolveConfig` (the run) and directly
+ * on `declaredWorkspace` (the same question asked by the read-only page about a run that was refused).
+ * They are one function, and the last test here would go red if they ever became two.
  */
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
@@ -27,7 +31,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { resolveConfig } from '../lib/config.js'
+import { declaredWorkspace, resolveConfig } from '../lib/config.js'
 
 const LOCAL = { kind: 'local', command: ['node', 'metric.mjs'] }
 
@@ -89,6 +93,60 @@ test('with neither a workspace nor DSH_REPRISE_WORKSPACE the refusal names both 
   assert.equal(resolved.ok, false)
   assert.match(resolved.problem, /workspace/, 'the key is named')
   assert.match(resolved.problem, /DSH_REPRISE_WORKSPACE/, 'and so is the environment variable, not just the YAML key')
+})
+
+// ------------------------------------------- the workspace, asked of the one owner of the order
+
+test('declaredWorkspace picks the same directory resolveConfig would, and says which source won', () => {
+  const dir = tempDir()
+  const file = configFile(dir, { workspace: 'from-file', executor: LOCAL })
+  const cases = [
+    {
+      name: 'an inline workspace beats both the file and the environment',
+      raw: { workspace: './from-inline', config_file: file },
+      env: { DSH_REPRISE_WORKSPACE: '/srv/from-env' },
+      expected: { dir: join('/tmp/elsewhere', 'from-inline'), source: 'config' },
+    },
+    {
+      name: "the file's workspace beats the environment, resolved against the file's own directory",
+      raw: { config_file: file },
+      env: { DSH_REPRISE_WORKSPACE: '/srv/from-env' },
+      expected: { dir: join(dir, 'from-file'), source: 'config_file' },
+    },
+    {
+      name: 'the environment is last, and a relative value there resolves against the host cwd',
+      raw: {},
+      env: { DSH_REPRISE_WORKSPACE: 'from-env' },
+      expected: { dir: join('/tmp/elsewhere', 'from-env'), source: 'env' },
+    },
+  ]
+
+  for (const { name, raw, env, expected } of cases) {
+    assert.deepEqual(declaredWorkspace(raw, { cwd: '/tmp/elsewhere', env }), expected, name)
+    const resolved = resolveConfig(
+      { domain: 'a-domain-pack', executor: LOCAL, ...raw },
+      { cwd: '/tmp/elsewhere', env, loadDomain: () => PACK },
+    )
+    assert.equal(resolved.ok, true, `${name}: ${resolved.problems?.join('; ')}`)
+    assert.equal(resolved.config.workspaceDir, expected.dir, `${name}: one answer, two readers`)
+    assert.equal(resolved.config.workspaceSource, expected.source, `${name}: and the config records it`)
+  }
+})
+
+test('declaredWorkspace names both ways to supply a workspace when there is none anywhere', () => {
+  const declared = declaredWorkspace({}, { cwd: '/tmp/elsewhere', env: {} })
+
+  assert.equal(declared.dir, undefined)
+  assert.match(declared.problem, /workspace/, 'the key is named')
+  assert.match(declared.problem, /DSH_REPRISE_WORKSPACE/, 'and the environment variable, not just the YAML key')
+})
+
+test('declaredWorkspace answers the config_file refusal when the file cannot be read', () => {
+  const missing = join(tempDir(), 'nowhere.json')
+  const declared = declaredWorkspace({ config_file: missing }, { cwd: '/tmp/elsewhere', env: {} })
+
+  assert.equal(declared.dir, undefined, 'no directory can be named from a file nobody could read')
+  assert.match(declared.problem, /nowhere\.json/, 'and the refusal quotes the path, exactly as the run does')
 })
 
 // ----------------------------------------------------------- the configuration file

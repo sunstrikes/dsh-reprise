@@ -142,6 +142,10 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 （cordis 对这两种情况的报告一模一样，这也是本包有两个入口的原因）；没有 `connection` 服务意味着没有
 看板；打不开的工作区或跑不起来的配置只是一行日志，宿主照常启动。**这三种情况都不会以错误的形式出现。**
 
+被校验**拒绝**的跑配置不属于上面三种缺失，也不会再连看板一起带走：看板仍会挂到配置点名的工作区上，并把
+「回路为什么静默」写进 overview 的 `notes`——工作区还没有任何事实时，那句话就是该页唯一的一段文字。所以
+看板照旧显示工作区里已有的事实，但不会假装回路在跑。连工作区都点不名的配置，是唯一仍然挂不上看板的情况。
+
 `@dsh-reprise/memory` 插件包是可选的、独立的（行 `reprise-memory`），它把注入包（injection packet）
 作为一个 `dsh-mnemon` Source 暴露出来。`packages/core` 里没有任何东西 import 它。
 

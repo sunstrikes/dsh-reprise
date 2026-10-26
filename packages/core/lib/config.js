@@ -40,6 +40,49 @@ const isText = (value) => typeof value === 'string' && value.trim() !== ''
 const isCommand = (value) => Array.isArray(value) && value.length > 0 && value.every(isText)
 
 /**
+ * The workspace directory a configuration declares — answered without judging the rest of it.
+ *
+ * Two callers ask this question for different reasons and must not get different answers.
+ * `resolveConfig` asks it to decide whether a run may start (no directory, no run), and the display
+ * half (`boot.js`'s `displayForHost`) asks it about a run that was **refused**, because the
+ * read-only page needs a directory to read rather than a working run — and a refusal is exactly when
+ * somebody opens that page. Two accounts of "which directory does this run mean?" would let the boot
+ * log and the page disagree about it, so both come here.
+ *
+ * The precedence is one order: inline `workspace` → the value the run configuration file supplied →
+ * `DSH_REPRISE_WORKSPACE`. The first two share one field after `loadConfigFile`'s shallow merge, which
+ * is what `workspaceFromFile` exists to tell apart. `dir` is absolute in every case: an inline or
+ * environment value was typed in the host's cwd and means what it says there, while a value inside a
+ * configuration file was already resolved against *that file's* directory (`run-config.js`'s one
+ * differing path rule) — resolving it again against `cwd` cannot move an absolute path.
+ *
+ * @param {unknown} raw the object the host's bundle patch, the `run` CLI, or a test hands over
+ * @param {{cwd?: string, env?: Record<string, string | undefined>, readFile?: (path: string) => string,
+ *         loaded?: object}} [options] `loaded` is `loadConfigFile`'s result when the caller has already
+ *   read the file (the boot path has, and one run is not read twice); omit it and this reads the file
+ *   itself, which is what a refused boot does — it has the raw configuration, not the reading.
+ * @returns {{dir: string, source: 'config' | 'config_file' | 'env'} | {problem: string}}
+ */
+export function declaredWorkspace(raw = {}, { cwd = process.cwd(), env = process.env, readFile, loaded } = {}) {
+  const read = loaded ?? loadConfigFile({ raw, cwd, env, readFile })
+  if (!read.ok) return { problem: read.problems[0] }
+
+  const merged = read.raw ?? {}
+  if (isText(merged.workspace)) {
+    return { dir: resolvePath(cwd, merged.workspace), source: read.workspaceFromFile ? 'config_file' : 'config' }
+  }
+  // The environment is last because a value typed into the configuration is the more specific
+  // statement, and first among the two when the configuration names none.
+  if (isText(env?.DSH_REPRISE_WORKSPACE)) return { dir: resolvePath(cwd, env.DSH_REPRISE_WORKSPACE), source: 'env' }
+
+  return {
+    problem:
+      'workspace must be the path of the directory this run owns, e.g. workspace: .reprise/run-1 — ' +
+      'or set DSH_REPRISE_WORKSPACE (a relative path in either place resolves against the host cwd)',
+  }
+}
+
+/**
  * Validate and normalise one plugin/CLI configuration.
  *
  * @param {unknown} raw the object the host's bundle patch, the `run` CLI, or a test hands over
@@ -75,19 +118,11 @@ export function resolveConfig(
   }
   const merged = loaded.raw
 
-  // Two ways to name the workspace, in this order: the plugin configuration (inline, or the value the
-  // configuration file supplied), then the environment. The environment exists because a launcher
-  // that starts one run per task should not have to write a file to say where that task's workspace
-  // is — and a refusal has to name both, or the reader is left to guess which knob this build has.
-  const declaredWorkspace = isText(merged.workspace) ? merged.workspace : isText(env?.DSH_REPRISE_WORKSPACE) ? env.DSH_REPRISE_WORKSPACE : undefined
-  const workspaceSource =
-    !isText(merged.workspace) ? 'env' : loaded.workspaceFromFile ? 'config_file' : 'config'
-  if (declaredWorkspace === undefined) {
-    problems.push(
-      'workspace must be the path of the directory this run owns, e.g. workspace: .reprise/run-1 — ' +
-        'or set DSH_REPRISE_WORKSPACE (a relative path in either place resolves against the host cwd)',
-    )
-  }
+  // The workspace is the one key whose answer survives a refused run (the dashboard reads it), so the
+  // order in which three sources win lives in `declaredWorkspace` above rather than here — and this
+  // call passes the reading it just did, so a run's file is opened once and not twice.
+  const workspace = declaredWorkspace(raw, { cwd, env, readFile, loaded })
+  if (workspace.problem !== undefined) problems.push(workspace.problem)
   raw = merged
 
   // The pack is loaded here, at boot, because every way it can be wrong is a way the run cannot
@@ -204,15 +239,17 @@ export function resolveConfig(
     ...raw,
     // Recorded so the boot log and the dashboard can answer "where did this value come from?" without
     // guessing: an operator who has just set an environment variable needs to know it was read.
-    workspace: declaredWorkspace,
-    workspaceSource,
+    // `workspace` and `workspaceDir` carry the same absolute directory: the first is the name older
+    // readers use, and two spellings of one path must not be able to drift apart in one object.
+    workspace: workspace.dir,
+    workspaceSource: workspace.source,
     // The whole contract, not the two fields the readers used to need: the tolerance, the guardrail
     // and the window reading are part of "which metric decides", and a run that dropped them would
     // leave the ranking and the gate reading a contract nobody wrote.
     metrics: { ...metricContract },
     executor: { kind: 'local', ...executor },
     interval_ms: intervalMs,
-    workspaceDir: resolvePath(cwd, declaredWorkspace),
+    workspaceDir: workspace.dir,
     domainPack: pack,
   }
 
