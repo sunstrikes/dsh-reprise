@@ -153,14 +153,28 @@ export function createWorktreeRunner({ repo, dir, base_ref: baseRef = 'HEAD' }, 
 
       mkdirSync(worktreesDir, { recursive: true })
       if (!existsSync(path)) {
-        const result = gitRun(['worktree', 'add', '--detach', path, ref], { cwd: repoDir })
+        let result = gitRun(['worktree', 'add', '--detach', path, ref], { cwd: repoDir })
+        let pruned = false
+        // A crash (or a workspace copied without its worktrees) leaves the *registration* behind in
+        // the runner's repository while the directory is gone. git then refuses to re-create it
+        // ("missing but already registered"), which used to end the whole run with an uncaught error
+        // — the one state a recovery path must be able to walk out of. Prune exactly that case and
+        // try once more; anything else keeps the loud failure below.
+        if (result?.status !== 0 && /already registered|already exists/i.test(String(result?.stderr ?? ''))) {
+          gitRun(['worktree', 'prune'], { cwd: repoDir })
+          result = gitRun(['worktree', 'add', '--detach', path, ref], { cwd: repoDir })
+          if (result?.status === 0) {
+            pruned = true
+            log(`runner: pruned a stale worktree registration for ${candidateId}`)
+          }
+        }
         if (result?.error || result?.status !== 0) {
           throw new Error(
             `the runner could not create a worktree for ${candidateId} from ${ref} in ${repoDir}: ` +
               `${(result?.stderr ?? result?.error?.message ?? '').toString().trim() || 'git said nothing'}`,
           )
         }
-        log(`runner: created worktree ${path} from ${ref}`)
+        if (!pruned) log(`runner: created worktree ${path} from ${ref}`)
       }
       created.set(candidateId, path)
       return path
