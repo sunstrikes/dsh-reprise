@@ -25,6 +25,7 @@ Two rules hold the package together:
 | `GET /api/reprise/call?ref=<model_call:site:subject[:ref]>` | one judgement, opened: the prompt it read, the facts, the raw response, the answer object |
 | `GET /api/reprise/page` | the page itself (plain ESM module next to it; no build step) |
 | `GET /api/reprise/dashboard.js` | the page's module |
+| `GET /api/reprise/format.js` | the one formatting source both clients import: clock times, numbers, percentages, cursors |
 
 Two answers on the overview are deliberately `null` rather than `0`: `cards.inUse`, and the orphan /
 foreign job lists. The page is session-free and has no platform port, so it has not read the
@@ -75,8 +76,9 @@ order would be a second definition of "the facts, in order".
 
 ## Client
 
-`client/index.html` and `client/dashboard.js` are plain ESM served from this package — nothing to
-build. Colour comes from the host's `--dsw-alias-*` theme tokens with CSS system colours
+`client/index.html`, `client/dashboard.js` and `client/format.js` are plain ESM served from this
+package — nothing to build. `format.js` imports nothing and is imported by both clients (the page as
+`./format.js`, the Web UI panel by the route URL), so one formatter answers for both. Colour comes from the host's `--dsw-alias-*` theme tokens with CSS system colours
 (`Canvas`, `CanvasText`, `ButtonBorder`, `AccentColor`) as the fallback when the token sheet is not
 loaded; there is no palette and no hard-coded colour. The four gate states are distinguished by name
 and border weight rather than by hue.

@@ -18,7 +18,8 @@
  */
 
 import assert from 'node:assert/strict'
-import { dirname } from 'node:path'
+import { writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
 
 import { tick } from '../../core/lib/loop.js'
@@ -162,6 +163,23 @@ test('the rounds view lists each round with its candidates and whether it moved 
   assert.equal(answer.data[1].best.value, 0.7401)
 })
 
+test('a round best carries the metric it is measured in, so no renderer has to guess one', async () => {
+  // Ticket #2: the page printed `undefined=0.7211` because `rounds()[i].best` was `{candidate_id,
+  // value}` while three renderers (page, panel, dump) all wrote `best.metric`. The projection has the
+  // metric contract in hand where it builds the round history, so the fix belongs there and not in a
+  // `${best.metric ?? '?'}` in each of the three.
+  const { dir } = await concludedWorkspace()
+
+  const rows = roundsHandler(dir, {}).data
+
+  assert.deepEqual(
+    rows.map((entry) => entry.best.metric),
+    ['auc', 'auc'],
+    'every round best names its metric',
+  )
+  assert.equal(roundsHandler(dir, {}).data[1].best.candidate_id, 'r2-c1', 'and still names the candidate that set it')
+})
+
 test('the conclusion view names the best candidate and what it is compared against', async () => {
   const { dir } = await concludedWorkspace({ stop: { max_rounds: 2 }, conclude: true })
 
@@ -173,8 +191,73 @@ test('the conclusion view names the best candidate and what it is compared again
   assert.equal(answer.data.best.value, 0.7401)
   assert.equal(answer.data.against.parent, 'baseline-0', 'the comparison group is a frozen binding, not a memory')
   assert.equal(answer.data.against.best.value, 0.7, 'and the previous best sits next to it')
+  assert.equal(answer.data.against.best.metric, 'auc', 'a previous best without its metric is a bare number')
   assert.equal(answer.data.stopped.stopped, true)
   assert.equal(answer.data.stopped.rule, 'max_rounds', 'the conclusion is the recorded rule, in the words recorded then')
+})
+
+/**
+ * One finished candidate and nothing else: a best result, and nothing comparable to measure it
+ * against. This is the state the conclusion line has to render as "no comparable baseline" instead of
+ * a dash (`ticket #2` checkbox 6).
+ */
+async function singleResultWorkspace() {
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { budget: { gpu_hours_limit: 4 }, stop: { max_rounds: 0 } }) })
+  seed(ports.store, ports.config)
+  await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
+  const dir = dirname(ports.store.path)
+  ports.store.close()
+  return dir
+}
+
+/** A workspace with a frozen baseline on disk, which is what makes the comparison a baseline claim. */
+async function frozenBaselineWorkspace(value) {
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { budget: { gpu_hours_limit: 4 }, stop: { max_rounds: 0 } }) })
+  seed(ports.store, ports.config)
+  await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7401 } })
+  const dir = dirname(ports.store.path)
+  ports.store.close()
+  writeFileSync(join(dir, 'baseline.json'), JSON.stringify({ metric: 'auc', value }))
+  return dir
+}
+
+test('the comparison publishes the change as a percentage, so no renderer divides two numbers itself', async () => {
+  // The page paints "＋5.73%" and the panel will paint the same number. Neither may compute it: the
+  // division is a derivation, and two derivations of one number is how a page and a dump start
+  // disagreeing. 0.0401 spread over a 0.7 comparison group is 5.728571%.
+  const { dir } = await concludedWorkspace()
+
+  const comparison = conclusionHandler(dir, {}).data.comparison
+
+  assert.equal(comparison.group.kind, 'previous-best', 'fixture: the previous round is the only thing to compare against')
+  assert.equal(comparison.change, 0.0401)
+  assert.equal(comparison.changePercent, 5.728571, 'the same change, as a percentage of the group')
+  assert.equal(comparison.measured.round, 2, 'and what we measured says which round it came from')
+})
+
+test('against a frozen baseline the percentage is a different claim, and the comparison names which one', async () => {
+  // 0.0201 over a frozen 0.72 is 2.791667%. Same shape as the previous-best case above and a
+  // different sentence on the page: "against the frozen baseline", never "against the previous best".
+  const dir = await frozenBaselineWorkspace(0.72)
+
+  const comparison = conclusionHandler(dir, {}).data.comparison
+
+  assert.equal(comparison.group.kind, 'baseline')
+  assert.equal(comparison.group.value, 0.72)
+  assert.equal(comparison.change, 0.0201)
+  assert.equal(comparison.changePercent, 2.791667)
+})
+
+test('a run with nothing to compare against says so: no group, and no percentage invented for it', async () => {
+  const dir = await singleResultWorkspace()
+
+  const comparison = conclusionHandler(dir, {}).data.comparison
+
+  assert.equal(comparison.measured.candidate_id, 'r1-c1', 'there is a result')
+  assert.equal(comparison.group, null, 'and nothing to measure it against')
+  assert.equal(comparison.change, null)
+  assert.equal(comparison.changePercent, null, 'a percentage against no group is a made-up number')
+  assert.equal(comparison.better, null)
 })
 
 test('a rejected candidate carries the four-state verdict that stopped it', async () => {

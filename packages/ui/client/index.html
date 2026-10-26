@@ -79,6 +79,52 @@
         font-size: 0.75rem;
       }
 
+      /*
+       * The conclusion line. It comes before every card because it is the only thing the page asks a
+       * reader to believe: the best number, and the sentence that says what it beat. Nothing here
+       * depends on colour — "behind the baseline" is a word in the sentence, not a red number.
+       */
+      .headline {
+        margin: 0 0 1.25rem;
+        padding-bottom: 1rem;
+        border-bottom: 1px solid var(--reprise-border);
+      }
+
+      .headline-value {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 0.5rem;
+        margin: 0;
+      }
+
+      .headline-number {
+        font-family: var(--reprise-mono);
+        font-size: 2.5rem;
+        font-variant-numeric: tabular-nums;
+        font-weight: 600;
+        line-height: 1;
+        letter-spacing: -0.02em;
+      }
+
+      .headline-unit {
+        color: var(--reprise-dim);
+        font-family: var(--reprise-mono);
+        font-size: 0.8125rem;
+      }
+
+      .headline-sentence,
+      .headline-empty {
+        max-width: 60rem;
+        margin: 0.5rem 0 0;
+        font-size: 0.8125rem;
+        line-height: 1.55;
+      }
+
+      .headline-empty {
+        color: var(--reprise-dim);
+      }
+
       .grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
@@ -274,6 +320,14 @@
       <span class="meta" id="status">connecting…</span>
       <span class="meta" id="cursor"></span>
     </header>
+
+    <!--
+      The conclusion line, first: the best result, what it is measured against, and by how much. The
+      page's own title sits above it in the masthead; everything below is evidence for this.
+    -->
+    <section class="headline" id="headline" aria-live="polite">
+      <p class="headline-empty">waiting for facts…</p>
+    </section>
 
     <div class="grid">
       <section class="card" id="overview" aria-live="polite">

@@ -140,10 +140,17 @@ export const ROUTES = [
   { name: 'call', path: '/api/reprise/call', handler: callHandler },
 ]
 
-/** Static files the page needs. Served from this package so there is no build artefact to ship. */
+/**
+ * Static files the page needs. Served from this package so there is no build artefact to ship.
+ *
+ * `format.js` sits beside `dashboard.js` on purpose: the page imports it as `./format.js`, which the
+ * browser resolves against the module's own URL, so the two files are one unit that cannot be served
+ * out of step. The Web UI panel imports the same URL later (spec §9.1) — one formatter, two clients.
+ */
 export const ASSETS = [
   { path: '/api/reprise/page', file: 'index.html', contentType: 'text/html; charset=utf-8' },
   { path: '/api/reprise/dashboard.js', file: 'dashboard.js', contentType: 'text/javascript; charset=utf-8' },
+  { path: '/api/reprise/format.js', file: 'format.js', contentType: 'text/javascript; charset=utf-8' },
 ]
 
 /** `?after=…&candidate=…` → a plain object; absent parameters stay absent rather than null. */

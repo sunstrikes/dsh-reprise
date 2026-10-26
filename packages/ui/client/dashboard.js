@@ -8,12 +8,20 @@
  * without the page changing what it asks for.
  *
  * Plain ESM on purpose: the host serves this file directly (there is no bundler in the path and no
- * build artefact to keep in sync), and the page loads it by a relative URL next to itself.
+ * build artefact to keep in sync), and the page loads it by a relative URL next to itself. The second
+ * import — `format.js` — is resolved the same way, against this module's own URL, so both files are
+ * served out of one directory and cannot go out of step.
  *
  * All fact-derived text goes in through `textContent`, never `innerHTML`: candidate ids, verdict
  * messages and artifact paths come from the workspace, and a dashboard is not allowed to become an
  * injection surface for the thing it is watching.
+ *
+ * The page renders; it does not compute. The one thing it asks a reader to believe — the conclusion —
+ * is read out of the projection's own comparison block (what we measured, what against, how much), so
+ * the percentage on this page and the number `dump` prints are the same derivation.
  */
+
+import { EM_DASH, change, clock, cursor, number, percent, stamp } from './format.js'
 
 /**
  * The views this page shows. Paths are absolute because the host mounts them on its own origin.
@@ -52,7 +60,7 @@ export function urlFor(view, { cursor, candidate, ref } = {}) {
 }
 
 /** The card count, or the word for "we could not ask". */
-const cardsInUse = (cluster) => (cluster === undefined ? '—' : cluster.cards.inUse === null ? 'unknown' : cluster.cards.inUse)
+const cardsInUse = (cluster) => (cluster === undefined ? EM_DASH : cluster.cards.inUse === null ? 'unknown' : number(cluster.cards.inUse))
 
 /** One element, with text and listeners attached safely. */
 function el(tag, props = {}, children = []) {
@@ -69,12 +77,17 @@ function el(tag, props = {}, children = []) {
   return node
 }
 
-const now = () => new Date().toLocaleTimeString()
-
-const formatValue = (value) => (value === undefined || value === null ? '—' : String(value))
-
-/** A change, signed, so "better" reads without knowing which direction the metric runs. */
-const signedChange = (value) => (typeof value !== 'number' || !Number.isFinite(value) ? '—' : value > 0 ? `+${value}` : String(value))
+/**
+ * One metric reading, spelled one way: `auc=0.7331`, or `r5-h2 auc=0.7331` when the candidate that
+ * set it is part of the answer.
+ *
+ * Every place the page prints "this candidate scored this much on this metric" goes through here,
+ * because the one thing the old page got wrong in three places at once was assembling that string by
+ * hand next to a raw value — which is how `undefined=0.7211` reached a reader's screen.
+ */
+const measurement = (candidateId, metric, value) =>
+  `${candidateId === null || candidateId === undefined || candidateId === '' ? '' : `${candidateId} `}` +
+  `${metric ?? EM_DASH}=${number(value)}`
 
 /** The state of the page: one cursor per answer, one dedupe set, one bounded stream. */
 const state = {
@@ -119,7 +132,7 @@ async function read(view, options = {}) {
 // ------------------------------------------------------------------ rendering
 
 function stat(label, value) {
-  return el('div', { class: 'stat' }, [el('dt', { text: label }), el('dd', { text: formatValue(value) })])
+  return el('div', { class: 'stat' }, [el('dt', { text: label }), el('dd', { text: value ?? EM_DASH })])
 }
 
 function renderOverview(answer) {
@@ -134,20 +147,23 @@ function renderOverview(answer) {
   const stop = data.stop?.stopped ? `stopped: ${data.stop.rule}` : 'running'
   root.append(
     el('dl', { class: 'stats' }, [
-      stat('phase', data.workspace.phase ?? '—'),
+      stat('phase', data.workspace.phase ?? EM_DASH),
       stat('state', stop),
-      stat('rounds', `${data.rounds.completed}/${data.rounds.total}`),
-      stat('in flight', data.candidates.inFlight.length),
-      stat('rejected', data.candidates.rejected),
-      stat('best', data.best === undefined ? '—' : `${data.best.candidate_id} ${data.best.metric}=${data.best.value}`),
-      stat('GPU h settled', data.spend.settledGpuHours),
-      stat('GPU h in flight', data.spend.inFlightGpuHours),
-      stat('GPU h limit', data.spend.limitGpuHours === 0 ? 'unlimited' : data.spend.limitGpuHours),
-      stat('tokens', data.spend.tokens),
+      stat('rounds', `${number(data.rounds.completed)}/${number(data.rounds.total)}`),
+      stat('in flight', number(data.candidates.inFlight.length)),
+      stat('rejected', number(data.candidates.rejected)),
+      stat(
+        'best',
+        data.best === undefined ? 'no comparable result yet' : measurement(data.best.candidate_id, data.best.metric, data.best.value),
+      ),
+      stat('GPU h settled', number(data.spend.settledGpuHours)),
+      stat('GPU h in flight', number(data.spend.inFlightGpuHours)),
+      stat('GPU h limit', data.spend.limitGpuHours === 0 ? 'unlimited' : number(data.spend.limitGpuHours)),
+      stat('tokens', number(data.spend.tokens)),
       stat('cards in use', cardsInUse(data.cluster)),
-      stat('cards / job', formatValue(data.cluster?.cards?.perJob)),
-      stat('ledger floor', formatValue(data.cluster?.cards?.floor)),
-      stat('waiting', formatValue(data.cluster?.queue?.count)),
+      stat('cards / job', number(data.cluster?.cards?.perJob)),
+      stat('ledger floor', number(data.cluster?.cards?.floor)),
+      stat('waiting', number(data.cluster?.queue?.count)),
     ]),
   )
 
@@ -159,7 +175,7 @@ function renderOverview(answer) {
         class: 'note',
         text:
           `the cluster listing was not read — ${data.cluster.reason}; ` +
-          `${formatValue(data.cluster.cards.floor)} card(s) is what our own ledger supports, not what is running`,
+          `${number(data.cluster.cards.floor)} card(s) is what our own ledger supports, not what is running`,
       }),
     )
   }
@@ -184,7 +200,7 @@ function renderOverview(answer) {
     root.append(
       el('h3', { text: 'why it ended' }),
       el('p', { text: `${data.stop.rule} — ${data.stop.message}` }),
-      el('p', { class: 'dim', text: `limit ${formatValue(data.stop.limit)}, observed ${formatValue(data.stop.observed)}` }),
+      el('p', { class: 'dim', text: `limit ${number(data.stop.limit)}, observed ${number(data.stop.observed)}` }),
     )
   }
 }
@@ -207,10 +223,12 @@ function renderRounds(answer) {
   const body = el('tbody')
   for (const entry of rows) {
     const cells = [
-      el('td', { text: entry.round }),
+      el('td', { text: number(entry.round) }),
       el('td', { text: entry.improving ? 'yes' : 'no' }),
       el('td', { text: entry.empty ? 'yes' : 'no' }),
-      el('td', { text: entry.best === undefined ? '—' : `${entry.best.metric}=${entry.best.value}` }),
+      // `entry.best.metric` is the projection's published metric, not a guess: this cell used to read
+      // `undefined=0.7211` because the round best carried only a value.
+      el('td', { text: entry.best === undefined ? 'no comparable result' : measurement(entry.best.candidate_id, entry.best.metric, entry.best.value) }),
       el(
         'td',
         {},
@@ -266,10 +284,10 @@ function renderCandidate(answer) {
       el('h3', { text: 'why it stopped' }),
       el('p', {}, [
         el('span', { class: 'badge', dataset: { state: rejection.status ?? 'missing' }, text: rejection.status ?? 'no verdict' }),
-        el('span', { text: ` at ${formatValue(rejection.phase)}` }),
+        el('span', { text: ` at ${rejection.phase ?? EM_DASH}` }),
       ]),
       rejection.message ? el('pre', { text: rejection.message }) : el('p', { class: 'dim', text: '(no message recorded)' }),
-      el('p', { class: 'dim', text: `recorded ${new Date(rejection.atMs).toISOString()} (event ${rejection.seq} ${rejection.eventType})` }),
+      el('p', { class: 'dim', text: `recorded ${stamp(rejection.atMs)} (event ${rejection.seq} ${rejection.eventType})` }),
     )
   }
 
@@ -282,7 +300,7 @@ function renderCandidate(answer) {
         detail.gates.map((gate) =>
           el('li', {}, [
             el('span', { class: 'badge', dataset: { state: gate.status }, text: gate.status }),
-            el('span', { text: ` ${formatValue(gate.phase)} (event ${gate.seq})` }),
+            el('span', { text: ` ${gate.phase ?? EM_DASH} (event ${gate.seq})` }),
             gate.message ? el('pre', { text: gate.message }) : null,
           ]),
         ),
@@ -316,7 +334,7 @@ function renderCandidate(answer) {
       { class: 'timeline' },
       detail.timeline.map((event) =>
         el('li', {}, [
-          el('span', { class: 'seq', text: `${event.seq} · ${new Date(event.atMs).toISOString().slice(11, 19)}` }),
+          el('span', { class: 'seq', text: `${event.seq} · ${clock(event.atMs)}` }),
           el('span', { text: `${event.eventType}${event.summary === '' ? '' : ` — ${event.summary}`}` }),
         ]),
       ),
@@ -333,8 +351,8 @@ function renderCandidate(answer) {
         class: 'dim',
         text:
           detail.frontier.best === undefined
-            ? 'best — (no comparable result yet)'
-            : `best ${detail.frontier.best.candidate_id} ${detail.frontier.best.metric}=${detail.frontier.best.value}`,
+            ? 'best: no comparable result yet'
+            : `best ${measurement(detail.frontier.best.candidate_id, detail.frontier.best.metric, detail.frontier.best.value)}`,
       },
     ),
   )
@@ -359,9 +377,108 @@ function renderCandidate(answer) {
   }
 }
 
+/**
+ * The sentence under the big number: what we measured, what against, and how much — in words.
+ *
+ * Three claims, and the wording keeps them apart:
+ *
+ *   - *which result* — the candidate and the round it came from;
+ *   - *against what* — `group.kind` decides. A frozen baseline and the previous best are two
+ *     different claims, and "＋2.79%" means something different in each: the first says the run beat
+ *     the thing it was chartered to beat, the second only that it improved on itself;
+ *   - *how much* — `changePercent`, which the projection divided once. The page does no arithmetic.
+ *
+ * "Worse than the baseline" is not one of the four states (CODING_STANDARDS §2): it is this sentence,
+ * with a word for the direction and no colour anywhere. When the comparison is behind, the sentence
+ * says so plainly; when there is no group at all, it says that instead of printing a dash.
+ */
+function conclusionSentence(comparison) {
+  const measured = comparison.measured
+  const group = comparison.group
+  const where = `The best result came from ${measured.candidate_id} in round ${number(measured.round)}`
+
+  if (group === null || group === undefined) {
+    return (
+      `${where}, but this run recorded no comparable baseline and no earlier round produced a number to ` +
+      `measure it against — so there is no percentage to report.`
+    )
+  }
+
+  const against =
+    group.kind === 'baseline'
+      ? `the frozen baseline ${number(group.value)}`
+      : `the previous best (${group.candidate_id ?? 'no candidate'}, ${number(group.value)})`
+
+  if (typeof comparison.changePercent !== 'number') {
+    // A group of 0 has no relative change — saying "＋∞%" or "＋0.00%" would both be inventions.
+    return `${where}: ${change(comparison.change)} on ${against}, which is a change of no percentage.`
+  }
+
+  const verdict = comparison.better === false ? ' This run is behind what it is measured against, not ahead of it.' : ''
+  return `${where}: ${percent(comparison.changePercent, { sign: true })} against ${against}.${verdict}`
+}
+
+/**
+ * The conclusion line — the first thing on the page, because it is the one thing the page is for:
+ * is this result worth believing, and by how much did it win.
+ *
+ * Every number here comes from the projection's comparison block. The page adds no subtraction, no
+ * division and no opinion about which number is better; it decides only how to *say* what it was
+ * given, including the two states where it cannot say anything (`spec §6.9`):
+ *
+ *   - nothing comparable (`measured === null`) → "No conclusion yet", plus where to look next;
+ *   - a result with nothing to compare it against (`group === null`) → the number, and the reason
+ *     there is no percentage beside it.
+ */
+function renderHeadline(answer) {
+  const root = document.getElementById('headline')
+  root.replaceChildren()
+
+  const data = answer?.data
+  const comparison = data?.comparison
+  if (comparison === null || comparison === undefined) {
+    // No facts at all. A blank headline reads as "nothing to say"; this says what the workspace is
+    // waiting for and where it will appear, which is the difference between an empty state and a bug.
+    const why = answer?.reason
+    root.append(
+      el('p', { class: 'headline-empty', text: 'No conclusion yet.' }),
+      ...(why === undefined || why === null ? [] : [el('p', { class: 'dim', text: why })]),
+      el('p', {
+        class: 'dim',
+        text:
+          'The loop has not ticked here yet: once it does, the first round appears below and the conclusion line ' +
+          'fills in as soon as a candidate reaches a metric.',
+      }),
+    )
+    return
+  }
+
+  const measured = comparison.measured
+  if (measured === null || measured === undefined) {
+    root.append(
+      el('p', { class: 'headline-empty', text: 'No conclusion yet.' }),
+      el('p', {
+        class: 'dim',
+        text:
+          `No candidate has produced a comparable ${comparison.metric ?? 'result'} yet: every candidate was stopped at a gate, ` +
+          'or none has reached the step that reports the number. The candidate inspector below says what each one stopped at.',
+      }),
+    )
+    return
+  }
+
+  root.append(
+    el('p', { class: 'headline-value' }, [
+      el('span', { class: 'headline-number', text: number(measured.value) }),
+      el('span', { class: 'headline-unit', text: comparison.metric ?? '' }),
+    ]),
+    el('p', { class: 'headline-sentence', text: conclusionSentence(comparison) }),
+  )
+}
+
 function renderConclusion(answer) {
   const root = document.getElementById('conclusion')
-  root.replaceChildren(el('h2', { text: 'Conclusion' }))
+  root.replaceChildren(el('h2', { text: 'Measured / published' }))
 
   if (answer?.data === null || answer?.data === undefined) {
     root.append(el('p', { class: 'empty', text: answer?.reason ?? 'no facts recorded yet' }))
@@ -369,44 +486,26 @@ function renderConclusion(answer) {
   }
 
   const data = answer.data
-  if (data.best === undefined) {
-    root.append(el('p', { class: 'empty', text: 'nothing has been established yet — no candidate has a comparable result' }))
-  } else {
-    root.append(
-      el('p', {}, [
-        el('strong', { text: data.best.candidate_id }),
-        el('span', { text: ` ${data.best.metric}=${data.best.value} (round ${data.best.round})` }),
-      ]),
-      el(
-        'p',
-        {
-          class: 'dim',
-          text:
-            data.against === undefined
-              ? 'no comparison group'
-              : `against ${formatValue(data.against.parent)}${
-                  data.against.best === undefined ? '' : ` — previous best ${data.against.best.metric}=${data.against.best.value}`
-                }`,
-        },
-      ),
-    )
-  }
-
   const comparison = data.comparison
   if (comparison?.measured !== null && comparison?.measured !== undefined) {
     root.append(
-      el('h3', { text: 'measured / published' }),
       el('dl', { class: 'stats' }, [
-        stat('we measured', `${comparison.measured.value} (${comparison.measured.candidate_id})`),
-        stat('against', comparison.group === null ? '—' : `${comparison.group.kind} ${comparison.group.value}`),
-        stat('change', signedChange(comparison.change)),
+        stat('we measured', measurement(comparison.measured.candidate_id, comparison.metric, comparison.measured.value)),
+        stat(
+          'against',
+          comparison.group === null
+            ? 'no comparable baseline'
+            : `${comparison.group.kind} ${number(comparison.group.value)}`,
+        ),
+        stat('change', change(comparison.change)),
+        stat('change %', percent(comparison.changePercent, { sign: true })),
         stat(
           'they published',
           comparison.published === null
-            ? '—'
-            : `${comparison.published.method} ${comparison.published.metric}=${comparison.published.value}`,
+            ? 'nothing published'
+            : `${comparison.published.method} ${measurement(null, comparison.published.metric, comparison.published.value)}`,
         ),
-        stat('difference', signedChange(comparison.publishedChange)),
+        stat('difference', change(comparison.publishedChange)),
       ]),
     )
     if (comparison.published === null) {
@@ -419,17 +518,19 @@ function renderConclusion(answer) {
         }),
       )
     }
+  } else {
+    root.append(el('p', { class: 'empty', text: 'nothing has been measured yet — the conclusion line above says what is missing.' }))
   }
 
-  root.append(el('p', { class: 'dim', text: `rounds ${data.rounds} · frontier ${data.frontier.size}` }))
+  root.append(el('p', { class: 'dim', text: `rounds ${number(data.rounds)} · frontier ${number(data.frontier.size)}` }))
   const objectives = data.objectives.map((objective) => `${objective.name} (${objective.direction})`)
-  root.append(el('p', { class: 'dim', text: `objectives ${objectives.length === 0 ? '—' : objectives.join(', ')}` }))
+  root.append(el('p', { class: 'dim', text: `objectives ${objectives.length === 0 ? EM_DASH : objectives.join(', ')}` }))
 
   if (data.stopped?.stopped) {
     root.append(
       el('h3', { text: 'stop decision' }),
       el('p', { text: `${data.stopped.rule} — ${data.stopped.message}` }),
-      el('p', { class: 'dim', text: `limit ${formatValue(data.stopped.limit)}, observed ${formatValue(data.stopped.observed)}` }),
+      el('p', { class: 'dim', text: `limit ${number(data.stopped.limit)}, observed ${number(data.stopped.observed)}` }),
     )
   }
 }
@@ -510,13 +611,13 @@ function renderStream() {
   const recent = state.events.slice(-20).reverse()
   root.append(
     el('table', {}, [
-      el('thead', {}, [el('tr', {}, ['event', 'candidate', 'type', 'summary'].map((label) => el('th', { text: label })))]),
+      el('thead', {}, [el('tr', {}, ['time', 'candidate', 'type', 'summary'].map((label) => el('th', { text: label })))]),
       el(
         'tbody',
         {},
         recent.map((event) =>
           el('tr', {}, [
-            el('td', { text: `${event.wall_clock_ms}` }),
+            el('td', { text: clock(event.wall_clock_ms) }),
             el('td', { text: event.candidate_id }),
             el('td', { text: event.event_type }),
             el('td', { text: event.summary }),
@@ -535,7 +636,8 @@ const status = (text) => {
 
 const cursorLine = () => {
   const latest = [...state.cursors.values()].at(-1)
-  document.getElementById('cursor').textContent = latest === undefined ? '' : `cursor ${latest}`
+  document.getElementById('cursor').textContent =
+    latest === undefined ? '' : `cursor ${cursor(latest)}`
 }
 
 async function select(candidateId) {
@@ -553,6 +655,8 @@ async function refresh() {
       read('calls'),
     ])
     state.audit = audit
+    // The conclusion line first: the rest of the page is evidence for it.
+    renderHeadline(conclusion)
     renderOverview(overview)
     renderRounds(rounds)
     renderConclusion(conclusion)
@@ -566,7 +670,7 @@ async function refresh() {
     // without reading the URL.
     document.getElementById('workspace').textContent = overview.workspace ?? ''
     state.lastError = null
-    status(`read-only · refreshed ${now()}`)
+    status(`read-only · refreshed ${clock(Date.now())}`)
   } catch (error) {
     // A dashboard that dies on one failed poll leaves the last good page on screen and says what broke.
     state.lastError = error
