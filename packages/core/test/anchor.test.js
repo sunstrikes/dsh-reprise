@@ -325,6 +325,17 @@ test('a rejected candidate is never nominated again — and the exclusion is rea
   reopened.close()
 })
 
+// ------------------------------------------------------------ the config switch
+
+test('the roll mode is configuration, and an unrecognised one is refused rather than defaulted', async () => {
+  const { roundSettings } = await import('../lib/rounds.js')
+
+  assert.equal(roundSettings({ rounds: ROUNDS }).settings.anchor_mode, 'automatic', 'the default rolls, once a round has numbers')
+  assert.equal(roundSettings({ rounds: { ...ROUNDS, anchor: 'human' } }).settings.anchor_mode, 'human')
+  assert.equal(roundSettings({ rounds: { ...ROUNDS, anchor: { mode: 'human' } } }).settings.anchor_mode, 'human')
+  assert.match(roundSettings({ rounds: { ...ROUNDS, anchor: 'whenever' } }).problem, /rounds\.anchor/)
+})
+
 // ---------------------------------------------------- the operator's view (slice 6)
 
 test('dump prints the code base the run is on, and why it moved', async () => {
