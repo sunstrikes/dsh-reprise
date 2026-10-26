@@ -162,13 +162,14 @@ pack, and a pack missing a part is refused by name at boot instead of running ha
 | `candidate.kind` | `'command'` | `command`, `claude` or `dsh` — the LAND implementer |
 | `candidate.command` | **required for `command`** | argv; `{candidate}` and `{worktree}` are substituted |
 | `runner.repo` / `runner.dir` | **required with `candidate`** | repo inside the workspace; where worktrees are created |
-| `runner.base_ref` | git default | the commit candidates branch from |
+| `runner.base_ref` | git default | the commit candidates branch from, until the run rolls its code base (see `rounds.anchor`) |
 | `model.kind` | `'command'` | how a judgement reaches a model: `dsh` (`dsh --profile headless --json -`), `claude` (`claude -p --output-format stream-json --verbose`), or `command` for a wrapper of your own |
 | `model.command` | **required for `kind: command`** | the wrapper's argv: one JSON question on stdin, one JSON answer (a JSON object) on stdout |
 | `model.timeout_ms` | `600000` | how long one judgement may take before it is killed — a phase never waits for a model without a deadline |
 | `rounds.metric.name` / `.direction` | derived from the metric contract | the one metric the round gate optimises; restating it is how a run points at a different objective, and a restatement that disagrees with `metrics` is warned about |
 | `rounds.metric.contract_ref` | the contract's `name` | pointer to the frozen metric contract |
 | `rounds.max_rounds` / `.candidates_per_round` | `3` / `2` | round workflow shape |
+| `rounds.anchor` | `'automatic'` | who may roll the code base forward: `automatic` applies the double-domination rule between rounds (a candidate must dominate both the current anchor and the frozen baseline); `human` files a proposal under `anchor-pending/` and waits for `dsh-reprise intents anchor --candidate-id … --commit …`. Neither mode moves the differential denominator |
 | `rounds.retry.base_ms` / `.max_ms` / `.max_attempts` | `60000` / `3600000` / `3` | backoff for a refused artifact, then a human |
 | `stop.max_rounds` | `3` | `0` disables the rule |
 | `stop.max_no_improvement_rounds` / `.consecutive_empty_rounds` | `0` (off) | opt-in stop rules |

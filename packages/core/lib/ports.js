@@ -42,6 +42,7 @@ import {
 import { createLocalPlatform } from '@dsh-reprise/exec/platform/local'
 import { createRayPlatform } from '@dsh-reprise/exec/platform/ray'
 
+import { readAnchor } from './anchor.js'
 import { fileArtifacts } from './artifacts.js'
 import { BASELINE_SUBJECT } from './baseline.js'
 import { cudaVisibleDevicesOf, MARKER_KEY, submissionIdFor } from './jobs.js'
@@ -87,11 +88,23 @@ function absoluteise(argv, launchDir, variables = {}) {
  * behind makes the next run's `git worktree list` a history lesson. The commit each candidate
  * branched from is frozen into `parent_binding` at LAND, so identity survives the detach.
  *
+ * **The base ref is not a constant when the run rolls its code base (ticket 23).** `baseRef` is a
+ * getter that answers with the current anchor when there is one and with the configured ref
+ * otherwise, and it is the single source of three readers: the `git worktree add` below, the tree a
+ * cluster job ships (`planForConfig`), and the commit LAND's harness diffs against. One property, so
+ * the tree a candidate edits and the diff it is judged on cannot disagree.
+ *
+ * `seal` is the other half: an anchor has to name a *commit*, and a candidate's worktree holds
+ * uncommitted edits — committing it is a git write, so it belongs to the runner and to nobody else.
+ *
  * @param {{repo: string, dir: string, base_ref?: string}} options `repo`/`dir` are relative to the
  *   workspace unless absolute
- * @param {{workspaceDir: string, log?: Function, git?: Function}} context
+ * @param {{
+ *   workspaceDir: string, log?: Function, git?: Function,
+ *   anchor?: () => ({ commit?: string } | undefined),
+ * }} context `anchor` reads the code base the run is on; absent means "no anchor, ever"
  */
-export function createWorktreeRunner({ repo, dir, base_ref: baseRef = 'HEAD' }, { workspaceDir, log = () => {}, git }) {
+export function createWorktreeRunner({ repo, dir, base_ref: baseRef = 'HEAD' }, { workspaceDir, log = () => {}, git, anchor }) {
   if (!isText(repo)) throw new TypeError('the runner needs runner.repo — the repository candidates are branched from')
   if (!isText(dir)) throw new TypeError('the runner needs runner.dir — where candidate worktrees are created')
 
@@ -99,11 +112,26 @@ export function createWorktreeRunner({ repo, dir, base_ref: baseRef = 'HEAD' }, 
   const worktreesDir = resolve(workspaceDir, dir)
   const gitRun = git ?? ((args, options) => spawnSync('git', args, { encoding: 'utf8', ...options }))
   const created = new Map()
+  const anchorCommit = () => {
+    const found = typeof anchor === 'function' ? anchor() : undefined
+    return isText(found?.commit) ? found.commit : undefined
+  }
+  /** Read at every use, never captured: a roll between rounds must reach the next worktree. */
+  const baseRefNow = () => anchorCommit() ?? baseRef
 
   return {
     repoDir,
     worktreesDir,
-    baseRef,
+
+    /** The ref every reader branches from: the code base anchor, or the configured ref. */
+    get baseRef() {
+      return baseRefNow()
+    },
+
+    /** What the configuration said, kept so a reader can tell a roll from a setting. */
+    get configuredBaseRef() {
+      return baseRef
+    },
 
     /** Deterministic, because a worktree path is part of what a dump has to be able to explain. */
     pathFor(candidateId) {
@@ -121,20 +149,79 @@ export function createWorktreeRunner({ repo, dir, base_ref: baseRef = 'HEAD' }, 
       if (!isText(candidateId)) throw new TypeError('worktreeFor needs a candidate id')
       const path = created.get(candidateId) ?? this.pathFor(candidateId)
       if (created.has(candidateId) && existsSync(path)) return path
+      const ref = baseRefNow()
 
       mkdirSync(worktreesDir, { recursive: true })
       if (!existsSync(path)) {
-        const result = gitRun(['worktree', 'add', '--detach', path, baseRef], { cwd: repoDir })
+        const result = gitRun(['worktree', 'add', '--detach', path, ref], { cwd: repoDir })
         if (result?.error || result?.status !== 0) {
           throw new Error(
-            `the runner could not create a worktree for ${candidateId} from ${baseRef} in ${repoDir}: ` +
+            `the runner could not create a worktree for ${candidateId} from ${ref} in ${repoDir}: ` +
               `${(result?.stderr ?? result?.error?.message ?? '').toString().trim() || 'git said nothing'}`,
           )
         }
-        log(`runner: created worktree ${path} from ${baseRef}`)
+        log(`runner: created worktree ${path} from ${ref}`)
       }
       created.set(candidateId, path)
       return path
+    },
+
+    /**
+     * Name a landed candidate's tree as a commit, and keep it behind a ref.
+     *
+     * This is what makes a rolling code base possible at all: a candidate's change lives as
+     * *uncommitted* edits in its worktree (the implementer is told not to touch git), so there is no
+     * commit to branch the next worktree from until the runner makes one. The ref
+     * (`refs/reprise/anchor/<candidate>`) is not decoration — a detached commit is garbage, and an
+     * anchor naming a collected object is a base ref that resolves to nothing.
+     *
+     * Idempotent: the ref is consulted first, so sealing the same candidate twice is the same
+     * commit, exactly as re-planning a round after a crash must be the same decision.
+     */
+    seal(candidateId) {
+      if (!isText(candidateId)) throw new TypeError('seal needs a candidate id')
+      const ref = `refs/reprise/anchor/${candidateId}`
+      const known = gitRun(['rev-parse', '--verify', `${ref}^{commit}`], { cwd: repoDir })
+      if (!known?.error && known?.status === 0 && isText(known.stdout)) return known.stdout.trim()
+
+      const path = created.get(candidateId) ?? this.pathFor(candidateId)
+      if (!existsSync(path)) {
+        throw new Error(`the runner could not seal ${candidateId}: there is no worktree at ${path} to name`)
+      }
+      const message = `reprise: seal ${candidateId} as the code base anchor`
+      const steps = [
+        { args: ['add', '-A'], cwd: path, why: 'stage the candidate tree' },
+        {
+          // The identity is passed inline: a worktree on a machine with no global git identity would
+          // otherwise fail here, hours after the change was built and verified.
+          args: ['-c', 'user.name=reprise', '-c', 'user.email=reprise@localhost', '-c', 'commit.gpgsign=false', 'commit', '--no-verify', '--allow-empty', '-m', message],
+          cwd: path,
+          why: 'commit the candidate tree',
+        },
+        { args: ['rev-parse', '--verify', 'HEAD^{commit}'], cwd: path, why: 'read the commit back' },
+      ]
+      let sha
+      for (const step of steps) {
+        const result = gitRun(step.args, { cwd: step.cwd })
+        if (result?.error || result?.status !== 0) {
+          throw new Error(
+            `the runner could not seal ${candidateId} (${step.why}) in ${step.cwd}: ` +
+              `${(result?.stderr ?? result?.error?.message ?? '').toString().trim() || 'git said nothing'}`,
+          )
+        }
+        if (step.args[0] === 'rev-parse') sha = String(result.stdout ?? '').trim()
+      }
+      if (!isText(sha)) throw new Error(`the runner could not seal ${candidateId}: git named no commit`)
+
+      const kept = gitRun(['update-ref', ref, sha], { cwd: repoDir })
+      if (kept?.error || kept?.status !== 0) {
+        throw new Error(
+          `the runner could not keep ${sha} under ${ref} in ${repoDir}: ` +
+            `${(kept?.stderr ?? kept?.error?.message ?? '').toString().trim() || 'git said nothing'}`,
+        )
+      }
+      log(`runner: sealed ${candidateId} as ${ref} (${sha})`)
+      return sha
     },
   }
 }
@@ -423,7 +510,13 @@ export function baselinePort({ workspaceDir, store }) {
  * never as a stand-in that answers for them.
  */
 export function portsFromConfig({ config, workspaceDir, store, log = () => {}, launchDir = process.cwd() }) {
-  const runner = config.runner === undefined ? undefined : createWorktreeRunner(config.runner, { workspaceDir, log })
+  // One reader of the code base anchor, shared by everything that branches (`ticket 23`): the
+  // runner's worktrees, the tree a cluster job ships, and LAND's diff base.
+  const readCodeBase = () => (store === undefined ? undefined : readAnchor(store))
+  const runner =
+    config.runner === undefined
+      ? undefined
+      : createWorktreeRunner(config.runner, { workspaceDir, log, anchor: readCodeBase })
   const baseline = baselinePort({ workspaceDir, store })
   const artifacts = fileArtifacts(join(workspaceDir, 'artifacts'))
 
@@ -434,6 +527,10 @@ export function portsFromConfig({ config, workspaceDir, store, log = () => {}, l
     baseline,
     artifacts,
     runner,
+    // The anchor port: `read` for the readers above, `seal` for the one write an automatic roll
+    // needs (a candidate tree has to become a commit before it can be a base ref). Absent without a
+    // runner, because then there is no tree to branch from in the first place.
+    anchor: runner === undefined ? undefined : { read: readCodeBase, seal: (candidateId) => runner.seal(candidateId) },
   }
 
   if (config.model !== undefined) {
