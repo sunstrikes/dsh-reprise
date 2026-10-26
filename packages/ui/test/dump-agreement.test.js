@@ -344,3 +344,27 @@ test('the staircase ends on the best result `dump` prints, and its INIT line is 
     'the dashed INIT line is the same number the conclusion sentence calls the baseline',
   )
 })
+
+test('the phase path the page draws is the fact the dump names, seq and all', async () => {
+  // Ticket #5 draws the path from `phasePath` and prints the rejection from `rejection`. If those two
+  // ever pointed at different facts the page would show one record's words under another record's
+  // seq — so the agreement is asserted between the two renderers' inputs, not only within each.
+  const dir = await concludedRun()
+  const store = Store.openReadOnly(dir)
+  const text = renderDump(store, 'r1-c2', { config: RUN_CONFIG })
+  store.close()
+
+  const view = candidateHandler(dir, { candidate: 'r1-c2' }).data
+  const why = sections(text).get('why it stopped')
+
+  const judged = view.phasePath.filter((step) => step.status !== null)
+  assert.equal(judged.length, 1, 'one phase carries a four-state word, so there is one fact to agree about')
+  assert.equal(judged[0].phase, view.rejection.phase, 'the path and the rejection block name one phase')
+  assert.equal(judged[0].seq, view.rejection.seq, 'and one fact: the seq printed under the original words')
+  assert.equal(judged[0].eventType, view.rejection.eventType)
+  assert.equal(judged[0].status, field(why, 'status'), 'and the four-state word the dump prints is the mark the page draws')
+  assert.ok(
+    view.phasePath.filter((step) => !step.reached).every((step) => step.status === null && step.seq === null),
+    'no phase the candidate never reached carries a verdict or a seq: nothing was recorded there',
+  )
+})
