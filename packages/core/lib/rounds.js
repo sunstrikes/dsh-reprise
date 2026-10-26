@@ -421,7 +421,7 @@ function eventPrefixOf(store) {
  * nothing comparable yet plans its first round from the baseline — the behaviour every existing
  * workspace already had, now as a decision instead of an omission.
  */
-function parentRoster({ store, config }, state, round, settings, view) {
+function parentRoster({ store }, state, round, settings, view) {
   const set = frontierOf(view, { baseline: state.baseline })
   const parents = parentsOf(set, { k: settings.candidates_per_round })
   const snapshot = parentSnapshot({ round, events_prefix: eventPrefixOf(store), set, parents })
