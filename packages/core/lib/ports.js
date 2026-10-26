@@ -153,14 +153,28 @@ export function createWorktreeRunner({ repo, dir, base_ref: baseRef = 'HEAD' }, 
 
       mkdirSync(worktreesDir, { recursive: true })
       if (!existsSync(path)) {
-        const result = gitRun(['worktree', 'add', '--detach', path, ref], { cwd: repoDir })
+        let result = gitRun(['worktree', 'add', '--detach', path, ref], { cwd: repoDir })
+        let pruned = false
+        // A crash (or a workspace copied without its worktrees) leaves the *registration* behind in
+        // the runner's repository while the directory is gone. git then refuses to re-create it
+        // ("missing but already registered"), which used to end the whole run with an uncaught error
+        // — the one state a recovery path must be able to walk out of. Prune exactly that case and
+        // try once more; anything else keeps the loud failure below.
+        if (result?.status !== 0 && /already registered|already exists/i.test(String(result?.stderr ?? ''))) {
+          gitRun(['worktree', 'prune'], { cwd: repoDir })
+          result = gitRun(['worktree', 'add', '--detach', path, ref], { cwd: repoDir })
+          if (result?.status === 0) {
+            pruned = true
+            log(`runner: pruned a stale worktree registration for ${candidateId}`)
+          }
+        }
         if (result?.error || result?.status !== 0) {
           throw new Error(
             `the runner could not create a worktree for ${candidateId} from ${ref} in ${repoDir}: ` +
               `${(result?.stderr ?? result?.error?.message ?? '').toString().trim() || 'git said nothing'}`,
           )
         }
-        log(`runner: created worktree ${path} from ${ref}`)
+        if (!pruned) log(`runner: created worktree ${path} from ${ref}`)
       }
       created.set(candidateId, path)
       return path
@@ -377,6 +391,12 @@ export function createPlatform(config, context) {
  * answered (no binary, a timeout, an unreadable stream): that is the same condition the judgement
  * port reports, and `loop.js` handles both through the same outage path.
  *
+ * The answer carries both halves of a landing: what it left in the tree (`files`, git's inventory)
+ * and whether the landing itself completed (`ok`, `error_class`, `conflict`). They are different
+ * facts — a `command` implementer that prints its own words is filed as an outage *and* may have
+ * made the change — and `landing.js` reads them back to tell a LAND that has already done its work
+ * from one that has not.
+ *
  * @param {object} artifacts the workspace artifact store
  * @param {{candidateId: string, round?: number, hypothesis?: string, parentId?: string|null}} request
  * @param {object} result the harness result (`landWithCli`'s shape)
@@ -411,6 +431,15 @@ export function recordLandCall(artifacts, request, result) {
         files_changed: result.files_changed ?? 0,
         parent_commit: result.parent_commit ?? null,
         cross_check: result.cross_check?.status ?? null,
+        // Whether the landing itself completed, and why not. The rest of the answer says what it
+        // left in the tree, and the two are different questions: a resuming LAND reads this record
+        // to decide whether it has already done its work (`landing.js`), and "the implementer's
+        // stream was unreadable" is not the same fact as "nothing was changed".
+        ok: result.ok === true,
+        error_class: result.error_class ?? null,
+        conflict: result.conflict === true,
+        retryable: result.retryable === true,
+        message: typeof result.message === 'string' && result.message !== '' ? result.message : null,
       },
       response: typeof result.output === 'string' ? result.output : '',
       error_class: unanswered ? MODEL_UNAVAILABLE : null,

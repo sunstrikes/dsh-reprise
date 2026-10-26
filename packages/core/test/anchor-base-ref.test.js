@@ -194,3 +194,46 @@ test('the ports a host builds carry the anchor, so a roll reaches the runner wit
   assert.equal(withoutRunner.anchor, undefined, 'no runner means no tree to branch from, so no anchor port either')
   store.close()
 })
+
+/**
+ * A crash leaves the worktree's *registration* behind in the runner's repository while its directory
+ * is gone — then `git worktree add` refuses ("missing but already registered"). A recovery path that
+ * cannot walk out of that state is not a recovery path: it ends the run with an uncaught error on the
+ * first tick after the restart (this is what the crash acceptance hit, twice). The runner prunes
+ * exactly that refusal and retries; anything else still fails loudly with git's own words.
+ */
+test('a stale worktree registration left by a crash is pruned and the worktree re-created', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'reprise-stale-worktree-'))
+  let adds = 0
+  const answers = (args) => {
+    if (args[0] === 'worktree' && args[1] === 'add') {
+      adds += 1
+      // The first add is the one a crash left dirty; after the runner prunes, the retry works.
+      if (adds === 1) {
+        return { status: 128, stdout: '', stderr: "fatal: '/tmp/x/r1-h1' is a missing but already registered worktree" }
+      }
+    }
+    return { status: 0, stdout: '', stderr: '' }
+  }
+  const recorded = recordingGit(answers)
+  const runner = runnerIn(tmp, { git: recorded.git })
+
+  const path = runner.worktreeFor('r1-h1')
+
+  assert.equal(path, join(tmp, 'worktrees', 'r1-h1'), 'the same deterministic path is used again')
+  assert.deepEqual(recorded.argv(), [
+    `worktree add --detach ${path} ${CONFIGURED}`,
+    'worktree prune',
+    `worktree add --detach ${path} ${CONFIGURED}`,
+  ], 'one prune, one retry — not a loop that hides a real git failure')
+})
+
+test('a worktree failure that is not a stale registration is still loud', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'reprise-bad-worktree-'))
+  const recorded = recordingGit(() => ({ status: 128, stdout: '', stderr: 'fatal: not a git repository' }))
+  const runner = runnerIn(tmp, { git: recorded.git })
+
+  assert.throws(() => runner.worktreeFor('r1-h1'), /could not create a worktree for r1-h1.*not a git repository/s)
+  assert.deepEqual(recorded.argv(), [`worktree add --detach ${join(tmp, 'worktrees', 'r1-h1')} ${CONFIGURED}`],
+    'no prune for a failure that pruning cannot fix')
+})
