@@ -16,6 +16,8 @@
 import { ViewError, withStore } from '@dsh-reprise/ui/routes'
 import { candidateView, overviewView } from '@dsh-reprise/ui/views'
 
+import { describeRun } from './boot.js'
+
 export const name = 'reprise-status-tool'
 export const inject = ['tools']
 
@@ -47,10 +49,11 @@ function trim(answer, { events = 6, members = 10 } = {}) {
 /**
  * Build the tool definition for one configured workspace.
  *
- * @param {string | undefined} workspaceDir the directory the run owns
+ * @param {object} config the resolved plugin configuration
  * @param {(message: string) => void} log where a refusal is reported
  */
-function definition(workspaceDir, log) {
+function definition(config, log) {
+  const workspaceDir = config?.workspaceDir
   return {
     name: 'reprise_status',
     description:
@@ -100,15 +103,20 @@ function definition(workspaceDir, log) {
         }
       }
 
+      // "What is this run?" is the first half of "how is the run doing": the workspace, the repository
+      // candidates branch from, where their trees go and whether they are kept. A model asked about a
+      // run should not have to guess any of it from the phase names.
+      const run = describeRun(config)
       if (answer === undefined) {
         return {
           ok: true,
+          ...run,
           workspace: workspaceDir,
           data: null,
           reason: 'no facts recorded in this workspace yet — the loop has not ticked',
         }
       }
-      return { ok: true, ...json(trim(answer, { events: Number.isSafeInteger(events) ? events : 6 })) }
+      return { ok: true, ...run, ...json(trim(answer, { events: Number.isSafeInteger(events) ? events : 6 })) }
     },
   }
 }
@@ -119,5 +127,5 @@ function definition(workspaceDir, log) {
  */
 export function apply(ctx, config = {}) {
   const log = typeof config.log === 'function' ? config.log : () => {}
-  ctx.effect(() => ctx.tools.register(definition(config.workspaceDir, log)))
+  ctx.effect(() => ctx.tools.register(definition(config, log)))
 }

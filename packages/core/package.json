@@ -25,6 +25,7 @@
     "./dump": "./lib/cli/dump.js",
     "./cli/intents": "./lib/cli/intents.js",
     "./cli/jobs": "./lib/cli/jobs.js",
+    "./worktrees": "./lib/worktrees.js",
     "./client": "./client/index.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg",
