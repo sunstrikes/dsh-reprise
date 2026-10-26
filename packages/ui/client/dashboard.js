@@ -1291,13 +1291,8 @@ function renderConclusion(answer) {
   const objectives = data.objectives.map((objective) => `${objective.name} (${objective.direction})`)
   root.append(el('p', { class: 'dim', text: `objectives ${objectives.length === 0 ? EM_DASH : objectives.join(', ')}` }))
 
-  if (data.stopped?.stopped) {
-    root.append(
-      el('h3', { text: 'stop decision' }),
-      el('p', { text: `${data.stopped.rule} — ${data.stopped.message}` }),
-      el('p', { class: 'dim', text: `limit ${number(data.stopped.limit)}, observed ${number(data.stopped.observed)}` }),
-    )
-  }
+  // The stop decision itself is not repeated here: the stop section above the chart is the one place
+  // that says why the run ended, and two renderings of one conclusion is how they start to disagree.
 }
 
 /**
