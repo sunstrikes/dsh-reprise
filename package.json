@@ -13,6 +13,7 @@
     "check": "node scripts/check.mjs",
     "pretest": "node scripts/check.mjs",
     "test": "node --test packages/*/test/*.test.js",
+    "build:release": "node scripts/build-release.mjs",
     "dump": "node packages/core/lib/cli/dump.js"
   }
 }

@@ -80,8 +80,20 @@ tick，一个在会话内读取同一份投影的 `reprise_status` 工具，以�
 <a id="install-and-mount"></a>
 ### 安装与挂载
 
-仓库是一个 pnpm workspace，包之间通过 `workspace:*` 互相依赖，所以 `packages/core` 不能单独安装。
-请整仓克隆。
+装发布用的 tarball。它把兄弟包带在自己身上——放在 `vendor/packages/` 下，并把每个 `@dsh-reprise/*`
+specifier 改写成相对路径——所以安装不需要克隆、不需要解析 workspace，也没有构建步骤：
+
+```sh
+dsh plugin --profile web add ./dsh-reprise-<version>.tgz   # 最新一次 release 上的那个资产
+```
+
+这个文件由仓库里的 `node scripts/build-release.mjs` 生成到 `dist/`，用路径安装效果一样。从 git 装并非
+看上去的捷径：`github:sunstrikes/dsh-reprise#path:/packages/core` 会同时撞上三件事——包之间靠
+`workspace:*` 互相依赖，只有 monorepo 解析得了；pnpm 拒绝 root 以下的任何 git 依赖
+（`ERR_PNPM_EXOTIC_SUBDEP`）；`packages/ui` 用相对路径 import `packages/core`，任何包管理器的目录布局
+都保不住它。外人能装的就是那个 tarball。
+
+要在上面开发，就克隆并链接——profile 链接那个目录而不是复制它，所以改动是活的，兄弟包就是它旁边的那些：
 
 ```sh
 git clone https://github.com/sunstrikes/dsh-reprise.git
@@ -89,8 +101,8 @@ cd dsh-reprise
 node scripts/link-workspace.mjs          # Node 22.5+; makes packages/* importable, idempotent
 ```
 
-然后把插件包装进你的 Harness profile。用宿主自己的工具，而不是手工编辑 profile——`install_bundle`
-一步完成依赖安装、链接与插件包选择，把 `target` 设成 `<clone>/packages/core` 的**绝对路径**：
+用宿主自己的工具，而不是手工编辑 profile——`install_bundle` 一步完成依赖安装、链接与插件包选择，
+把 `target` 设成 `<clone>/packages/core` 的**绝对路径**：
 
 ```
 plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-reprise/packages/core" }
@@ -147,7 +159,9 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 照旧显示工作区里已有的事实，但不会假装循环在跑。连工作区都点不名的配置，是唯一仍然挂不上看板的情况。
 
 `@dsh-reprise/memory` 插件包是可选的、独立的（行 `reprise-memory`），它把注入包（injection packet）
-作为一个 `dsh-mnemon` Source 暴露出来。`packages/core` 里没有任何东西 import 它。
+作为一个 `dsh-mnemon` Source 暴露出来。`packages/core` 里没有任何东西 import 它；它自己也没有依赖，
+所以这一个可以直接从仓库子目录装，用不上 tarball：
+`dsh plugin --profile web add github:sunstrikes/dsh-reprise#path:/packages/memory`。
 
 <a id="configure-it"></a>
 ### 配置
@@ -405,8 +419,8 @@ system prompt。
 - **只在离线环境验证过。** 阶段机、校验器、身份链、事实面、账本、前沿、判停规则、执行器与 harness
   端口、`dump`，以及那五条命令组成的路径，全都在 `npm test` 里跑。未在这里端到端验证的：活的模型、真实的
   编码 harness、真实集群，以及浏览器真正对着一个真实宿主加载页面。
-- **不在 npm 上。** 每个包都是 `private`，版本 `0.0.0`，通过 `workspace:*` 依赖它的兄弟包。请分享
-  仓库并链接 profile；目前没有可发布的产物。
+- **不在 npm 上。** 每个包都是 `private`，版本 `0.0.0`，通过 `workspace:*` 依赖它的兄弟包。能装的是
+  `scripts/build-release.mjs` 打出的发布 tarball——不是 registry 包，也不是那个 git 地址。
 - **随包发布的 bundle patch 故意不带配置。** 包无法知道你的工作区在哪，所以它只发这一行、别的什么
   也不发；你 profile patch 里的 `reprise-core` 条目提供其余全部，而 patch 旁边的
   `cordis.example.yml` 是一份填好的完整示例。没有配置的运行只是一行日志，不是一次挂载。

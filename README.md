@@ -88,8 +88,23 @@ workspace — one workspace belongs to one run.
 
 ### Install and mount
 
-The repository is a pnpm workspace and the packages depend on each other through `workspace:*`, so
-`packages/core` is not installable on its own. Clone the whole repository.
+Install the release tarball. It carries its sibling packages inside itself — vendored under
+`vendor/packages/`, with every `@dsh-reprise/*` specifier rewritten to a relative path — so an install
+needs no checkout, no workspace to resolve and no build step:
+
+```sh
+dsh plugin --profile web add ./dsh-reprise-<version>.tgz   # the asset on the newest release
+```
+
+`node scripts/build-release.mjs` writes that file into `dist/` from a checkout, and installing it by
+path works the same way. A git install is not the shortcut it looks like:
+`github:sunstrikes/dsh-reprise#path:/packages/core` fails three ways at once — the packages depend on
+each other through `workspace:*`, which only the monorepo resolves; pnpm refuses any git dependency
+below the root (`ERR_PNPM_EXOTIC_SUBDEP`); and `packages/ui` imports `packages/core` by relative path,
+which no package manager's layout preserves. The tarball is the artifact a stranger can install.
+
+To develop against it, clone and link — the profile links that directory instead of copying it, so
+edits are live and the sibling packages are the ones beside it:
 
 ```sh
 git clone https://github.com/sunstrikes/dsh-reprise.git
@@ -97,9 +112,9 @@ cd dsh-reprise
 node scripts/link-workspace.mjs          # Node 22.5+; makes packages/* importable, idempotent
 ```
 
-Then install the bundle into your Harness profile. Use the host's own tooling rather than hand-editing
-the profile — `install_bundle` performs the dependency install, the link and the bundle selection in
-one step, with `target` set to the **absolute path** of `<clone>/packages/core`:
+Use the host's own tooling rather than hand-editing the profile — `install_bundle` performs the
+dependency install, the link and the bundle selection in one step, with `target` set to the **absolute
+path** of `<clone>/packages/core`:
 
 ```
 plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-reprise/packages/core" }
@@ -166,7 +181,9 @@ running.
 A configuration that cannot name a workspace at all is the one case that still leaves nothing to mount.
 
 The `@dsh-reprise/memory` bundle is optional and separate (row `reprise-memory`); it adds the injection
-packet as a `dsh-mnemon` Source. Nothing in `packages/core` imports it.
+packet as a `dsh-mnemon` Source. Nothing in `packages/core` imports it, and it has no dependencies —
+so that one installs straight from the repository subdirectory, no tarball involved:
+`dsh plugin --profile web add github:sunstrikes/dsh-reprise#path:/packages/memory`.
 
 ### Configure it
 
@@ -479,7 +496,8 @@ These limits define when this is a poor fit — they are not a task list.
   `npm test`. Not verified end to end here: a live model, a real coding harness, a real cluster, and a
   browser actually loading the page against a real host.
 - **Not on npm.** Every package is `private`, versioned `0.0.0`, and depends on its siblings through
-  `workspace:*`. Share the repository and link the profile; there is no publishable artifact yet.
+  `workspace:*`. What installs is the release tarball `scripts/build-release.mjs` packs — not a
+  registry package, and not the git URL.
 - **The shipped bundle patch carries no config, on purpose.** The package cannot know where your
   workspace is, so it ships the row and nothing else; a `reprise-core` entry in your profile patch
   supplies everything, and `cordis.example.yml` beside the patch is a filled-in worked example. A
