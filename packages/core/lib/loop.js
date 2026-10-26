@@ -18,6 +18,7 @@ import { judgeTimeout } from '@dsh-reprise/exec'
 
 import { autoResumeIfClear, budgetOf, canDispatch, evaluate, pause } from './budget.js'
 import { gateSettings, recheckReport } from './gate.js'
+import { recordedLanding } from './landing.js'
 import { MODEL_UNAVAILABLE, isModelUnavailable, isOutage, modelFailureOf, recordModelUnavailable } from './model-failure.js'
 import { recordWindowSamples, seriesOf } from './samples.js'
 import { consumePending } from './intents.js'
@@ -396,6 +397,27 @@ async function land(ports, candidateId, state) {
     })
   }
 
+  // LAND is idempotent, and it has to be: the work is a worktree on disk, so a second run is not a
+  // retry of the first but a second edit of a tree that already carries it. Ask the facts before
+  // asking the implementer — a landing this round already performed is adopted, not repeated
+  // (ticket 28; the reading lives in `landing.js`).
+  const recorded = recordedLanding({ store, artifacts: ports.artifacts }, { candidateId, round: state.round })
+  if (recorded.status === 'conflict') {
+    // Two accounts of one edit, recorded by the attempt that compared them. This is one of the four
+    // states in the strict sense, so it keeps its name; nothing about it is retryable.
+    return rejectCandidate(
+      ports,
+      candidateId,
+      'LAND',
+      { status: 'conflict', message: recorded.message },
+      { error_class: 'cross_check_mismatch', files: recorded.files, artifact: recorded.record ?? null },
+    )
+  }
+  if (recorded.status === 'landed') {
+    const adopted = adoptLanding(ports, candidateId, state, recorded)
+    if (adopted !== undefined) return adopted
+  }
+
   // The runner owns the worktree and the base ref; the adapter only edits files inside it.
   const worktreeDir = state.worktree_dir ?? ports.worktreeDir
   const baseRef = state.base_ref ?? ports.baseRef
@@ -468,11 +490,85 @@ async function land(ports, candidateId, state) {
     ports,
     candidateId,
     'land_done',
-    { engine: result.engine, files, files_changed: result.files_changed ?? files.length, worktree_dir: tree ?? null },
+    {
+      engine: result.engine,
+      files,
+      files_changed: result.files_changed ?? files.length,
+      worktree_dir: tree ?? null,
+      // Which round this landing belongs to, and whose child it made the candidate: a resumed LAND
+      // reads both back (`landing.js`), so the fact has to carry what it will be asked for.
+      round: state.round ?? null,
+      parent_id: result.parent_id ?? null,
+      parent_commit: result.parent_commit ?? null,
+    },
     'BUILD',
     { files, ...(tree === undefined ? {} : { worktree_dir: tree }) },
   )
   return { candidateId, phase: 'LAND', action: `landed by ${result.engine} -> build` }
+}
+
+/**
+ * Continue from a landing an earlier attempt of this round already completed.
+ *
+ * Two writes, and both record the *identity* that attempt established rather than making a new
+ * decision: the parent binding (only if the crash got there first) and the `land_done` fact (only if
+ * the event stream does not carry it yet). The harness is not consulted, which is the whole point.
+ *
+ * @returns the step's action, or `undefined` when the recorded landing cannot be adopted after all.
+ */
+function adoptLanding(ports, candidateId, state, recorded) {
+  const { store, clock, log } = ports
+
+  // The identity is the frozen one when the crashed attempt got as far as freezing it: a binding is
+  // immutable by construction, so the fact written here has to agree with it rather than restate the
+  // record and split the chain in two.
+  let identity = store.binding(candidateId, 'parent_binding')
+  if (identity === undefined) {
+    if (recorded.parent_commit === undefined) {
+      // Without the commit there is no identity to freeze, and the whole binding chain hangs off it.
+      // Landing again is the honest answer; inventing one is not.
+      return undefined
+    }
+    identity = { parent_id: recorded.parent_id ?? null, parent_commit: recorded.parent_commit, frozen_at_ms: clock.now() }
+    store.freezeBinding(candidateId, 'parent_binding', identity, clock.now())
+    ports.crashAt?.('after_binding')
+  }
+
+  const files = recorded.files
+  const patch = { files, ...(recorded.worktree_dir === undefined ? {} : { worktree_dir: recorded.worktree_dir }) }
+
+  if (recorded.source === 'event') {
+    // The fact is already on disk and only the state row lagged behind it — fold it forward instead
+    // of writing a second `land_done` for one landing.
+    advance(store, candidateId, 'BUILD', patch, Math.max(recorded.seq ?? 0, store.appliedSeq(candidateId)))
+  } else {
+    transition(
+      ports,
+      candidateId,
+      'land_done',
+      {
+        engine: recorded.engine,
+        files,
+        files_changed: recorded.files_changed,
+        worktree_dir: recorded.worktree_dir ?? null,
+        round: state.round ?? null,
+        parent_id: identity.parent_id ?? null,
+        parent_commit: identity.parent_commit ?? null,
+        // How this fact came to exist, so "why was the implementer not run again?" is answerable from
+        // the fact plane rather than from a log line nobody kept.
+        adopted: true,
+        record: recorded.record ?? null,
+      },
+      'BUILD',
+      patch,
+    )
+  }
+
+  log?.(
+    `${candidateId}: LAND already done (${recorded.source === 'event' ? 'land_done on disk' : 'the landing record'}) ` +
+      `— adopting it instead of running the implementer again`,
+  )
+  return { candidateId, phase: 'LAND', action: `adopted the recorded landing (${files.length} file(s)) -> build` }
 }
 
 /**
