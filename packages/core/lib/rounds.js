@@ -23,6 +23,7 @@ import { dirname, join } from 'node:path'
 import { isBlocking, isNonEmptyString, isTerminal, validateArtifact } from '@dsh-reprise/contract'
 
 import { fileArtifacts, memoryArtifacts } from './artifacts.js'
+import { ANCHOR_MODES, anchorStep, readAnchor } from './anchor.js'
 import { stepBaseline } from './baseline.js'
 import { frontierOf, parentSnapshot, parentsOf } from './frontier.js'
 import { ranking } from './ranking.js'
@@ -47,6 +48,12 @@ export const ROUND_DEFAULTS = Object.freeze({
   candidates_per_round: 2,
   /** A refused artifact is retried on a backoff, then stopped for a human — never retried forever. */
   retry: Object.freeze({ base_ms: 60_000, max_ms: 3_600_000, max_attempts: 3 }),
+  /**
+   * Who may move the code base. `automatic` applies the double-domination rule between rounds;
+   * `human` files a proposal and waits for an `anchor` intent, because moving the tree every
+   * candidate branches from is a policy a run may not be trusted with (ticket 23).
+   */
+  anchor: Object.freeze({ mode: 'automatic' }),
 })
 
 /** @param {any} store */
@@ -77,6 +84,10 @@ export function roundSettings(config) {
     max_rounds: raw.max_rounds ?? ROUND_DEFAULTS.max_rounds,
     candidates_per_round: raw.candidates_per_round ?? ROUND_DEFAULTS.candidates_per_round,
     retry: Object.freeze({ ...ROUND_DEFAULTS.retry, ...retry }),
+    // A config may spell it `rounds.anchor: "human"` or `rounds.anchor: { mode: "human" }`; both
+    // mean the same thing and both are validated, so a typo pauses the run instead of quietly
+    // behaving like the default.
+    anchor_mode: typeof raw.anchor === 'string' ? raw.anchor : raw.anchor?.mode ?? ROUND_DEFAULTS.anchor.mode,
     baseline: raw.baseline,
   }
   return { settings, problem: settingsProblem(settings) }
@@ -90,6 +101,9 @@ function settingsProblem(settings) {
   if (!Number.isSafeInteger(settings.max_rounds) || settings.max_rounds <= 0) return 'rounds.max_rounds must be a positive integer'
   if (!Number.isSafeInteger(settings.candidates_per_round) || settings.candidates_per_round <= 0) {
     return 'rounds.candidates_per_round must be a positive integer'
+  }
+  if (!ANCHOR_MODES.includes(settings.anchor_mode)) {
+    return `rounds.anchor must be one of ${ANCHOR_MODES.join(', ')} — got ${JSON.stringify(settings.anchor_mode)}`
   }
   return undefined
 }
@@ -127,6 +141,9 @@ function roundFacts(store, state, settings, frontierFacts) {
     // number in prose is a number nobody can trace to a fact. `null` means nobody computed it, which
     // is what a reflection over a legacy workspace sees.
     frontier: frontierFacts ?? null,
+    // Where the trees come from: the code base anchor (ticket 23), or null for "the runner's own
+    // base ref". The planner does not choose it — it is a fact it plans *on*.
+    code_base: readAnchor(store) ?? null,
     candidates: candidateOutcomes(store),
     previous_reflection: state.last_reflection ?? null,
   }
@@ -404,8 +421,7 @@ function eventPrefixOf(store) {
  * nothing comparable yet plans its first round from the baseline — the behaviour every existing
  * workspace already had, now as a decision instead of an omission.
  */
-function parentRoster({ store, config }, state, round, settings) {
-  const view = ranking(store, parentMetricConfig(config, state.metric), { persist: true })
+function parentRoster({ store, config }, state, round, settings, view) {
   const set = frontierOf(view, { baseline: state.baseline })
   const parents = parentsOf(set, { k: settings.candidates_per_round })
   const snapshot = parentSnapshot({ round, events_prefix: eventPrefixOf(store), set, parents })
@@ -443,9 +459,19 @@ async function planNextRound(context, state) {
     return { action: 'finalize', phase: 'FINALIZE', round: state.round ?? 0 }
   }
 
+  // The ranking is computed once per plan, because two decisions read it: the code base anchor
+  // (below) and the parent roster. Two derivations of the same numbers are two chances to disagree.
+  const view = ranking(store, parentMetricConfig(context.config, state.metric), { persist: true })
+
+  // The code base, before the roster: which *tree* the round's candidates branch from is settled
+  // here, between rounds, and it is a strictly separate question from who their parent is. The
+  // denominator this comparison reads is the frozen baseline and it is never written here — a roll
+  // moves the tree, not the ruler (ticket 23).
+  const roll = anchorStep(context, state, view, settings)
+
   // Who this round starts from is decided from the facts, before any model is asked. The plan then
   // proposes hypotheses *on* those parents; it does not get to pick its own base refs.
-  const roster = parentRoster(context, state, round, settings)
+  const roster = parentRoster(context, state, round, settings, view)
 
   let artifact
   try {
@@ -550,6 +576,10 @@ async function planNextRound(context, state) {
       artifact: stored.path,
       parents: roster.parents,
       parent_snapshot: roster.snapshot.address,
+      // Recorded beside the parents because a reader asking "where did this round's candidates
+      // start from" needs both answers: the parent is whom they build on, the code base is the tree.
+      code_base: readAnchor(store) ?? null,
+      code_base_decision: roll.decision.reason,
     },
     now,
   )

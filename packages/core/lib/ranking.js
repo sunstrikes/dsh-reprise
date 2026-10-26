@@ -29,6 +29,7 @@
 
 import { BASELINE_SUBJECT } from './baseline.js'
 import { frontierOf } from './frontier.js'
+import { WORKSPACE_ACTOR } from './intents.js'
 import { resolveMetricContract } from './metric-contract.js'
 import { WORKSPACE_SUBJECT } from './store.js'
 
@@ -43,12 +44,16 @@ export const RANKING_CACHE_KEY = 'derived_frontier'
 
 /**
  * Subjects in the event stream that are not candidates. `_workspace` carries workspace-level facts
- * (the stop conclusion) and `_baseline` carries the denominator's (its dispatch, its samples, its
- * freeze). A derived view that counted either as a candidate would report a phantom round 0, a
- * phantom "no metric" entry, and — the expensive one — a candidate that never terminates, which
- * keeps every stop rule from ever firing.
+ * (the stop conclusion), `_baseline` carries the denominator's (its dispatch, its samples, its
+ * freeze), and `workspace` is the actor every human intent's receipt is written under
+ * (`intents.js` `WORKSPACE_ACTOR`). A derived view that counted any of them as a candidate would
+ * report a phantom round 0, a phantom "no metric" entry, and — the expensive one — a candidate that
+ * never terminates, which keeps every stop rule from ever firing.
+ *
+ * The intent actor is spelled `workspace` and the workspace subject `_workspace`: two reserved ids
+ * that differ by one underscore, which is exactly why both are listed here by name.
  */
-const NOT_A_CANDIDATE = new Set([WORKSPACE_SUBJECT, BASELINE_SUBJECT])
+const NOT_A_CANDIDATE = new Set([WORKSPACE_SUBJECT, BASELINE_SUBJECT, WORKSPACE_ACTOR])
 
 /**
  * Bump when the *reading* of a fact changes — a metric taken from a different field, a status
