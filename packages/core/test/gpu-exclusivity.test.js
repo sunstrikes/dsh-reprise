@@ -24,6 +24,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { resolveConfig } from '../lib/config.js'
+import { gpuHolder } from '../lib/jobs.js'
 import { createCandidate, tick } from '../lib/loop.js'
 import { planForConfig } from '../lib/ports.js'
 import { overview } from '../lib/projection.js'
@@ -174,6 +175,49 @@ test('with single_job, a second training job waits for the first to finish', asy
     clock.t += 1_000
   }
   assert.equal(jobs.size, 2, 'the second job goes once nothing of ours is in flight')
+  store.close()
+})
+
+test('"who is holding the cards" is one rule, asked of two traces, and a candidate never holds itself', () => {
+  // The loop holds a candidate at SUBMIT_QUEUED on this rule, and the overview page names the same
+  // reason for the same candidate. Two derivations of it would eventually disagree about whose job is
+  // running, so there is one function and this test states what it answers.
+  const store = Store.open(mkdtempSync(join(tmpdir(), 'reprise-gpu-holder-')))
+  const submitted = (jobId, candidateId) =>
+    store.putJob({
+      job_id: jobId,
+      candidate_id: candidateId,
+      submission_id: `reprise:candidate=${candidateId}:round=1`,
+      harness: 'fake',
+      submitted_at_ms: AT,
+      deadline_ms: AT + 60_000,
+      last_polled_at_ms: null,
+      next_poll_at_ms: 0,
+      state: 'running',
+      error_class: null,
+      attempts: 0,
+      round: 1,
+      marker: null,
+      outcome: null,
+      kind: 'candidate',
+    })
+
+  // Trace 1: a candidate past the queue with no ledger row yet — the window between reserving the
+  // money and the cluster answering. Only a phase can see it.
+  store.setState('r1-h1', 'phase', { phase: 'MONITOR_POLL' })
+  store.setState('r1-h2', 'phase', { phase: 'SUBMIT_QUEUED' })
+  assert.equal(gpuHolder(store, 'r1-h2'), 'r1-h1', 'the candidate that already has a job out holds the cards')
+  assert.equal(gpuHolder(store, 'r1-h1'), undefined, 'a candidate is never its own holder')
+
+  // Trace 2: a ledger row of ours that is still open while its candidate is no longer in a job phase
+  // (an earlier run's job, or a candidate that finished before the cluster did).
+  store.setState('r1-h1', 'phase', { phase: 'DONE' })
+  submitted('job-1', 'r1-h1')
+  assert.equal(gpuHolder(store, 'r1-h2'), 'r1-h1', 'an open ledger row is the only trace of a job still running')
+
+  // Nothing of ours in flight: nobody holds them, which is not the same as "unknown".
+  store.updateJob('job-1', { outcome: 'succeeded', state: 'succeeded' })
+  assert.equal(gpuHolder(store, 'r1-h2'), undefined)
   store.close()
 })
 

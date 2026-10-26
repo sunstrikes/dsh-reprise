@@ -24,7 +24,7 @@ import { dirname, join } from 'node:path'
 import { fileArtifacts } from './artifacts.js'
 import { budgetOf, spendOf } from './budget.js'
 import { GATE_CHECKS } from './gate.js'
-import { cudaVisibleDevicesOf, gpuExclusivityOf, jobReport } from './jobs.js'
+import { cudaVisibleDevicesOf, gpuExclusivityOf, gpuHolder, jobReport } from './jobs.js'
 import { defaultStaticChecks } from './judge.js'
 import { ranking, roundHistory } from './ranking.js'
 import { readRoundsState } from './rounds.js'
@@ -120,12 +120,16 @@ function cardsPerJob(executor) {
   return Number.isSafeInteger(declared) && declared > 0 ? declared : null
 }
 
-/** Why a candidate is sitting at SUBMIT_QUEUED, in the vocabulary of the decision that holds it. */
-function holdReason(candidateId, { executor, rows, spend, budget, openJobs }) {
-  if (gpuExclusivityOf({ executor }) === 'single_job') {
-    const holder = openJobs.find((job) => job.candidate_id !== candidateId)
-    if (holder !== undefined) return 'single_job_gpu'
-  }
+/**
+ * Why a candidate is sitting at SUBMIT_QUEUED, in the vocabulary of the decision that holds it.
+ *
+ * The two reasons are asked in the same order the loop asks them, and the `single_job` one is asked
+ * through `gpuHolder` — the *same function* the loop holds the candidate with (`jobs.js`). The page
+ * saying "held by a running job" while the loop holds it for the budget is the kind of disagreement a
+ * person cannot resolve from either side.
+ */
+function holdReason(candidateId, { store, executor, spend, budget }) {
+  if (gpuExclusivityOf({ executor }) === 'single_job' && gpuHolder(store, candidateId) !== undefined) return 'single_job_gpu'
   if (budget.gpu_hours_limit > 0 && spend.usedGpuHours >= budget.gpu_hours_limit * budget.soft_ratio) return 'budget'
   return null
 }
@@ -165,10 +169,10 @@ export function cluster(store, { config, executor, listing } = {}) {
     .map((candidateId) => ({
       candidate_id: candidateId,
       reason: holdReason(candidateId, {
+        store,
         executor: executor ?? config?.executor ?? workspace.executor,
         spend: spendOf(store),
         budget: budgetOf(workspace, config),
-        openJobs: open,
       }),
     }))
 
