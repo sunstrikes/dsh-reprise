@@ -12,7 +12,7 @@
  * @module
  */
 
-import { isBlocking, isTerminal, validateArtifact, validateCandidate } from '@dsh-reprise/contract'
+import { isBlocking, isPlainObject, isTerminal, validateArtifact, validateCandidate } from '@dsh-reprise/contract'
 
 import { judgeTimeout } from '@dsh-reprise/exec'
 
@@ -23,7 +23,7 @@ import { recordedLanding } from './landing.js'
 import { MODEL_UNAVAILABLE, isModelUnavailable, isOutage, modelFailureOf, recordModelUnavailable } from './model-failure.js'
 import { recordWindowSamples, seriesOf } from './samples.js'
 import { consumePending } from './intents.js'
-import { gpuExclusivityOf, markerFromSubmissionId, outcomeOf, parseMarker, submissionIdFor } from './jobs.js'
+import { gpuExclusivityOf, gpuHolder, markerFromSubmissionId, outcomeOf, parseMarker, submissionIdFor } from './jobs.js'
 import { stepWorkspace } from './rounds.js'
 import { evaluateStop } from './stop.js'
 
@@ -312,7 +312,7 @@ async function stepFor(ports, candidateId, state) {
       // pair sharing the cards, and nothing in the cluster enforces it (measured, ticket 14). Held
       // here rather than refused, because the other job is ours and will finish.
       if (gpuExclusivityOf(config) === 'single_job') {
-        const holder = dispatchInFlight(store, candidateId)
+        const holder = gpuHolder(store, candidateId)
         if (holder !== undefined) {
           const poll = pollConfig(config)
           advance(store, candidateId, 'SUBMIT_QUEUED', { next_action_at: now + poll.base_ms })
@@ -355,28 +355,6 @@ async function stepFor(ports, candidateId, state) {
     default:
       return { candidateId, phase: state.phase, action: 'noop' }
   }
-}
-
-/**
- * Is another of our training jobs in flight? Used only when the run declared
- * `gpu_exclusivity: single_job`, and asked of two facts rather than one:
- *
- *  - **another candidate past the queue** (`SUBMIT` or `MONITOR_POLL`) — the window in which we have
- *    reserved the money but the cluster has not answered yet, so no ledger row exists to see;
- *  - **a ledger row of ours that is still open** — a job of an earlier run whose candidate is already
- *    terminal (or gone) but which the cluster may still be running. That row is the only trace of it,
- *    and dispatching over it is the collision this configuration exists to prevent.
- *
- * @returns {string | undefined} the candidate id holding the cards
- */
-function dispatchInFlight(store, candidateId) {
-  for (const id of store.candidateIds()) {
-    if (id === candidateId) continue
-    const phase = store.getState(id, 'phase')?.phase
-    if (phase === 'SUBMIT' || phase === 'MONITOR_POLL') return id
-  }
-  const open = store.inFlightJobs().filter((job) => job.candidate_id !== candidateId)
-  return open[0]?.candidate_id
 }
 
 // --------------------------------------------------------------- phases
@@ -595,7 +573,8 @@ function adoptLanding(ports, candidateId, state, recorded) {
  * Before a second attempt is asked for, the first attempt's record is recomputed from its own
  * evidence. That is what "recomputable" buys: a record that cannot be reproduced from the bytes it
  * claims to have checked is a contradiction (`conflict`), while a tree that simply moved on is
- * `stale` — and that is precisely why a retry can legitimately pass.
+ * `reproducible: false, reason: 'tree_moved'` — not a fifth state, and precisely why a retry can
+ * legitimately pass.
  */
 async function verify(ports, candidateId, state) {
   const { store, clock, judge, log } = ports
@@ -611,8 +590,14 @@ async function verify(ports, candidateId, state) {
     const prior = priorRecord(ports, candidateId, attempt - 1)
     if (prior !== undefined) {
       const recheck = recheckReport(prior, { worktreeDir })
-      log?.(`${candidateId}: attempt ${attempt - 1} rechecks ${recheck.status}`)
-      if (recheck.status === 'conflict') {
+      // The state is one of the four; `reproducible`/`reason` say whether the *tree* still lets the
+      // record be re-derived. Only a contradiction is terminal — a tree that moved on is exactly the
+      // case a second attempt is for, which is why the two are separate fields.
+      log?.(
+        `${candidateId}: attempt ${attempt - 1} rechecks ${recheck.state}` +
+          (recheck.reproducible ? '' : ` (${recheck.reason})`),
+      )
+      if (recheck.state === 'conflict') {
         return rejectCandidate(
           ports,
           candidateId,
@@ -916,7 +901,7 @@ async function analyze(ports, candidateId, state) {
   // The run's windowed samples, recorded before the report is validated: what this run measured is a
   // fact about the run whether or not the analysis written about it is acceptable. Same recorder,
   // same artifact, same event as the baseline's — that identity is what makes pairing possible.
-  const samples = recordCandidateSamples(ports, candidateId, job, collected)
+  const samples = recordCandidateSamples(ports, candidateId, job, collected, state)
 
   let artifact
   try {
@@ -963,7 +948,7 @@ async function analyze(ports, candidateId, state) {
  * refused is silence about an unusable series — a run whose samples do not satisfy the contract gets
  * a fact saying so, because "no samples" and "samples that break the shape" are different answers.
  */
-function recordCandidateSamples(ports, candidateId, job, collected) {
+function recordCandidateSamples(ports, candidateId, job, collected, state) {
   if (collected === undefined || job === undefined) return undefined
 
   const samples = seriesOf(collected)
@@ -979,6 +964,11 @@ function recordCandidateSamples(ports, candidateId, job, collected) {
     return undefined
   }
 
+  // What the executor reported, in the same precedence the analysis uses: what `collect()` fetched,
+  // then what the monitor recorded when the job succeeded, then the ledger row. It is recorded beside
+  // the series so a disagreement with the contract's reading is a fact rather than a mystery.
+  const reported = [collected?.metrics, state?.metrics, job?.metrics].find(isPlainObject) ?? {}
+
   return recordWindowSamples(
     { store: ports.store, clock: ports.clock, artifacts: ports.artifacts },
     {
@@ -988,6 +978,10 @@ function recordCandidateSamples(ports, candidateId, job, collected) {
       series: samples.series,
       source: samples.source,
       metric: null,
+      // The run's metric contract, so the window mode decides these numbers once, here, instead of
+      // every later reader inventing its own reading of the same series.
+      contract: ports.config?.metrics,
+      reported,
     },
   )
 }

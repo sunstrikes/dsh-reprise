@@ -34,6 +34,8 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 
+import { isPlainObject } from '@dsh-reprise/contract'
+
 import { resolveMetricContract } from './metric-contract.js'
 import { CALL_SITES, loadSkill, skillPath } from './skills.js'
 import { EXECUTOR_KINDS } from './warnings.js'
@@ -56,7 +58,6 @@ const PART_LABELS = Object.freeze({
   executor: 'executor entry',
 })
 
-const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isText = (value) => typeof value === 'string' && value.trim() !== ''
 const isTextList = (value) => Array.isArray(value) && value.length > 0 && value.every(isText)
 const textList = (value) => (Array.isArray(value) ? value.every(isText) : false)
@@ -94,7 +95,7 @@ export class DomainPackError extends Error {
  * @returns {string[]}
  */
 export function executorProblems(value, { label = 'executor' } = {}) {
-  if (!isObject(value)) return [`${label} must be an object with a kind`]
+  if (!isPlainObject(value)) return [`${label} must be an object with a kind`]
   const problems = []
   const kind = value.kind ?? 'local'
   if (!EXECUTOR_KINDS.includes(kind)) {
@@ -118,7 +119,7 @@ export function executorProblems(value, { label = 'executor' } = {}) {
 // the domain's decision, and a validator that ranked them would be a second contract.
 
 function metricContractProblems(value) {
-  if (!isObject(value)) return ['the metric contract must be a JSON object']
+  if (!isPlainObject(value)) return ['the metric contract must be a JSON object']
 
   const problems = []
   if (!isText(value.name)) {
@@ -135,9 +136,9 @@ function metricContractProblems(value) {
 }
 
 function priorsProblems(value) {
-  if (!isObject(value)) return ['the priors must be a JSON object']
+  if (!isPlainObject(value)) return ['the priors must be a JSON object']
   const problems = []
-  if (!isObject(value.search_space)) {
+  if (!isPlainObject(value.search_space)) {
     problems.push('search_space must be an object of named groups — the space a hypothesis may move within')
   }
   if (!Array.isArray(value.priors)) {
@@ -147,7 +148,7 @@ function priorsProblems(value) {
     problems.push('hypothesis_classes must be an array — a plan whose class nobody declared cannot be reviewed')
   } else {
     for (const [index, entry] of value.hypothesis_classes.entries()) {
-      if (!isObject(entry) || !isText(entry.id)) {
+      if (!isPlainObject(entry) || !isText(entry.id)) {
         problems.push(`hypothesis_classes[${index}].id must be a non-empty string`)
       }
     }
@@ -156,7 +157,7 @@ function priorsProblems(value) {
 }
 
 function surfaceProblems(value) {
-  if (!isObject(value)) return ['the adjustable-surface whitelist must be a JSON object']
+  if (!isPlainObject(value)) return ['the adjustable-surface whitelist must be a JSON object']
   const problems = []
   if (!isTextList(value.files)) {
     problems.push('files must be a non-empty array of paths — the whitelist a candidate\'s diff is checked against')
@@ -216,7 +217,7 @@ export function loadDomainPack(dir) {
       manifestPath,
     })
   }
-  if (!isObject(manifest)) {
+  if (!isPlainObject(manifest)) {
     throw new DomainPackError(packDir, [`${manifestPath} must contain a JSON object`], { manifestPath })
   }
 

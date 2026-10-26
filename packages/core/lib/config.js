@@ -22,6 +22,7 @@
 
 import { resolve as resolvePath } from 'node:path'
 
+import { isPlainObject } from '@dsh-reprise/contract'
 import { MODEL_KINDS } from '@dsh-reprise/exec/model'
 
 import { DomainPackError, executorProblems, loadDomainPack } from './domain.js'
@@ -34,7 +35,6 @@ export const DEFAULT_INTERVAL_MS = 5_000
 
 const CANDIDATE_KINDS = Object.freeze(['command', 'claude', 'dsh'])
 
-const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isText = (value) => typeof value === 'string' && value.trim() !== ''
 const isCommand = (value) => Array.isArray(value) && value.length > 0 && value.every(isText)
 
@@ -52,7 +52,7 @@ export function resolveConfig(raw = {}, { cwd = process.cwd(), loadDomain = load
   const problems = []
   const fail = () => ({ ok: false, problem: problems[0], problems, warnings: [] })
 
-  if (!isObject(raw)) {
+  if (!isPlainObject(raw)) {
     problems.push('the plugin configuration must be an object')
     return fail()
   }
@@ -89,7 +89,7 @@ export function resolveConfig(raw = {}, { cwd = process.cwd(), loadDomain = load
     // The cluster does not reserve the cards, so "which of the two ways do we own them" is a
     // configuration decision that has to be made on purpose. Both at once is a contradiction and is
     // refused here; neither is legal-but-dangerous and is warned about by name in `warnings.js`.
-    if (isObject(executor)) problems.push(...gpuExclusivityProblems(executor))
+    if (isPlainObject(executor)) problems.push(...gpuExclusivityProblems(executor))
   }
 
   // The metric contract: the run's own restatement, or the pack's. One resolver reads it — the same
@@ -108,7 +108,7 @@ export function resolveConfig(raw = {}, { cwd = process.cwd(), loadDomain = load
 
   const candidate = raw.candidate
   if (candidate !== undefined) {
-    if (!isObject(candidate)) problems.push('candidate must be an object with a kind')
+    if (!isPlainObject(candidate)) problems.push('candidate must be an object with a kind')
     else {
       const kind = candidate.kind ?? 'command'
       if (!CANDIDATE_KINDS.includes(kind)) {
@@ -121,7 +121,7 @@ export function resolveConfig(raw = {}, { cwd = process.cwd(), loadDomain = load
     const runner = raw.runner
     // LAND briefs an implementer inside the worktree the runner created. A candidate with no runner
     // is a run that dies at the first landing with a TypeError, which is why it is refused here.
-    if (!isObject(runner) || !isText(runner.repo) || !isText(runner.dir)) {
+    if (!isPlainObject(runner) || !isText(runner.repo) || !isText(runner.dir)) {
       problems.push('runner.repo and runner.dir are required when a candidate implementer is configured')
     }
   }
@@ -132,7 +132,7 @@ export function resolveConfig(raw = {}, { cwd = process.cwd(), loadDomain = load
   // degrades.
   const model = raw.model
   if (model !== undefined) {
-    if (!isObject(model)) problems.push('model must be an object with a kind or a command')
+    if (!isPlainObject(model)) problems.push('model must be an object with a kind or a command')
     else if (model.kind === undefined && !isCommand(model.command)) {
       problems.push('model must name a kind (dsh, claude or command) or a non-empty model.command argv')
     } else if (model.kind !== undefined && !MODEL_KINDS.includes(model.kind)) {
@@ -141,7 +141,7 @@ export function resolveConfig(raw = {}, { cwd = process.cwd(), loadDomain = load
       problems.push('model.command must be a non-empty argv array when model.kind is command')
     }
   }
-  const hasModel = isObject(model) && (modelPortDeclared(model) === true)
+  const hasModel = isPlainObject(model) && (modelPortDeclared(model) === true)
 
   if (raw.rounds !== undefined && raw.rounds !== false && !hasModel) {
     // ROUND_PLAN and ROUND_REFLECT are model entries; without a port the run stalls at the first
@@ -175,7 +175,7 @@ export function resolveConfig(raw = {}, { cwd = process.cwd(), loadDomain = load
   // `rounds.metric` is the shape rounds.js freezes at INIT, and a second account of which metric leads
   // would let the gate and the round planner optimise different numbers. An explicit `rounds.metric`
   // still wins here — and `warnings.js` reports it when it disagrees with the contract.
-  if (isObject(config.rounds) && config.rounds.metric === undefined) {
+  if (isPlainObject(config.rounds) && config.rounds.metric === undefined) {
     const binding = bindingOf(metricResolution)
     if (binding !== undefined) config.rounds = { ...config.rounds, metric: binding }
   }

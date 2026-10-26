@@ -420,14 +420,26 @@ function eventPrefixOf(store) {
  * per-axis top-k rotation over that. The baseline is in the set by construction, so a workspace with
  * nothing comparable yet plans its first round from the baseline — the behaviour every existing
  * workspace already had, now as a decision instead of an omission.
+ *
+ * **The rotation offset is the round's, not a constant.** `parentsOf` interleaves the per-axis lists
+ * so every axis leads before any axis gets a second slot, and `offset` decides which axis leads. A
+ * fixed 0 would mean the contract's first axis led every round of the run: the second objective would
+ * be ranked, represented and never *leading*, which is the predecessor's one-axis search wearing a
+ * multi-objective contract. So the offset moves on by one each round — `(round - 1) % axes`, so round
+ * 1 leads with the primary axis and the round after it leads with the next one. The round is the input
+ * rather than a counter because a re-plan of the same round must rotate the same way: the snapshot's
+ * `rotation.offset` has to be re-derivable from the facts, and a tick counter is not a fact.
  */
 function parentRoster({ store }, state, round, settings, view) {
   const set = frontierOf(view, { baseline: state.baseline })
-  const parents = parentsOf(set, { k: settings.candidates_per_round })
-  const snapshot = parentSnapshot({ round, events_prefix: eventPrefixOf(store), set, parents })
+  const axes = set.contract?.ok === true ? set.contract.objectives.length : 0
+  const offset = axes === 0 ? 0 : (round - 1) % axes
+  const parents = parentsOf(set, { k: settings.candidates_per_round, offset })
+  const snapshot = parentSnapshot({ round, events_prefix: eventPrefixOf(store), set, parents, offset })
   return {
     set,
     parents,
+    offset,
     snapshot,
     // What the planner is told: the set with its vectors, and the roster. Whole, unranked, untrimmed.
     facts: {
@@ -480,7 +492,10 @@ async function planNextRound(context, state) {
     // No model answered: not a refused artifact. Refusing here would spend the round's retry budget
     // and then ask a human to fix a provider, and the plan would look like a bad hypothesis.
     if (isModelUnavailable(error)) return modelOut(context, state, 'round_plan', error)
-    return refuse(context, state, { step: 'round_plan', status: 'invalid', message: `the round plan could not be produced: ${messageOf(error)}` })
+    // Nothing was produced, so there is no artifact to call malformed: refused with the cause and no
+    // four-state status (CODING_STANDARDS §2). `status: 'invalid'` here would send the next reader
+    // looking for a plan that breaks its schema, and the truth is that there is no plan at all.
+    return refuse(context, state, { step: 'round_plan', message: `the round plan could not be produced: ${messageOf(error)}` })
   }
 
   const verdict = validateArtifact('candidate_plan', artifact)
@@ -490,9 +505,10 @@ async function planNextRound(context, state) {
   // a plan that ignores that is refused rather than quietly truncated, because a dropped hypothesis
   // is an idea nobody can see was dropped.
   if (artifact.hypotheses.length > settings.candidates_per_round) {
+    // The artifact is well-formed — it is the *budget* that cannot afford it. Not `invalid`: nothing
+    // about the plan breaks the contract, so the refusal carries no four-state status.
     return refuse(context, state, {
       step: 'round_plan',
-      status: 'invalid',
       message: `the plan names ${artifact.hypotheses.length} hypotheses but this round affords ${settings.candidates_per_round} (candidates_per_round)`,
     })
   }
@@ -505,9 +521,10 @@ async function planNextRound(context, state) {
     try {
       landing = await judge.land({ candidateId, round, hypothesis, now })
     } catch (error) {
+      // The freeze failed (a read-only artifact store, a missing skill file) — a failed write, not a
+      // malformed artifact, so no four-state status.
       return refuse(context, state, {
         step: 'land',
-        status: 'invalid',
         message: `the hypothesis could not be frozen for ${candidateId}: ${messageOf(error)}`,
       })
     }
@@ -575,6 +592,9 @@ async function planNextRound(context, state) {
       candidates: landings.map((landing) => landing.candidateId),
       artifact: stored.path,
       parents: roster.parents,
+      // Which axis led this round's roster, beside whom it produced: a reader asking "why did the
+      // secondary objective lead round 3" gets the rotation, not a hunt through the snapshot file.
+      rotation_offset: roster.offset,
       parent_snapshot: roster.snapshot.address,
       // Recorded beside the parents because a reader asking "where did this round's candidates
       // start from" needs both answers: the parent is whom they build on, the code base is the tree.
@@ -595,7 +615,7 @@ async function reflectRound(context, state) {
     artifact = await judge.reflect({ round, facts: roundFacts(store, state, settings, frozenRoster(state)), now })
   } catch (error) {
     if (isModelUnavailable(error)) return modelOut(context, state, 'round_reflect', error)
-    return refuse(context, state, { step: 'round_reflect', status: 'invalid', message: `the reflection could not be produced: ${messageOf(error)}` })
+    return refuse(context, state, { step: 'round_reflect', message: `the reflection could not be produced: ${messageOf(error)}` })
   }
 
   const verdict = validateArtifact('round_reflect', artifact)
@@ -656,36 +676,56 @@ function modelOut(context, state, step, failure) {
 }
 
 /**
- * A refused artifact: record it, back off, and after the retry budget is spent, stop for a human.
+ * A refusal: record it, back off, and after the retry budget is spent, stop for a human.
  *
  * Backoff rather than a pause on the first refusal, because a model returning a malformed artifact
  * once is a hiccup; a model returning one repeatedly is a broken prompt, and a broken prompt needs a
  * person — not a loop that quietly retries until the budget is gone.
+ *
+ * `status` is **optional, and usually absent** (CODING_STANDARDS §2, CONTEXT §7). It belongs on a
+ * refusal in exactly one case: an artifact that exists and does not satisfy the contract, where the
+ * verdict's own four-state name says which way it failed. A plan too big for the round, a model that
+ * produced nothing, a freeze that could not be written — all are refusals whose news is bad and
+ * nothing is malformed, so they carry the step and the message and no state at all. Writing
+ * `invalid` for those would send a reader hunting for a schema fault that never existed.
+ *
+ * @param {{step: string, status?: 'ok'|'missing'|'invalid'|'conflict', message: string}} refusal
  */
 function refuse(context, state, { step, status, message }) {
   const { store, now, settings, log } = context
   const attempts = (state.attempts ?? 0) + 1
   const delay = Math.min(settings.retry.base_ms * 2 ** (attempts - 1), settings.retry.max_ms)
+  // One object, built once: `status: undefined` would vanish into the JSON payload and the state
+  // record anyway, but a reader (and a test) should be able to see that it was never written.
+  const detail = {
+    phase: state.phase,
+    step,
+    ...(status === undefined ? {} : { status }),
+    message,
+    attempts,
+  }
 
-  store.logOp('round_artifact_refused', { phase: state.phase, step, status, message, attempts }, now)
+  store.logOp('round_artifact_refused', detail, now)
   writeState(store, {
     ...state,
     attempts,
     next_action_at: now + delay,
-    last_refusal: { phase: state.phase, step, status, message, at_ms: now },
+    last_refusal: { step, ...(status === undefined ? {} : { status }), message, at_ms: now, phase: state.phase },
   })
-  log?.(`workspace: ${step} refused (${status}) — ${message}`)
+  log?.(`workspace: ${step} refused${status === undefined ? '' : ` (${status})`} — ${message}`)
 
   if (attempts >= settings.retry.max_attempts) {
-    pause(store, context.clock, {
-      reason: 'round_artifact_refused',
-      automatic: false,
-      phase: state.phase,
-      step,
-      status,
-      message,
-      attempts,
-    })
+    pause(store, context.clock, { reason: 'round_artifact_refused', automatic: false, ...detail })
   }
-  return { action: `refused:${status}`, phase: state.phase, round: state.round, message, attempts, next_action_at: now + delay }
+  // Named by the state when there is one, by the step when there is not: `refused:round_plan` says
+  // where it happened, which is the only thing a refusal without a state can honestly say.
+  return {
+    action: `refused:${status ?? step}`,
+    phase: state.phase,
+    round: state.round,
+    ...(status === undefined ? {} : { status }),
+    message,
+    attempts,
+    next_action_at: now + delay,
+  }
 }

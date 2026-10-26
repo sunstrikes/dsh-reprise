@@ -156,7 +156,7 @@ test('the conclusion page and `dump` agree on the stop decision, reason included
   store.close()
 
   const final = conclusionHandler(dir, {}).data
-  const overview = overviewHandler(dir, {}).data
+  const overview = (await overviewHandler(dir, {})).data
   const stop = sections(text).get('workspace stop')
 
   assert.equal(field(stop, 'state'), 'FINALIZE')
@@ -204,7 +204,7 @@ test('neither path invents a ranking for a run that never recorded its metric co
   store.close()
 
   const view = candidateHandler(dir, { candidate: 'r1-c1' }).data
-  const overview = overviewHandler(dir, {}).data
+  const overview = (await overviewHandler(dir, {})).data
   const positioned = sections(text).get('frontier position')
 
   assert.match(rows(positioned)[0], /not computed/)
@@ -245,7 +245,7 @@ async function packRun() {
 
 test('the workspace dump prints the cards, the queue and the measured/published line the page carries', async () => {
   const { dir } = await packRun()
-  const overview = overviewHandler(dir, {})
+  const overview = await overviewHandler(dir, {})
   const final = conclusionHandler(dir, {}).data
   const text = runDump(['--workspace', dir, '--overview']).output
 

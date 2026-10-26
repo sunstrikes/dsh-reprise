@@ -6,6 +6,12 @@
  * contract accepts; and the phases that do not consult a model call it exactly zero times. The
  * candidate machine is exercised by loop.test.js — here candidates are only *finished* directly, so
  * these tests stay about round bookkeeping.
+ *
+ * It also guards what a *refusal* may say (CODING_STANDARDS §2, CONTEXT §7): the four states answer
+ * "is this fact present and trustworthy", so only an artifact that exists and breaks its schema
+ * carries one. A plan too big for the round, a model port that produced nothing and a freeze that
+ * failed are refusals with a message and no status at all — the round is refused either way, but a
+ * reader sent hunting for a malformed artifact that never existed cannot be un-sent.
  */
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync } from 'node:fs'
@@ -100,6 +106,12 @@ async function toRoundOne(ports) {
 const finish = (store, candidateId, phase = 'DONE') => {
   const state = store.getState(candidateId, 'phase')
   store.setState(candidateId, 'phase', { ...state, phase })
+}
+
+/** The last refusal the round wrote, as the workspace recorded it — not as the return value shaped it. */
+function lastRefusal(store) {
+  const record = store.ops().find((row) => row.op === 'round_artifact_refused')
+  return record === undefined ? undefined : JSON.parse(record.detail)
 }
 
 test('the round artifact kinds are registered with the contract, and registering twice is harmless', async () => {
@@ -329,7 +341,7 @@ test('a hypothesis that names no file never becomes a candidate', async () => {
   ports.store.close()
 })
 
-test('a plan that would create more candidates than the round affords is refused', async () => {
+test('a plan that would create more candidates than the round affords is refused, and the refusal is not a state', async () => {
   const ports = setup({
     answers: {
       round_plan: {
@@ -341,13 +353,17 @@ test('a plan that would create more candidates than the round affords is refused
   await step(ports)
   const refused = await step(ports)
 
-  assert.match(refused.action, /refused:invalid/)
+  // The plan is a well-formed `candidate_plan`; it is *too big for the round*, which is news about
+  // the budget and not about the artifact. Refused, named, and carrying no four-state status.
+  assert.match(refused.action, /refused:round_plan/)
   assert.match(refused.message, /candidates_per_round/)
+  assert.equal(Object.hasOwn(lastRefusal(ports.store), 'status'), false, 'no state: nothing is malformed')
+  assert.equal(readRoundsState(ports.store).last_refusal.status, undefined)
   assert.deepEqual(ports.store.candidateIds(), [])
   ports.store.close()
 })
 
-test('a judge port that throws is a refused artifact, not a crashed loop', async () => {
+test('a judge port that throws is a refused round plan, named by its cause and carrying no status', async () => {
   const ports = setup({
     judge: {
       plan: async () => {
@@ -361,9 +377,31 @@ test('a judge port that throws is a refused artifact, not a crashed loop', async
   await step(ports)
   const refused = await step(ports)
 
-  assert.match(refused.action, /refused:invalid/)
+  // No model answer at all: there is no artifact to call malformed, so there is no state to name.
+  assert.match(refused.action, /refused:round_plan/)
   assert.match(refused.message, /skill file disappeared/)
+  assert.equal(Object.hasOwn(lastRefusal(ports.store), 'status'), false)
   assert.equal(readRoundsState(ports.store).phase, 'ROUND_PLAN')
+  ports.store.close()
+})
+
+test('a hypothesis that could not be frozen is refused with its cause and no four-state status', async () => {
+  const ports = setup({
+    judge: {
+      ...judgeFor({ model: async () => GOLDEN_PLAN(1) }),
+      land: async ({ candidateId }) => {
+        throw new Error(`artifacts directory is read-only (${candidateId})`)
+      },
+    },
+  })
+  await step(ports)
+  await step(ports)
+  const refused = await step(ports)
+
+  assert.match(refused.action, /refused:land/)
+  assert.match(refused.message, /artifacts directory is read-only \(r1-h1\)/)
+  assert.equal(Object.hasOwn(lastRefusal(ports.store), 'status'), false, 'a failed freeze is not a malformed artifact')
+  assert.deepEqual(ports.store.candidateIds(), [], 'a hypothesis that was never frozen is not a candidate')
   ports.store.close()
 })
 
@@ -401,11 +439,34 @@ test('a reflection the contract refuses keeps the round open', async () => {
   finish(ports.store, 'r1-h1')
   finish(ports.store, 'r1-h2')
 
+  // The control for the refusals above: this one *is* an artifact that exists and breaks its schema,
+  // so it keeps its four-state status. Removing `status` everywhere would be as wrong as keeping it.
   const refused = await step(ports)
   assert.match(refused.action, /refused:missing/)
   assert.match(refused.message, /summary/)
+  assert.equal(lastRefusal(ports.store).status, 'missing')
   assert.equal(readRoundsState(ports.store).reflection, undefined)
   assert.equal(readRoundsState(ports.store).phase, 'ROUND_PLAN')
+  ports.store.close()
+})
+
+test('a reflection the model never produced is refused with its cause and no four-state status', async () => {
+  const ports = setup({
+    judge: {
+      ...judgeFor({ model: async (request) => (request.call_site === 'round_plan' ? GOLDEN_PLAN(1) : GOLDEN_REFLECT) }),
+      reflect: async () => {
+        throw new Error('the model returned an empty body')
+      },
+    },
+  })
+  await toRoundOne(ports)
+  finish(ports.store, 'r1-h1')
+  finish(ports.store, 'r1-h2')
+
+  const refused = await step(ports)
+  assert.match(refused.action, /refused:round_reflect/)
+  assert.match(refused.message, /the model returned an empty body/)
+  assert.equal(Object.hasOwn(lastRefusal(ports.store), 'status'), false, 'nothing was produced, so nothing is malformed')
   ports.store.close()
 })
 
@@ -629,4 +690,42 @@ test('the same facts planned twice freeze the same address: the snapshot is cont
   second.store.close()
 
   assert.equal(a, b)
+})
+
+test('the rotation advances with the round, so two consecutive rounds lead with different axes', async () => {
+  // A two-axis contract, and two candidates that trade one axis for the other: neither dominates, so
+  // which of them leads the roster is decided by *which axis leads*, and nothing else.
+  const TWO_AXES = {
+    ...CONFIG,
+    metrics: { primary: 'auc', objectives: { auc: 'up', logloss: 'down' } },
+    rounds: { ...CONFIG.rounds, max_rounds: 3 },
+  }
+  const ports = setup({ config: TWO_AXES })
+  await toRoundOne(ports)
+  // r1-h1 leads on auc, r1-h2 leads on logloss. One round later the roster should stop leading with
+  // the same axis — that is the whole point of rotating, and it is a fact in the snapshot.
+  finishWithMetrics(ports.store, 'r1-h1', { auc: 0.75, logloss: 0.62 })
+  finishWithMetrics(ports.store, 'r1-h2', { auc: 0.73, logloss: 0.55 })
+
+  await step(ports) // reflect round 1
+  await step(ports) // close round 1
+  await step(ports) // plan round 2
+
+  const second = JSON.parse(readFileSync(readRoundsState(ports.store).plan.parent_snapshot.path, 'utf8')).content
+  assert.deepEqual(second.rotation, { axes: ['auc', 'logloss'], offset: 1 }, 'round 2 leads with the second axis')
+  assert.equal(second.parents[0], 'r1-h2', 'the logloss leader opens the roster, because logloss leads this round')
+  assert.deepEqual([...second.parents].sort(), ['r1-h1', 'r1-h2'], 'both axes are still represented')
+
+  // Round 2's candidates cross again, so the frontier still holds two trade-offs.
+  finishWithMetrics(ports.store, 'r2-h1', { auc: 0.74, logloss: 0.54 })
+  finishWithMetrics(ports.store, 'r2-h2', { auc: 0.71, logloss: 0.58 })
+  await step(ports) // reflect round 2
+  await step(ports) // close round 2
+  await step(ports) // plan round 3
+
+  const third = JSON.parse(readFileSync(readRoundsState(ports.store).plan.parent_snapshot.path, 'utf8')).content
+  assert.deepEqual(third.rotation, { axes: ['auc', 'logloss'], offset: 0 }, 'round 3 is back to the primary axis')
+  assert.equal(third.parents[0], 'r1-h1', 'the auc leader opens the roster on the rounds the first axis leads')
+  assert.notEqual(second.parents[0], third.parents[0], 'two consecutive rounds lead with different axes')
+  ports.store.close()
 })

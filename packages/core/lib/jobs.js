@@ -382,6 +382,42 @@ export function cudaVisibleDevicesOf(config) {
   return typeof devices === 'string' ? devices.replace(/\s+/g, '') : undefined
 }
 
+/** The two phases in which a candidate has our money reserved and may be holding the cards. */
+const PAST_THE_QUEUE = Object.freeze(['SUBMIT', 'MONITOR_POLL'])
+
+/**
+ * Which other candidate is holding the cards, under `gpu_exclusivity: single_job`.
+ *
+ * One rule, two callers: the loop **holds** a candidate at SUBMIT_QUEUED because of this answer
+ * (`loop.js`), and the overview page **names the same reason** for the same candidate
+ * (`projection.js`). Two derivations of "whose job is running" would eventually disagree about it,
+ * and the person reading the page would have no way to tell which one lied.
+ *
+ * It is asked of two traces, because one is not enough:
+ *
+ *  - **a candidate past the queue** (`SUBMIT` or `MONITOR_POLL`) — the window in which the money is
+ *    reserved but the cluster has not answered yet, so no ledger row exists to see;
+ *  - **a ledger row of ours that is still open** — a job of an earlier run whose candidate is already
+ *    terminal (or gone) but which the cluster may still be running. That row is the only trace of it.
+ *
+ * `undefined` means "nothing of ours is in flight", which is not the same answer as "we did not look":
+ * this reads our own facts, never the cluster.
+ *
+ * @param {{ candidateIds?: () => string[], getState?: Function, inFlightJobs?: () => object[] }} store
+ * @param {string} candidateId the candidate asking (it is never its own holder)
+ * @returns {string | undefined} the candidate id holding the cards
+ */
+export function gpuHolder(store, candidateId) {
+  const ids = typeof store?.candidateIds === 'function' ? store.candidateIds() : []
+  for (const id of ids) {
+    if (id === candidateId) continue
+    const phase = store.getState(id, 'phase')?.phase
+    if (PAST_THE_QUEUE.includes(phase)) return id
+  }
+  const open = typeof store?.inFlightJobs === 'function' ? store.inFlightJobs() : []
+  return open.find((job) => job.candidate_id !== candidateId)?.candidate_id
+}
+
 /**
  * What is wrong with the exclusivity declaration, if anything. Refusals only — the "declared
  * neither" case is a warning, because it is legal and merely dangerous.

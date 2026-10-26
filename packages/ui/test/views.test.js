@@ -63,7 +63,7 @@ async function concludedWorkspace({ stop = { max_rounds: 0 }, conclude = false }
 test('the overview answers from the workspace directory alone, with every store handle and session closed', async () => {
   const { dir } = await concludedWorkspace()
 
-  const answer = overviewHandler(dir, {})
+  const answer = await overviewHandler(dir, {})
 
   assert.equal(answer.view, 'overview')
   assert.ok(answer.data !== null, 'the page still exists after the process that ran the loop exited')
@@ -92,7 +92,7 @@ test('a run that never recorded a budget says so instead of showing 0 as if it w
   const dir = dirname(ports.store.path)
   ports.store.close()
 
-  const answer = overviewHandler(dir, {})
+  const answer = await overviewHandler(dir, {})
 
   assert.equal(answer.data.spend.limitGpuHours, 0, 'the default is 0, and 0 means unlimited — not "free"')
   assert.equal(answer.data.spend.settledGpuHours, 0.5)
@@ -102,12 +102,12 @@ test('a run that never recorded a budget says so instead of showing 0 as if it w
   )
 })
 
-test('a workspace whose facts have not started yet is answered as a page of zeros, not as a failure', () => {
+test('a workspace whose facts have not started yet is answered as a page of zeros, not as a failure', async () => {
   const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', {}) })
   const dir = dirname(ports.store.path)
   ports.store.close()
 
-  const answer = overviewHandler(dir, {})
+  const answer = await overviewHandler(dir, {})
   assert.equal(answer.view, 'overview')
   assert.equal(answer.data.rounds.completed, 0, 'an empty fact plane is a rendered page, not a 500')
   assert.equal(answer.data.candidates.total, 0)
@@ -124,8 +124,8 @@ test('a workspace whose facts have not started yet is answered as a page of zero
   assert.equal(detail.missing, true, 'a candidate with no facts is reported as missing, not as an empty candidate')
 })
 
-test('a workspace that never existed is answered as empty too — a fresh install opens the page', () => {
-  const answer = overviewHandler('/tmp/reprise-ui-does-not-exist-' + String(Date.now()), {})
+test('a workspace that never existed is answered as empty too — a fresh install opens the page', async () => {
+  const answer = await overviewHandler('/tmp/reprise-ui-does-not-exist-' + String(Date.now()), {})
 
   assert.equal(answer.data, null)
   assert.match(answer.reason, /no facts recorded/)

@@ -36,6 +36,8 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
+import { isPlainObject } from '@dsh-reprise/contract'
+
 import { budgetOf, pause, resume } from './budget.js'
 
 /** Workspace-wide intents have no candidate, so their events land on this reserved actor. */
@@ -75,7 +77,6 @@ export class IntentRefused extends Error {
   }
 }
 
-const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isId = (value) => typeof value === 'string' && ID.test(value)
 const isText = (value, max = MAX_TEXT) => typeof value === 'string' && value.trim() !== '' && value.length <= max
 /** `true` is an `int` in JS and would grant one hour; booleans are never numbers here. */
@@ -111,7 +112,7 @@ function ensureLayout(workspaceDir) {
  */
 export function validateIntent(intent, { expectedId } = {}) {
   const refuse = (reason) => ({ ok: false, reason })
-  if (!isObject(intent)) return refuse('not_an_object')
+  if (!isPlainObject(intent)) return refuse('not_an_object')
 
   const kind = intent.kind
   if (typeof kind !== 'string' || !INTENT_KINDS.includes(kind)) return refuse(`unknown_kind: ${JSON.stringify(kind ?? null)}`)
@@ -228,7 +229,7 @@ function describePending(workspaceDir, name, now) {
   const intentId = name.slice(0, -'.json'.length)
   try {
     const intent = readJson(path)
-    const held = isObject(intent) && intent.kind === 'proposal' && intent.requires_approval === true
+    const held = isPlainObject(intent) && intent.kind === 'proposal' && intent.requires_approval === true
     return {
       intent_id: intentId,
       kind: typeof intent?.kind === 'string' ? intent.kind : 'unknown',

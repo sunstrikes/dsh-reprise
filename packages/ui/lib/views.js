@@ -171,9 +171,18 @@ function notesFor(store) {
   return notes
 }
 
-/** The overview page: where the run is, what it is spending, what it found, and why it ended. */
-export function overviewView(store, query = {}) {
-  return envelope(store, 'overview', { data: overview(store, { config: configFrom(store) }), notes: notesFor(store) }, query)
+/**
+ * The overview page: where the run is, what it is spending, what it found, and why it ended.
+ *
+ * `listing` is the cluster's answer, when the caller has one (the route reads it through
+ * `jobs.js`'s `readListing` before calling in). The page has only the workspace directory and cannot
+ * ask the cluster itself, so an absent listing is not an error — it is the `cards.inUse: null`
+ * answer, and the projection says why. Passing it through rather than dropping it is what makes
+ * "how many cards are in use" a number the page can print at all.
+ */
+export function overviewView(store, query = {}, { listing } = {}) {
+  const data = overview(store, { config: configFrom(store), listing })
+  return envelope(store, 'overview', { data, notes: notesFor(store) }, query)
 }
 
 /** The rounds page: who ran in each round, how each finished, whether the round moved the best. */

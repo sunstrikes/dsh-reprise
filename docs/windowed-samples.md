@@ -134,6 +134,14 @@ different shapes would make the comparison impossible rather than merely awkward
   `_baseline`), carrying the artifact reference, its sha256, the unit, the window count and the metric
   names. An artifact with no fact is a file nobody can tell was collected; a fact with no artifact is a
   claim with no evidence.
+- **The fact also carries the contract's reading** (`window_read`), computed the moment the samples
+  land because that is the last moment the windows and the executor's own aggregate are both in hand:
+  per ranked metric, the value `readMetric` produced under the contract's `window_mode`, the mode it
+  used, the metrics it could not read (with the window named), and any disagreement with the number
+  the executor reported. The ranking is a read-only view with no artifact store, so the collapsed
+  numbers travel with the fact — **the ranking and the guardrail vectors are read from `window_read`,
+  not from the executor's flat aggregate**, and a disagreement between the two accounts is recorded
+  rather than resolved silently in either direction.
 - **The series is found** from the executor's answer: a parsed `window_series` document if the adapter
   already produced one, otherwise the driver log (the `REPRISE_WINDOWS` line) read by the exec
   adapter — the kernel decides which artifact to hand the parser, never how to parse it.
@@ -255,16 +263,19 @@ a `data failure` reason and an empty stdout.
 ## What this page does not decide
 
 - **Which metric counts, and how windows collapse to one number** (mean of windows, or the last one) —
-  the metric contract's `window_mode`, applied by `readMetric` in `packages/core/lib/metric-contract.js`.
+  the metric contract's `window_mode`, applied by `readMetric` in `packages/core/lib/metric-contract.js`
+  and recorded on the sample fact by `readSeries` (same module), so the ranking ranks the number the
+  contract computed.
   "Last" means the last window of the series: if that window carries no finite number for the metric,
   the answer is "not measured", with the window named — an earlier window is never substituted, because
   then one reader would call it the last measurement and another the last window.
 - **What an improvement is, and what a regression is** — the comparison, tickets 21/30. `pairWindows`
   pairs window by bounds; `packages/core/lib/stop.js` reads that pairing to kill a candidate whose
-  last window carries no finite value for the deciding metric (*evidence invalid*: the artifact was
-  fine, the number was absent) and one that is worse than the baseline in each of the trailing N
-  windows (`stop.regression_windows`, with `stop.regression_floor` raising — never lowering — the
-  contract's tolerance). Both read a subject's samples through `windowSamplesOf` in
+  last window carries no finite value for the deciding metric (*evidence missing*: the artifact was
+  fine, the number was absent — `not measured` is not `malformed`, so the reason says absence and the
+  rejection carries no four-state status) and one that is worse than the baseline in each of the
+  trailing N windows (`stop.regression_windows`, with `stop.regression_floor` raising — never
+  lowering — the contract's tolerance). Both read a subject's samples through `windowSamplesOf` in
   `packages/core/lib/samples.js`, the same way for the baseline and for a candidate.
 - **Tensor-valued scalars** — only `simple_value` scalars are read today; a run that logs tensors needs
   an adapter change here, not a kernel change.

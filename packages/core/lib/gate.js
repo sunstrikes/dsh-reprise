@@ -37,6 +37,23 @@ import { spawnSync } from 'node:child_process'
 export const GATE_CHECKS = Object.freeze(['syntax', 'allowed_surface', 'conflict_markers'])
 
 /**
+ * A recheck's state vocabulary: the contract's four states, and **only** those (CONTEXT §7).
+ *
+ * The four answer "is this record present and trustworthy", a question about the artifact. A recheck
+ * also learns things about the *tree*, and those are not states: "the tree moved on" says nothing
+ * about the record — the record was true of the tree it recorded, and that tree is gone — so it is
+ * `reproducible: false` with a `reason`, beside a state that stays `ok`.
+ */
+export const RECHECK_STATES = Object.freeze(['ok', 'missing', 'invalid', 'conflict'])
+
+/**
+ * Why a recheck could not reproduce the record. A closed list, because a caller must be able to
+ * branch on the reason: a `tree_moved` record may be replaced by a retry, a `checks_disagree` one is
+ * a contradiction that a retry cannot fix.
+ */
+export const RECHECK_REASONS = Object.freeze(['tree_moved', 'no_evidence', 'no_recorded_checks', 'checks_disagree'])
+
+/**
  * How many attempts the gate gets, and how long it waits between them.
  *
  * `max_attempts: 1` restores the single-shot gate a careful operator may want; the default is three
@@ -316,24 +333,41 @@ const evidenceOf = (record) => {
 /**
  * Recompute a stored gate record from its own evidence.
  *
- * Four answers, and keeping them apart is the point:
+ * Two questions, answered separately because they are separate questions:
  *
- *   `ok`        the same bytes produce the same conclusion — the record is reproducible
- *   `stale`     the tree moved on (a file changed, vanished, or the worktree is gone). Not a
- *               contradiction: the record was true of the tree it recorded, and that tree is gone.
- *   `missing`   the record carries no evidence, so nothing can be recomputed — and saying so is not
- *               the same as agreeing
- *   `conflict`  identical bytes produced a *different* conclusion. A deterministic check disagreed
- *               with itself, which no retry can fix and a human needs to see
+ *   `state`         is the record present and trustworthy — one of the four (CONTEXT §7):
+ *                     `ok`        the record is there and recomputes to the same conclusion
+ *                     `missing`   it carries no evidence, or names none of the gate's own checks, so
+ *                                 nothing can be recomputed — and saying so is not the same as agreeing
+ *                     `conflict`  identical bytes produced a *different* conclusion. A deterministic
+ *                                 check disagreed with itself, which no retry can fix and a human
+ *                                 needs to see
+ *
+ *   `reproducible`  could the record be reproduced *from the tree as it stands now*, with `reason`
+ *                   naming why not. `tree_moved` — a file changed, vanished, or the worktree is gone
+ *                   — is **the tree's** answer, not the record's: the record was true of the tree it
+ *                   recorded, and that tree is gone, so `state` stays `ok` and this boolean carries
+ *                   the news. It is also why a retry can legitimately pass: re-deriving over a moved
+ *                   tree is a new measurement, not a contradiction.
+ *
+ * `invalid` is part of the vocabulary and is never produced here, on purpose: this function is only
+ * ever handed a record a `verify_verdict` validator already accepted, so nothing it can find is a
+ * schema fault. A malformed record never reaches it. (If that ever stops being true, the answer is an
+ * `invalid` with a reason — not a new name beside the four.)
  *
  * @param {any} record a `verify_verdict` artifact
  * @param {{ worktreeDir?: string, readFile?: (path: string) => string, parsers?: Record<string, Function> }} [options]
- * @returns {{ status: 'ok' | 'stale' | 'missing' | 'conflict', message: string }}
+ * @returns {{ state: 'ok' | 'missing' | 'invalid' | 'conflict', reproducible: boolean, reason: string | null, message: string }}
  */
 export function recheckReport(record, { worktreeDir, readFile, parsers } = {}) {
   const evidence = evidenceOf(record)
   if (evidence === undefined) {
-    return { status: 'missing', message: 'the record carries no evidence, so there is nothing to recompute' }
+    return {
+      state: 'missing',
+      reproducible: false,
+      reason: 'no_evidence',
+      message: 'the record carries no evidence, so there is nothing to recompute',
+    }
   }
 
   const recorded = new Map(
@@ -342,7 +376,12 @@ export function recheckReport(record, { worktreeDir, readFile, parsers } = {}) {
       .map((check) => [check.name, check.result]),
   )
   if (recorded.size === 0) {
-    return { status: 'missing', message: 'the record names none of the gate\'s own checks, so there is nothing to recompute' }
+    return {
+      state: 'missing',
+      reproducible: false,
+      reason: 'no_recorded_checks',
+      message: 'the record names none of the gate\'s own checks, so there is nothing to recompute',
+    }
   }
 
   const fresh = staticReport({
@@ -362,7 +401,12 @@ export function recheckReport(record, { worktreeDir, readFile, parsers } = {}) {
     else if (now !== file.digest) moved.push(`${file.path} changed since the record was written`)
   }
   if (moved.length > 0) {
-    return { status: 'stale', message: `the tree moved since this record was written: ${moved.join('; ')}` }
+    return {
+      state: 'ok',
+      reproducible: false,
+      reason: 'tree_moved',
+      message: `the tree moved since this record was written: ${moved.join('; ')}`,
+    }
   }
 
   const disagreed = []
@@ -375,9 +419,11 @@ export function recheckReport(record, { worktreeDir, readFile, parsers } = {}) {
   }
   if (disagreed.length > 0) {
     return {
-      status: 'conflict',
+      state: 'conflict',
+      reproducible: false,
+      reason: 'checks_disagree',
       message: `the gate record cannot be reproduced from its own evidence: ${disagreed.join('; ')}`,
     }
   }
-  return { status: 'ok', message: '' }
+  return { state: 'ok', reproducible: true, reason: null, message: '' }
 }

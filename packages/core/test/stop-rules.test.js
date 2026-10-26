@@ -10,8 +10,8 @@
  * One failing case per rule, because a rule that only ever passes is a rule nobody has seen work:
  *
  *   1. **the last window has no finite number** → the candidate dies *now*, with the reason
- *      `evidence_invalid` and **no four-state status** (CODING_STANDARDS §2: the artifact was fine,
- *      the number was absent);
+ *      `evidence_missing` and **no four-state status** (CODING_STANDARDS §2: the artifact was fine,
+ *      the number was absent — which is *not measured*, not *malformed*, so the reason says so);
  *   2. **per-metric regression** over the trailing N windows, with a tolerance floor that may only
  *      raise a tolerance and never lower one;
  *   3. **wall-clock timeout / window ceiling** are *workspace* conclusions recorded on `_workspace`,
@@ -66,7 +66,7 @@ const facts = ({ stop = {}, candidates = [], samples = {}, now = 0, startedAt = 
 
 const killOf = (decision) => decision.kills[0]
 
-// ----------------------------------------------------------------- 1. evidence invalid
+// --------------------------------------------------------------- 1. evidence missing
 
 test('a candidate whose last window has no finite number is killed, with a reason and no four-state status', () => {
   const cases = [
@@ -95,18 +95,22 @@ test('a candidate whose last window has no finite number is killed, with a reaso
     const kill = killOf(decision)
     assert.equal(kill.candidate_id, 'c1', `${name}: the candidate with the unusable tail is the one that dies`)
     assert.equal(kill.rule, 'last_window_unmeasured', name)
-    assert.equal(kill.reason, 'evidence_invalid', `${name}: the reason is "证据无效", and it is a reason, not a status`)
+    assert.equal(
+      kill.reason,
+      'evidence_missing',
+      `${name}: the number was absent, so the reason states absence — not a defect in the artifact`,
+    )
     assert.equal('status' in kill, false, `${name}: nothing was malformed, so no four-state status (CODING_STANDARDS §2)`)
     assert.match(kill.message, /last window/, `${name}: the fact explains which window said nothing`)
   }
 })
 
-test('a candidate with no window samples at all is not killed for invalid evidence', () => {
+test('a candidate with no window samples at all is not killed for missing evidence', () => {
   const decision = decideStop(
     facts({ candidates: [{ candidate_id: 'c1', phase: 'DONE' }], samples: { baseline: BASELINE, candidates: {} } }),
   )
 
-  assert.deepEqual(decision.kills, [], 'no evidence is a missing measurement, not an invalid one')
+  assert.deepEqual(decision.kills, [], 'no evidence at all is "nothing to judge yet", not a tail that says nothing')
 })
 
 test('an unfinished candidate is never killed for a tail that is still being written', () => {

@@ -73,6 +73,8 @@
  * @module
  */
 
+import { isPlainObject } from '@dsh-reprise/contract'
+
 /** The four states a contract can resolve to. `conflict` is never merged into `invalid`. */
 export const CONTRACT_STATUSES = Object.freeze(['ok', 'missing', 'invalid', 'conflict'])
 
@@ -94,7 +96,6 @@ const DIRECTIONS = Object.freeze({ up: 'up', down: 'down', higher: 'up', lower: 
 /** 'up' / 'down' as the judge's 'higher' / 'lower', for the comparison it owns. */
 export const JUDGE_DIRECTION = Object.freeze({ up: 'higher', down: 'lower' })
 
-const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isText = (value) => typeof value === 'string' && value.trim() !== ''
 const isPositive = (value) => typeof value === 'number' && Number.isFinite(value) && value > 0
 const isWindowMode = (value) => isText(value) && WINDOW_MODES.includes(value.trim().toLowerCase())
@@ -148,7 +149,7 @@ function perMetricSetting(declared, { field, ranked, isValue, what, decides }) {
 
   if (declared === undefined) return { value, overrides, problems }
 
-  if (!isObject(declared)) {
+  if (!isPlainObject(declared)) {
     if (isValue(declared)) value = declared
     else reject(field, declared)
     return { value, overrides, problems }
@@ -227,7 +228,7 @@ export function resolveMetricContract(contract) {
     add('missing', 'no metric contract was resolved — nothing declares a primary metric and the objectives it leads')
     return noContract()
   }
-  if (!isObject(contract)) {
+  if (!isPlainObject(contract)) {
     add('invalid', `the metric contract must be a JSON object (got ${describe(contract)})`)
     return noContract()
   }
@@ -238,7 +239,7 @@ export function resolveMetricContract(contract) {
   const directions = new Map()
   if (declaredObjectives === undefined) {
     add('missing', 'objectives is required — the metrics this contract ranks, and the only ones a comparison may use')
-  } else if (!isObject(declaredObjectives)) {
+  } else if (!isPlainObject(declaredObjectives)) {
     add('invalid', `objectives must be an object of {metric: "up" | "down"} (got ${describe(declaredObjectives)})`)
   } else if (Object.keys(declaredObjectives).length === 0) {
     add('invalid', 'objectives is empty — a contract that ranks nothing cannot compare two candidates')
@@ -294,7 +295,7 @@ export function resolveMetricContract(contract) {
   let guardrail
   if (contract.guardrail !== undefined) {
     const declared = contract.guardrail
-    if (!isObject(declared) || !isText(declared.metric)) {
+    if (!isPlainObject(declared) || !isText(declared.metric)) {
       add('invalid', 'guardrail must be an object naming the metric it protects (guardrail.metric)')
     } else if (ranked.length > 0 && !directions.has(declared.metric.trim())) {
       add(
@@ -361,7 +362,7 @@ export function resolveMetricContract(contract) {
   })
   problems.push(...windows.problems)
 
-  if (contract.role !== undefined && !isObject(contract.role)) {
+  if (contract.role !== undefined && !isPlainObject(contract.role)) {
     add('invalid', 'role must be an object of {metric: "<what it is for>"} when present')
   }
 
@@ -371,7 +372,7 @@ export function resolveMetricContract(contract) {
     minimum_effective_delta: deltas.value ?? STRICT_MINIMUM_EFFECTIVE_DELTA,
     window: isText(windows.value) ? asMode(windows.value) : DEFAULT_WINDOW_MODE,
   }
-  const roleOf = (name) => (isObject(contract.role) && isText(contract.role[name]) ? contract.role[name] : undefined)
+  const roleOf = (name) => (isPlainObject(contract.role) && isText(contract.role[name]) ? contract.role[name] : undefined)
 
   const objectives = ranked.map((name) =>
     Object.freeze({
@@ -431,8 +432,8 @@ export function bindingOf(resolved) {
 
 /** The windows of a series, or an empty list when the value is not a series at all. */
 function windowsOf(series) {
-  if (!isObject(series) || !Array.isArray(series.windows)) return []
-  return series.windows.filter(isObject)
+  if (!isPlainObject(series) || !Array.isArray(series.windows)) return []
+  return series.windows.filter(isPlainObject)
 }
 
 /**
@@ -449,7 +450,7 @@ function windowsOf(series) {
  */
 export function windowValues(series, name) {
   return windowsOf(series).map((window) => {
-    const measured = isObject(window.metrics) ? window.metrics[name] : undefined
+    const measured = isPlainObject(window.metrics) ? window.metrics[name] : undefined
     return {
       index: window.index,
       start: window.start,
@@ -511,4 +512,64 @@ export function readMetric(series, rule) {
   }
   const total = measured.reduce((sum, window) => sum + window.value, 0)
   return { metric: name, window: mode, value: total / measured.length, reason: undefined }
+}
+
+/**
+ * Read one series the way the contract says to, for **every** ranked metric — and compare each
+ * answer with the flat number the executor reported.
+ *
+ * Why this exists as a function rather than as a loop at one call site: the window reading is
+ * recorded **when the samples land** (`samples.js`), because that is the last moment both the series
+ * and the executor's own aggregate are in hand. The ranking is a read-only view that never touches
+ * the artifact store, so the contract's read travels with the fact; whoever ranks later reads it
+ * back. One reading, one place, and the number in the ranking is the number the contract computed.
+ *
+ * `values` holds a metric only when the contract could read one. A metric it could not read lands in
+ * `unmeasured` with `readMetric`'s reason and **no fallback** to `reported` — the contract asked the
+ * evidence and got "not measured", and substituting the executor's headline number would be the
+ * silent reinterpretation this module exists to remove. `reported` is used for exactly one thing: the
+ * `disagreements` list, so a reader can see that the executor's aggregate said something else.
+ *
+ * `modes` records which reading produced each value, so a later reader whose contract states a
+ * *different* window mode can tell that the recorded number does not answer its question.
+ *
+ * @param {any} contract a resolved contract (`resolveMetricContract`); anything not `ok` reads nothing
+ * @param {{unit?: string, windows?: unknown[]}} series a `window_series` document
+ * @param {Record<string, unknown>} [reported] the executor's own metric table, for the disagreement list
+ * @returns {{
+ *   values: Record<string, number>,
+ *   unmeasured: Record<string, string>,
+ *   modes: Record<string, 'mean' | 'last'>,
+ *   disagreements: {metric: string, window: 'mean' | 'last', contract: number, reported: number}[],
+ *   contract_ref: string | null,
+ * } | null}
+ */
+export function readSeries(contract, series, reported = {}) {
+  // No contract is not "read it however you like": there is no rule for which metric decides or how a
+  // window collapses, so nothing is read and the caller sees `null`.
+  if (contract?.ok !== true) return null
+
+  /** @type {Record<string, number>} */
+  const values = {}
+  /** @type {Record<string, string>} */
+  const unmeasured = {}
+  /** @type {Record<string, 'mean' | 'last'>} */
+  const modes = {}
+  const disagreements = []
+
+  for (const objective of contract.objectives) {
+    const read = readMetric(series, objective)
+    modes[objective.name] = read.window
+    if (typeof read.value !== 'number' || !Number.isFinite(read.value)) {
+      unmeasured[objective.name] = read.reason ?? `no window measured ${objective.name}`
+      continue
+    }
+    values[objective.name] = read.value
+    const flat = isPlainObject(reported) ? reported[objective.name] : undefined
+    if (typeof flat === 'number' && Number.isFinite(flat) && flat !== read.value) {
+      disagreements.push({ metric: objective.name, window: read.window, contract: read.value, reported: flat })
+    }
+  }
+
+  return { values, unmeasured, modes, disagreements, contract_ref: contract.ref ?? null }
 }

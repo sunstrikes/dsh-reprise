@@ -25,6 +25,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { readListing } from '../../core/lib/jobs.js'
 import { DB_FILENAME, Store } from '../../core/lib/store.js'
 import { ViewError, callView, callsView, candidateView, conclusionView, overviewView, roundsView } from './views.js'
 
@@ -79,9 +80,22 @@ function answer(workspace, name, render, query) {
   return rendered ?? nothingYet(name, workspace, query)
 }
 
-/** The overview route's plain handler: `(workspace, query) → JSON`. */
-export function overviewHandler(workspace, query = {}) {
-  return answer(workspace, 'overview', overviewView, query)
+/**
+ * The overview route's plain handler: `(workspace, query, { platform }) → Promise<JSON>`.
+ *
+ * The one route that may ask the world a question. `cards.inUse` and `queue.upstream` are facts only
+ * the cluster owns, so when a platform port is supplied the handler reads its listing through
+ * `jobs.js`'s `readListing` — the same reader `reprise jobs` uses — and hands the answer to the
+ * projection. Three answers stay three answers: a listing that was read (real numbers), a platform
+ * that cannot list ("cannot read", in its own words), and no platform at all (the page says the
+ * listing was not read and reports `null`, never 0).
+ *
+ * Asynchronous because a listing is a network call. Every other route stays synchronous; the route
+ * adapter awaits uniformly, so a handler's shape is one thing rather than two.
+ */
+export async function overviewHandler(workspace, query = {}, { platform } = {}) {
+  const listing = platform === undefined ? undefined : await readListing(platform)
+  return answer(workspace, 'overview', (store) => overviewView(store, query, { listing }), query)
 }
 
 /** The rounds route's plain handler. */
@@ -161,13 +175,15 @@ function route({ path, methods, fetch }) {
   return { path, methods, requestBody: 'buffered', fetch }
 }
 
-function routeFor({ path, handler, workspace }) {
+function routeFor({ path, handler, workspace, platform }) {
   return route({
     path,
     methods: ['GET'],
-    fetch: (request) => {
+    // `await` on a non-promise is a no-op, so one adapter serves the five synchronous views and the
+    // one route that reads the cluster listing.
+    fetch: async (request) => {
       try {
-        return json(handler(workspace, queryOf(request.url)))
+        return json(await handler(workspace, queryOf(request.url), { platform }))
       } catch (error) {
         if (error instanceof ViewError) return json({ error: { message: error.message } }, error.status)
         return json({ error: { message: error?.message ?? String(error) } }, 500)
@@ -179,13 +195,19 @@ function routeFor({ path, handler, workspace }) {
 /**
  * Mount the dashboard on the host's connection service.
  *
- * @param {{ connection: { fetch: { register(route: object): () => void } }, workspace: string }} options
+ * @param {{
+ *   connection: { fetch: { register(route: object): () => void } },
+ *   workspace: string,
+ *   platform?: object,
+ * }} options `platform` is optional: it is the only thing any route may ask, and only the overview
+ *   route does (the cluster listing). Without it the page is exactly as complete as it was — it just
+ *   reports "the cluster listing was not read" instead of a number.
  * @returns {() => void} the disposer that unregisters every route this call mounted
  */
-export function registerRoutes({ connection, workspace }) {
+export function registerRoutes({ connection, workspace, platform }) {
   const disposers = []
   try {
-    for (const entry of ROUTES) disposers.push(connection.fetch.register(routeFor({ ...entry, workspace })))
+    for (const entry of ROUTES) disposers.push(connection.fetch.register(routeFor({ ...entry, workspace, platform })))
     for (const entry of ASSETS) {
       disposers.push(
         connection.fetch.register(route({ path: entry.path, methods: ['GET'], fetch: () => assetResponse(entry) })),
