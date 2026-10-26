@@ -159,6 +159,8 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 | `rounds.retry.base_ms` / `.max_ms` / `.max_attempts` | `60000` / `3600000` / `3` | artifact 被拒后的退避，退到最后交给人 |
 | `stop.max_rounds` | `3` | `0` 关闭这条规则 |
 | `stop.max_no_improvement_rounds` / `.consecutive_empty_rounds` | `0`（关闭） | 可选启用的判停规则 |
+| `stop.max_wall_hours` / `.max_windows` | `0`（关闭） | 工作区级上限：开得太久或窗口数到顶即结束整次运行——记在 `_workspace` 上，与「否掉一个候选」不是同一个结论 |
+| `stop.regression_windows` / `.regression_floor` | `0`（关闭）/ `0` | 尾部 N 个窗口逐个都比基线差才杀掉候选；下限只抬高容差、从不放宽 |
 | `budget.gpu_hours_limit` | `0`（不限） | 硬上限；未设上限的远程执行器每次读取都会被警告 |
 | `budget.soft_ratio` / `.candidate_gpu_hours` | `0.8` / `0.5` | 到这个比例就停止派发；一次派发预扣多少 |
 | `budget.max_runtime_hours` / `.judge_tokens` | `0`（不限）/ `false` | 墙钟闸门；token 只记录，从不裁决 |

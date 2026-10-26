@@ -172,6 +172,8 @@ pack, and a pack missing a part is refused by name at boot instead of running ha
 | `rounds.retry.base_ms` / `.max_ms` / `.max_attempts` | `60000` / `3600000` / `3` | backoff for a refused artifact, then a human |
 | `stop.max_rounds` | `3` | `0` disables the rule |
 | `stop.max_no_improvement_rounds` / `.consecutive_empty_rounds` | `0` (off) | opt-in stop rules |
+| `stop.max_wall_hours` / `.max_windows` | `0` (off) | workspace-level ceilings: the run ends when it has been open this long, or has measured this many windows — a conclusion on `_workspace`, unlike a candidate rejection |
+| `stop.regression_windows` / `.regression_floor` | `0` (off) / `0` | kill a candidate worse than the baseline in each of the trailing N windows; the floor may raise a tolerance, never lower one |
 | `budget.gpu_hours_limit` | `0` (unlimited) | hard cap; an uncapped remote executor is warned about, every read |
 | `budget.soft_ratio` / `.candidate_gpu_hours` | `0.8` / `0.5` | stop dispatching at this fraction; what a dispatch reserves |
 | `budget.max_runtime_hours` / `.judge_tokens` | `0` (unlimited) / `false` | wall-clock gate; tokens are recorded, never judged |

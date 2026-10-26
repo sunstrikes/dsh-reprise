@@ -126,6 +126,33 @@ const metricNames = (series) => {
 }
 
 /**
+ * Read a subject's recorded series back; `undefined` when it never recorded one.
+ *
+ * The fact is the link, and the artifact is the evidence — so this reads the *last* `window_samples`
+ * fact for the subject and then the document it points at. Only the last: a resubmitted job rewrites
+ * the same artifact name, and a reader that merged two accounts would be inventing a series nobody
+ * measured. A missing artifact document (a restored fact plane without its files) is reported as "no
+ * series" rather than thrown, because a tick that cannot read evidence must not crash the run.
+ *
+ * This is the seam the stop rules read (`stop.js`: "the last window carries no finite number", "the
+ * trailing N windows all regressed"), and the baseline's series is read the same way as a
+ * candidate's — one reader, so a comparison cannot be built from two different interpretations.
+ *
+ * @param {{store: any, artifacts?: any}} ports
+ * @param {string} subject a candidate id, or the reserved baseline subject
+ * @returns {{schema_version?: number, unit?: string, windows?: unknown[]} | undefined}
+ */
+export function windowSamplesOf({ store, artifacts }, subject) {
+  const facts = store.eventsFor(subject).filter((event) => event.event_type === WINDOW_SAMPLES_EVENT)
+  const last = facts[facts.length - 1]
+  if (last === undefined) return undefined
+  const name = last.payload?.artifact
+  if (typeof name !== 'string' || name === '') return undefined
+  const document = artifacts?.read?.(name)
+  return document ?? undefined
+}
+
+/**
  * Write the series as an artifact and append the fact that points at it.
  *
  * @param {{store: any, clock: {now: () => number}, artifacts?: any}} ports
