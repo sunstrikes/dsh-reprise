@@ -162,6 +162,8 @@ export function budgetBar(spend, budget) {
     settledPercent: share(spend.settledGpuHours, scaleGpuHours),
     reservedPercent: share(reservedUnsettledGpuHours, scaleGpuHours),
     remainingPercent: limited ? share(Math.max(0, limit - spend.usedGpuHours), limit) : 0,
+    // The third material in GPU hours too, because the legend names it and the page may not subtract.
+    remainingGpuHours: limited ? Number(Math.max(0, limit - spend.usedGpuHours).toFixed(6)) : 0,
     // The soft limit is a fraction of the cap, so it has no meaning without one.
     softLimitPercent: limited ? share(limit * budget.soft_ratio, limit) : null,
     reservedUnsettledGpuHours,

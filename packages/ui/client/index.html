@@ -31,14 +31,39 @@
     </section>
 
     <!--
+      The stop section: while the run is going, one row of gauges — how close each rule is to firing,
+      which is the question "will this end on its own, and how soon" — and once it has stopped, the
+      same rules as a two-column panel with the recorded conclusion beside them. It sits above the
+      chart because the chart says what the run found, and this says whether the run is still able to
+      find anything.
+    -->
+    <section class="stop" id="stop" aria-live="polite">
+      <h2>Stop rules</h2>
+      <p class="empty">waiting for facts…</p>
+    </section>
+
+    <!--
       The staircase and the round rail, in place of the old Rounds table. It sits between the
-      conclusion and the cards because it is the evidence for the conclusion: which round raised the
-      best result, which rounds held, and which candidate is still running.
+      conclusion and the readings because it is the evidence for the conclusion: which round raised
+      the best result, which rounds held, and which candidate is still running.
     -->
     <section class="card" id="ladder">
       <h2>Best so far, round by round</h2>
       <p class="empty">waiting for facts…</p>
     </section>
+
+    <!--
+      The readings row: how much of the run there is (rounds, candidates), what it has cost (GPU hours
+      with the budget bar), what it found (the frontier) and what it is occupying (the cluster). Four
+      cells of equal height, left aligned, numbers right aligned within their cell — the row is read
+      as one line, not as four cards.
+    -->
+    <dl class="readings" id="readings" aria-live="polite">
+      <div class="reading">
+        <dt class="reading-label">Readings</dt>
+        <dd class="reading-sub">waiting for facts…</dd>
+      </div>
+    </dl>
 
     <div class="grid">
       <section class="card" id="overview" aria-live="polite">

@@ -62,6 +62,312 @@ export function urlFor(view, { cursor, candidate, ref } = {}) {
 /** The card count, or the word for "we could not ask". */
 const cardsInUse = (cluster) => (cluster === undefined ? EM_DASH : cluster.cards.inUse === null ? 'unknown' : number(cluster.cards.inUse))
 
+/**
+ * The name each stop rule goes by on the page.
+ *
+ * This is a *label*, not a counter: which value a rule has reached arrives from the projection
+ * (`observed`), because a page that mapped a rule name to a counter of its own would be the second
+ * derivation that turns "3/3" into a different number from the one recorded in the conclusion. A rule
+ * the kernel adds and this table forgets falls back to its identifier — visible and ugly, which is
+ * the honest failure.
+ */
+const RULE_WORDS = Object.freeze({
+  max_rounds: 'rounds completed',
+  max_no_improvement_rounds: 'no improvement',
+  consecutive_empty_rounds: 'empty round',
+  max_wall_hours: 'wall clock',
+  max_windows: 'windows',
+})
+
+/** What a rule has to say for itself when it has no reading, and when it has one. */
+function ruleReading(rule) {
+  if (rule.enabled !== true) return 'off'
+  if (rule.observed === null) return 'not measured'
+  return `${number(rule.observed)}/${number(rule.limit)}`
+}
+
+/**
+ * One stop rule: its name, a gauge of the distance left, and the reading.
+ *
+ * The gauge fills with `distancePercent`, which the projection computed — reaching the limit is *stopping*,
+ * not succeeding, so the bar is a distance and never a progress bar. `data-state` carries the four
+ * things a rule can be (measured, fired, off, and "nobody could measure it"), and each one is drawn
+ * differently: a name at tertiary ink with no gauge for a rule that is off, a bold name and a filled
+ * dot for the rule that fired.
+ */
+function stopRule(rule, { fired = false } = {}) {
+  const state = rule.enabled !== true ? 'disabled' : rule.observed === null ? 'blocked' : fired ? 'fired' : 'measured'
+  return el('div', { class: 'stop-rule', 'data-rule': rule.rule, 'data-state': state }, [
+    el('span', { class: 'stop-rule-name', text: RULE_WORDS[rule.rule] ?? rule.rule }),
+    rule.enabled === true && rule.observed !== null
+      ? el(
+          'span',
+          {
+            class: 'stop-gauge',
+            role: 'progressbar',
+            'aria-label': `${RULE_WORDS[rule.rule] ?? rule.rule}: ${ruleReading(rule)}`,
+            'aria-valuenow': String(rule.observed),
+            'aria-valuemin': '0',
+            'aria-valuemax': String(rule.limit),
+          },
+          [el('span', { class: 'stop-gauge-fill', style: `width: ${rule.distancePercent.toFixed(2)}%` })],
+        )
+      : null,
+    el('span', { class: 'stop-rule-reading', text: ruleReading(rule) }),
+    fired ? el('span', { class: 'stop-dot', 'aria-hidden': 'true' }) : null,
+  ])
+}
+
+/** The sentences behind the gauges: why a rule is off, and why one has no reading. */
+function ruleNotes(rules) {
+  return rules
+    .filter((rule) => rule.enabled === true && rule.observed === null)
+    .map((rule) =>
+      el('p', {
+        class: 'note',
+        text: `${RULE_WORDS[rule.rule] ?? rule.rule}: ${rule.reason ?? rule.unmeasured ?? 'this rule has no reading'}`,
+      }),
+    )
+}
+
+/**
+ * The stop section: one row of gauges while the run is going, a two-column panel once it has stopped.
+ *
+ * Running, it answers "will this end on its own, and how soon"; stopped, it answers "why here" on the
+ * left and lists *every* rule with its observed value on the right, so a reader can see which rule
+ * would have been next. The rule that fired is bold and carries a dot — weight and shape, never hue
+ * (CODING_STANDARDS §2).
+ */
+function renderStop(answer) {
+  const root = document.getElementById('stop')
+  root.className = 'stop'
+  root.replaceChildren()
+
+  const data = answer?.data
+  if (data === null || data === undefined) {
+    root.append(el('h2', { text: 'Stop rules' }), el('p', { class: 'empty', text: answer?.reason ?? 'no facts recorded yet' }))
+    return
+  }
+
+  const stop = data.stop ?? {}
+  const rules = stop.rules ?? []
+
+  if (stop.stopped === true) {
+    root.className = 'card stop'
+    root.append(
+      el('h2', { text: 'Why it stopped here' }),
+      el('div', { class: 'stop-panel' }, [
+        el('div', { class: 'stop-why' }, [
+          el('p', { class: 'stop-why-rule', text: stop.rule ?? EM_DASH }),
+          el('p', { class: 'stop-why-message', text: stop.message ?? '(no message recorded)' }),
+          el('p', {
+            class: 'stop-why-reading',
+            text: `observed ${number(stop.observed)} / limit ${number(stop.limit)}`,
+          }),
+          el('p', {
+            class: 'dim',
+            text: `recorded ${clock(stop.atMs)} · event ${number(stop.eventSeq)}`,
+          }),
+        ]),
+        el(
+          'div',
+          { class: 'stop-rules', 'data-layout': 'panel' },
+          rules.map((rule) => stopRule(rule, { fired: rule.rule === stop.rule })),
+        ),
+      ]),
+      ...ruleNotes(rules),
+      el('p', {
+        class: 'dim',
+        text: 'Every rule is listed with the value it had reached, so "which one would have been next" is answerable.',
+      }),
+    )
+    return
+  }
+
+  root.append(
+    el('h2', { text: 'Stop rules' }),
+    el('div', { class: 'stop-rules' }, rules.map((rule) => stopRule(rule))),
+    el('p', { class: 'stop-summary', text: 'none of them has fired' }),
+    ...ruleNotes(rules),
+  )
+}
+
+/**
+ * The budget bar: settled (solid), reserved but not yet settled (hatch), and what is left of the cap.
+ *
+ * The three materials and the two markers all arrive as percentages, because a page that divided two
+ * GPU-hour readings would be a second derivation of a number the panel will also print. They are a
+ * fill, a hatch and an emptiness rather than three colours: the bar has to survive a greyscale
+ * screenshot, and amber-on-white is the one hue this design spends.
+ *
+ * The words over the middle material matter as much as the numbers: `reserved − settled` includes
+ * what a finished candidate reserved and did not spend, so it is "reserved, not yet settled" — money
+ * still held against the ledger — and never "in flight", which would claim the work is running.
+ */
+function budgetBar(spend) {
+  const budget = spend?.budget
+  if (budget === undefined || budget === null) return null
+  if (budget.scaleGpuHours === null) {
+    return el('p', { class: 'reading-sub', text: 'nothing spent yet — there is no bar to draw' })
+  }
+
+  const track = el('div', { class: 'budget-track' }, [
+    el('span', { class: 'budget-segment', 'data-material': 'settled', style: `width: ${number(budget.settledPercent)}%` }),
+    el('span', { class: 'budget-segment', 'data-material': 'reserved', style: `width: ${number(budget.reservedPercent)}%` }),
+    el('span', { class: 'budget-segment', 'data-material': 'remaining', style: `width: ${number(budget.remainingPercent)}%` }),
+    budget.softLimitPercent === null
+      ? null
+      : el('span', {
+          class: 'budget-marker',
+          'data-marker': 'soft',
+          style: `left: ${number(budget.softLimitPercent)}%`,
+        }),
+    budget.limited ? el('span', { class: 'budget-marker', 'data-marker': 'limit', style: 'left: 100%' }) : null,
+  ])
+
+  const legend = el('p', { class: 'budget-legend' }, [
+    budgetKey('settled', `settled ${number(spend.settledGpuHours)}`),
+    budgetKey('reserved', `reserved, not yet settled ${number(budget.reservedUnsettledGpuHours)}`),
+    // With no cap there is no remainder to name: the bar is the whole of what was used.
+    budget.limited ? budgetKey('remaining', `remaining ${number(budget.remainingGpuHours)}`) : null,
+    budget.limited
+      ? el('span', { class: 'budget-key' }, [
+          el('i', { 'data-marker': 'soft' }),
+          `soft limit ${number(spend.softLimitGpuHours)}`,
+        ])
+      : null,
+    budget.limited
+      ? el('span', { class: 'budget-key' }, [el('i', { 'data-marker': 'limit' }), `cap ${number(spend.limitGpuHours)}`])
+      : el('span', { class: 'budget-key', text: 'no cap — the bar is scaled by what was used' }),
+  ])
+
+  return el('div', { class: 'budget' }, [
+    el('div', { class: 'budget-head' }, [
+      el('span', {
+        class: 'reading-value',
+        text: number(spend.settledGpuHours),
+      }),
+      el('span', {
+        class: 'reading-unit',
+        text: budget.limited ? `/ ${number(spend.limitGpuHours)} GPU h` : 'GPU h, no cap',
+      }),
+    ]),
+    track,
+    legend,
+  ])
+}
+
+/** One entry of the bar's legend: the material's swatch, then its name. */
+function budgetKey(material, word) {
+  return el('span', { class: 'budget-key' }, [el('i', { 'data-material': material }), word])
+}
+
+/**
+ * One cell of the readings row: a label, the headline number with its unit, and the sentences under
+ * it. The unit is a word rather than a slash (`5` + `rounds completed`), because a `/` beside a
+ * number invites the reader to divide it by the next one — and `5 / 20` would turn the round cap into
+ * a target, which it is not.
+ */
+function reading(label, value, unit, subs = [], extra = []) {
+  return el('div', { class: 'reading' }, [
+    el('dt', { class: 'reading-label', text: label }),
+    el('dd', { class: 'reading-headline' }, [
+      value ?? EM_DASH,
+      unit === undefined ? null : el('span', { class: 'reading-unit', text: unit }),
+    ]),
+    ...subs.filter(Boolean).map((text) => el('dd', { class: 'reading-sub', text })),
+    ...extra,
+  ])
+}
+
+/**
+ * The readings row (spec §6.6): rounds, candidates, GPU hours with the budget bar, the frontier, and
+ * what the run occupies on a shared cluster.
+ *
+ * Every number is the projection's, including the three shares of the budget bar; the page decides
+ * only how to *say* them. Two of these cells can be "unknown", and both say so in words: the cluster
+ * a page could not ask, and — when the run never recorded how many cards a job claims — the floor its
+ * own ledger could support. Neither is ever drawn as `0`, which is the answer somebody acts on.
+ */
+function renderReadings(answer) {
+  const root = document.getElementById('readings')
+  root.replaceChildren()
+
+  const data = answer?.data
+  if (data === null || data === undefined) {
+    root.append(
+      el('div', { class: 'reading' }, [
+        el('dt', { class: 'reading-label', text: 'Readings' }),
+        el('dd', { class: 'reading-sub', text: answer?.reason ?? 'no facts recorded yet' }),
+      ]),
+    )
+    return
+  }
+
+  const rounds = data.rounds
+  const candidates = data.candidates
+  const spend = data.spend
+  const frontier = data.frontier ?? {}
+  const cluster = data.cluster ?? {}
+  const cards = cluster.cards ?? {}
+  const queue = cluster.queue ?? {}
+
+  const clusterValue = el('span', { class: 'reading-value', text: cards.inUse === null ? 'unknown' : number(cards.inUse) })
+  const clusterSubs = []
+  if (cluster.read === true) {
+    clusterSubs.push(`our ledger holds ${number((cluster.jobs?.open ?? []).length)} open job(s), ${number(cards.perJob)} card(s) each`)
+  } else if (cards.floor === null) {
+    clusterSubs.push(cards.floorAbsent ?? 'our own ledger cannot say how many cards it holds')
+  } else {
+    clusterSubs.push(`our own ledger holds at least ${number(cards.floor)} card(s)`)
+  }
+  if (cluster.read !== true && cluster.reason) clusterSubs.push(cluster.reason)
+
+  root.append(
+    reading(
+      'Rounds',
+      el('span', { class: 'reading-value', text: number(rounds.completed) }),
+      'rounds completed',
+      [
+        rounds.total === 0 ? 'no round yet' : `current round ${number(rounds.current)}`,
+        `empty streak ${number(rounds.emptyStreak)}`,
+      ],
+    ),
+    reading(
+      'Candidates',
+      el('span', { class: 'reading-value', text: number(candidates.total) }),
+      undefined,
+      [
+        `completed ${number(candidates.done)} · rejected ${number(candidates.rejected)} · in flight ${number(candidates.inFlight.length)}`,
+      ],
+    ),
+    reading('GPU hours', budgetBar(spend) ?? el('span', { class: 'reading-value', text: number(spend?.settledGpuHours) }), undefined, [
+      `reserved, not yet settled ${number(spend?.budget?.reservedUnsettledGpuHours)} — held against the ledger, including what a finished candidate did not spend`,
+    ]),
+    reading(
+      'Frontier',
+      el('span', { class: 'reading-value', text: number(frontier.size) }),
+      'members',
+      [
+        `${number(frontier.objectives?.length)} objective(s)`,
+        `primary ${frontier.primary ?? 'none declared'}`,
+      ],
+      [
+        el(
+          'ul',
+          { class: 'reading-list' },
+          (frontier.readings ?? []).map((member) =>
+            el('li', { text: measurement(member.candidate_id, frontier.primary, member.value) }),
+          ),
+        ),
+      ],
+    ),
+    reading('Cluster', clusterValue, 'cards in use', clusterSubs, [
+      el('dd', { class: 'reading-sub', text: `waiting ${number(queue.count)}` }),
+    ]),
+  )
+}
+
 /** One element, with text and listeners attached safely. */
 function el(tag, props = {}, children = []) {
   const node = document.createElement(tag)
@@ -157,7 +463,9 @@ function renderOverview(answer) {
         data.best === undefined ? 'no comparable result yet' : measurement(data.best.candidate_id, data.best.metric, data.best.value),
       ),
       stat('GPU h settled', number(data.spend.settledGpuHours)),
-      stat('GPU h in flight', number(data.spend.inFlightGpuHours)),
+      // `reserved − settled`, under the name of what it is. It is not work in flight: it includes the
+      // leftover of candidates that already finished without spending their whole reservation.
+      stat('GPU h reserved, not yet settled', number(data.spend.budget?.reservedUnsettledGpuHours)),
       stat('GPU h limit', data.spend.limitGpuHours === 0 ? 'unlimited' : number(data.spend.limitGpuHours)),
       stat('tokens', number(data.spend.tokens)),
       stat('cards in use', cardsInUse(data.cluster)),
@@ -170,14 +478,13 @@ function renderOverview(answer) {
   // The card figures above are only knowable when the cluster answered; a page that cannot ask says
   // so, and never draws the unknown as 0 — "0 cards" is the answer somebody acts on.
   if (data.cluster !== undefined && data.cluster.read === false) {
-    root.append(
-      el('p', {
-        class: 'note',
-        text:
-          `the cluster listing was not read — ${data.cluster.reason}; ` +
-          `${number(data.cluster.cards.floor)} card(s) is what our own ledger supports, not what is running`,
-      }),
-    )
+    // The floor is our own ledger's answer, and it has its own sentence when the run never recorded
+    // how many cards a job claims: `— card(s)` there would read as "none", which is a different fact.
+    const floor =
+      data.cluster.cards.floor === null
+        ? data.cluster.cards.floorAbsent
+        : `${number(data.cluster.cards.floor)} card(s) is what our own ledger supports, not what is running`
+    root.append(el('p', { class: 'note', text: `the cluster listing was not read — ${data.cluster.reason}; ${floor}` }))
   }
   for (const entry of data.cluster?.queue?.waiting ?? []) {
     root.append(el('p', { class: 'dim', text: `waiting: ${entry.candidate_id} — ${entry.reason ?? 'not yet dispatched'}` }))
@@ -196,13 +503,8 @@ function renderOverview(answer) {
   if (inFlight.length > 0) {
     root.append(el('h3', { text: 'in flight' }), el('p', { class: 'dim', text: inFlight.join(', ') }))
   }
-  if (data.stop?.stopped) {
-    root.append(
-      el('h3', { text: 'why it ended' }),
-      el('p', { text: `${data.stop.rule} — ${data.stop.message}` }),
-      el('p', { class: 'dim', text: `limit ${number(data.stop.limit)}, observed ${number(data.stop.observed)}` }),
-    )
-  }
+  // The stop decision is not repeated here: it has a section of its own above the chart, where a
+  // reader who asks "will this end on its own, and why" is already looking.
 }
 
 /**
@@ -920,8 +1222,11 @@ async function refresh() {
     state.audit = audit
     // The conclusion line first: the rest of the page is evidence for it.
     renderHeadline(conclusion)
-    renderOverview(overview)
+    // Then the two questions a reader asks next: will it end on its own, and what has it cost.
+    renderStop(overview)
     renderLadder(rounds, conclusion)
+    renderReadings(overview)
+    renderOverview(overview)
     renderConclusion(conclusion)
     renderAudit()
 

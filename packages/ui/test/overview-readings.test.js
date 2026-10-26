@@ -127,6 +127,7 @@ test('the budget bar publishes its three materials, so no renderer divides two n
   assert.equal(budget.settledPercent, 12.5, 'half a GPU hour out of four')
   assert.equal(budget.reservedPercent, 12.5, 'and the reservation beside it, as its own material')
   assert.equal(budget.remainingPercent, 75)
+  assert.equal(budget.remainingGpuHours, 3, 'and what is left of the cap, in the same unit as the other two')
   assert.equal(budget.softLimitPercent, 80, 'the soft limit sits at the budget\'s own ratio, not one the page guessed')
   assert.equal(budget.over, false)
   assert.equal(
@@ -151,6 +152,7 @@ test('no cap is a state: the bar is scaled by what was used, and there is no lim
   assert.equal(budget.scaleGpuHours, 1, 'so the bar is scaled by what was spent — never by a 0 that would be a floor')
   assert.equal(budget.settledPercent, 100)
   assert.equal(budget.remainingPercent, 0, 'with no cap there is no "remaining" to draw')
+  assert.equal(budget.remainingGpuHours, 0, 'and nothing to name in that unit either')
   assert.equal(budget.softLimitPercent, null, 'and no soft-limit marker either')
 })
 
