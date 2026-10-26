@@ -6,6 +6,12 @@
  * contract accepts; and the phases that do not consult a model call it exactly zero times. The
  * candidate machine is exercised by loop.test.js — here candidates are only *finished* directly, so
  * these tests stay about round bookkeeping.
+ *
+ * It also guards what a *refusal* may say (CODING_STANDARDS §2, CONTEXT §7): the four states answer
+ * "is this fact present and trustworthy", so only an artifact that exists and breaks its schema
+ * carries one. A plan too big for the round, a model port that produced nothing and a freeze that
+ * failed are refusals with a message and no status at all — the round is refused either way, but a
+ * reader sent hunting for a malformed artifact that never existed cannot be un-sent.
  */
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync } from 'node:fs'
@@ -100,6 +106,12 @@ async function toRoundOne(ports) {
 const finish = (store, candidateId, phase = 'DONE') => {
   const state = store.getState(candidateId, 'phase')
   store.setState(candidateId, 'phase', { ...state, phase })
+}
+
+/** The last refusal the round wrote, as the workspace recorded it — not as the return value shaped it. */
+function lastRefusal(store) {
+  const record = store.ops().find((row) => row.op === 'round_artifact_refused')
+  return record === undefined ? undefined : JSON.parse(record.detail)
 }
 
 test('the round artifact kinds are registered with the contract, and registering twice is harmless', async () => {
@@ -329,7 +341,7 @@ test('a hypothesis that names no file never becomes a candidate', async () => {
   ports.store.close()
 })
 
-test('a plan that would create more candidates than the round affords is refused', async () => {
+test('a plan that would create more candidates than the round affords is refused, and the refusal is not a state', async () => {
   const ports = setup({
     answers: {
       round_plan: {
@@ -341,13 +353,17 @@ test('a plan that would create more candidates than the round affords is refused
   await step(ports)
   const refused = await step(ports)
 
-  assert.match(refused.action, /refused:invalid/)
+  // The plan is a well-formed `candidate_plan`; it is *too big for the round*, which is news about
+  // the budget and not about the artifact. Refused, named, and carrying no four-state status.
+  assert.match(refused.action, /refused:round_plan/)
   assert.match(refused.message, /candidates_per_round/)
+  assert.equal(Object.hasOwn(lastRefusal(ports.store), 'status'), false, 'no state: nothing is malformed')
+  assert.equal(readRoundsState(ports.store).last_refusal.status, undefined)
   assert.deepEqual(ports.store.candidateIds(), [])
   ports.store.close()
 })
 
-test('a judge port that throws is a refused artifact, not a crashed loop', async () => {
+test('a judge port that throws is a refused round plan, named by its cause and carrying no status', async () => {
   const ports = setup({
     judge: {
       plan: async () => {
@@ -361,9 +377,31 @@ test('a judge port that throws is a refused artifact, not a crashed loop', async
   await step(ports)
   const refused = await step(ports)
 
-  assert.match(refused.action, /refused:invalid/)
+  // No model answer at all: there is no artifact to call malformed, so there is no state to name.
+  assert.match(refused.action, /refused:round_plan/)
   assert.match(refused.message, /skill file disappeared/)
+  assert.equal(Object.hasOwn(lastRefusal(ports.store), 'status'), false)
   assert.equal(readRoundsState(ports.store).phase, 'ROUND_PLAN')
+  ports.store.close()
+})
+
+test('a hypothesis that could not be frozen is refused with its cause and no four-state status', async () => {
+  const ports = setup({
+    judge: {
+      ...judgeFor({ model: async () => GOLDEN_PLAN(1) }),
+      land: async ({ candidateId }) => {
+        throw new Error(`artifacts directory is read-only (${candidateId})`)
+      },
+    },
+  })
+  await step(ports)
+  await step(ports)
+  const refused = await step(ports)
+
+  assert.match(refused.action, /refused:land/)
+  assert.match(refused.message, /artifacts directory is read-only \(r1-h1\)/)
+  assert.equal(Object.hasOwn(lastRefusal(ports.store), 'status'), false, 'a failed freeze is not a malformed artifact')
+  assert.deepEqual(ports.store.candidateIds(), [], 'a hypothesis that was never frozen is not a candidate')
   ports.store.close()
 })
 
@@ -401,11 +439,34 @@ test('a reflection the contract refuses keeps the round open', async () => {
   finish(ports.store, 'r1-h1')
   finish(ports.store, 'r1-h2')
 
+  // The control for the refusals above: this one *is* an artifact that exists and breaks its schema,
+  // so it keeps its four-state status. Removing `status` everywhere would be as wrong as keeping it.
   const refused = await step(ports)
   assert.match(refused.action, /refused:missing/)
   assert.match(refused.message, /summary/)
+  assert.equal(lastRefusal(ports.store).status, 'missing')
   assert.equal(readRoundsState(ports.store).reflection, undefined)
   assert.equal(readRoundsState(ports.store).phase, 'ROUND_PLAN')
+  ports.store.close()
+})
+
+test('a reflection the model never produced is refused with its cause and no four-state status', async () => {
+  const ports = setup({
+    judge: {
+      ...judgeFor({ model: async (request) => (request.call_site === 'round_plan' ? GOLDEN_PLAN(1) : GOLDEN_REFLECT) }),
+      reflect: async () => {
+        throw new Error('the model returned an empty body')
+      },
+    },
+  })
+  await toRoundOne(ports)
+  finish(ports.store, 'r1-h1')
+  finish(ports.store, 'r1-h2')
+
+  const refused = await step(ports)
+  assert.match(refused.action, /refused:round_reflect/)
+  assert.match(refused.message, /the model returned an empty body/)
+  assert.equal(Object.hasOwn(lastRefusal(ports.store), 'status'), false, 'nothing was produced, so nothing is malformed')
   ports.store.close()
 })
 
