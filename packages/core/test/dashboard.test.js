@@ -158,7 +158,7 @@ test('the overview page the browser fetches carries the GPU-hours warning', asyn
     const page = ui.overviewView(store, {})
     const warning = page.data.warnings.find((entry) => entry.code === 'no_gpu_hours_limit')
     assert.ok(warning, `the overview payload must carry it: ${JSON.stringify(Object.keys(page.data))}`)
-    assert.equal(warning.label, '当前无 GPU 小时上限', 'the shipped client renders this label verbatim')
+    assert.equal(warning.label, 'GPU 小时未设上限', 'the shipped client renders this label verbatim')
   } finally {
     store.close()
   }

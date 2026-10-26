@@ -41,7 +41,7 @@ export const inject = ['mnemonMemory']
 export const memoryPlugin = Object.freeze({
   apiVersion: 'dsh-mnemon/plugin/v1',
   packageName: name,
-  label: { en: 'Reprise injection packet', 'zh-CN': '实验循环注入包' },
+  label: { en: 'Reprise injection packet', 'zh-CN': 'Reprise 注入包' },
   description: {
     en: 'The exact context one model turn receives, assembled from this workspace\'s facts.',
     'zh-CN': '模型单轮实际获得的上下文，由本工作区的事实装配而成。',

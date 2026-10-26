@@ -297,7 +297,7 @@ test('the two retired cards retired rendering, not data: every field they read i
     assert.ok(key in overview.cluster.cards, `the cluster card field ${key}`)
   }
   assert.ok('count' in overview.cluster.queue, 'and how many candidates are waiting')
-  // Its warning list, which `未声明 GPU 排他` only reaches a reader through.
+  // Its warning list, which `未声明 GPU 独占` only reaches a reader through.
   assert.ok(Array.isArray(overview.warnings), 'warnings are still published')
   // The candidates' names, not only their count: the readings cell lists what is in flight.
   assert.ok(Array.isArray(overview.candidates.inFlight))

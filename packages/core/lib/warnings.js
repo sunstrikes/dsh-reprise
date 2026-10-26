@@ -47,8 +47,11 @@ const budgetOfConfig = (config) => ({ ...DEFAULT_BUDGET, ...(config?.budget ?? {
 /**
  * The warning the ticket asks for, as a value rather than as prose in a component.
  *
- * `label` is the sentence the shipped client renders; it is Chinese because the ticket names that
- * exact string, and a translated warning is a different warning.
+ * `label` is the sentence the shipped client renders, and it is the warning's short name: Chinese,
+ * because the ticket that asked for these warnings named them in Chinese, and a translated warning is
+ * a different warning. Its wording is the reader's, not a word-for-word rendering of the `code` —
+ * `gpu_exclusivity_undeclared` reads 未声明 GPU 独占, not 未声明 GPU 排他. `message` is English
+ * because it explains the consequence rather than naming the warning.
  *
  * @param {{executor?: {kind?: string}, budget?: object}} config
  * @returns {object | undefined}
@@ -65,7 +68,7 @@ export function noGpuHoursLimit(config) {
     severity: 'warning',
     about: 'spend',
     where: 'dashboard.overview',
-    label: '当前无 GPU 小时上限',
+    label: 'GPU 小时未设上限',
     message:
       `the "${kind}" executor bills real GPU hours and this run has no GPU-hours limit ` +
       '(budget.gpu_hours_limit is 0, which means unlimited). Set budget.gpu_hours_limit to cap the spend, ' +
@@ -91,7 +94,7 @@ export function gpuExclusivityUndeclared(config) {
     severity: 'warning',
     about: 'dispatch',
     where: 'dashboard.overview',
-    label: '未声明 GPU 排他',
+    label: '未声明 GPU 独占',
     message:
       `the "${kind}" executor's cluster does not reserve GPUs, and this run declares neither ` +
       'executor.gpu_exclusivity: single_job (one training job at a time) nor executor.cuda_visible_devices ' +
@@ -117,7 +120,7 @@ function metricWarnings(config) {
       severity: 'warning',
       about: 'metric_contract',
       where: 'dashboard.overview',
-      label: '轮次指标不在前沿目标里',
+      label: '轮次指标不是前沿目标之一',
       message:
         `the round optimises ${JSON.stringify(name)} but the frontier's objectives are ` +
         `${JSON.stringify(Object.keys(objectiveNames))}: the candidate the gate calls "improved" is not the ` +
@@ -132,7 +135,7 @@ function metricWarnings(config) {
       severity: 'warning',
       about: 'metric_contract',
       where: 'dashboard.overview',
-      label: '指标方向前后不一致',
+      label: '指标方向前后矛盾',
       message:
         `${JSON.stringify(name)} is declared ${JSON.stringify(declared)} (metrics.objectives) for the frontier ` +
         `but ${JSON.stringify(roundsMetric.direction)} (rounds.metric.direction) for the gate: two accounts of ` +
@@ -158,7 +161,7 @@ function modelWarning(config) {
       severity: 'warning',
       about: 'judgement',
       where: 'plugin.log',
-      label: '没有模型入口',
+      label: '未配置模型入口',
       message:
         'config.rounds is set but no model port is configured (model.kind or model.command): ROUND_PLAN and ROUND_REFLECT are ' +
         'model entries, so those phases will be refused and the run will stall at the first round.',

@@ -42,7 +42,7 @@ test('a real training executor with no GPU-hours limit is warned about, in words
   assert.ok(warning, 'an unbounded spend on a real cluster must never be the silent default')
   assert.equal(warning.severity, 'warning')
   assert.match(warning.message, /GPU-hours limit/i, 'the message says which limit is missing')
-  assert.equal(warning.label, '当前无 GPU 小时上限', 'the shipped client renders this label verbatim')
+  assert.equal(warning.label, 'GPU 小时未设上限', 'the shipped client renders this label verbatim')
   assert.equal(warning.where, 'dashboard.overview', 'the projection says which surface is expected to show it')
 })
 

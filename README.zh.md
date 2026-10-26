@@ -1,5 +1,5 @@
 ---
-description: "把模型结构探索循环做成 DeepSeek Harness 插件：确定性相位、冻结基线、花费账本，以及只读取事实的判停。"
+description: "把模型结构探索循环做成 DeepSeek Harness 插件：确定性阶段、冻结基线、花费账本，以及只读取事实的判停。"
 kind: "package-bundle"
 ---
 
@@ -27,20 +27,20 @@ kind: "package-bundle"
 **一个结论经得起复核的探索循环。**
 </div>
 
-> 一个 DeepSeek Harness 插件包：先复现一个已发表的数字，再在这份复现之上受控地迭代——确定性相位、
+> 一个 DeepSeek Harness 插件包：先复现一个已发表的数字，再在这份复现之上受控地迭代——确定性阶段、
 > 由运行自己跑出来再冻结的基线、先预扣再花费的花费账本，以及由已记录事实（而不是记忆中的意图）算出的判停。
 
 <a id="summary"></a>
 ## 摘要
 
-`dsh-reprise` 复现一个已发表的实验，然后在这份复现之上受控地迭代：确定性相位、走与候选相同的执行器路径
+`dsh-reprise` 复现一个已发表的实验，然后在这份复现之上受控地迭代：确定性阶段、走与候选相同的执行器路径
 跑出来再冻结的基线、先预扣再花费的预算，以及由已记录事实（而不是记忆中的意图）算出的判停决定。
 
 一个候选（candidate）是**一个结构假设，加上它落地所需的那一批代码改动**——不是一个超参数取值。循环本身是
 普通代码；模型只在恰好五个位置被咨询，而它说的话只有变成一个已被校验器接受的 artifact（产物）时，
 才会进入事实面（fact plane）。
 
-挂载这个插件包只新增三个面（surface），别的什么也不加：一个在没有会话打开的工作区里推进相位机的
+挂载这个插件包只新增三个面（surface），别的什么也不加：一个在没有会话打开的工作区里推进阶段机的
 tick，一个在会话内读取同一份投影的 `reprise_status` 工具，以及侧边栏里的 **Reprise** 面板（背后是
 六个只读 GET 路由）。它不碰你的仓库，不开端口，也不调用模型——除非你在 `model.command` 里点名一个。
 
@@ -72,7 +72,7 @@ tick，一个在会话内读取同一份投影的 `reprise_status` 工具，以�
 你有一个可以测两次的指标，一条你愿意冻结的基线，以及一个信念：出问题的地方是模型的*结构*，而不是它
 的学习率。你希望「这个候选为什么停了？」的答案来自一个文件，而不是来自当时盯着终端的那个人。
 
-当运行必须扛得住无人值守时，`dsh-reprise` 是合适的：相位中途崩溃会表现为事实面上一段可检测的滞后，
+当运行必须扛得住无人值守时，`dsh-reprise` 是合适的：阶段中途崩溃会表现为事实面上一段可检测的滞后，
 被暂停的预算是被记录下来的决定，页面上的每个数字都能只从事实推导出来（`dump --rebuild` 会证明这一
 点）。当指标是人的判断、当基线无法做到可复现、或者当你需要一个工作区上并发跑多个运行时，它都不合适
 ——一个工作区只属于一次运行。
@@ -143,8 +143,8 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 看板；打不开的工作区或跑不起来的配置只是一行日志，宿主照常启动。**这三种情况都不会以错误的形式出现。**
 
 被校验**拒绝**的跑配置不属于上面三种缺失，也不会再连看板一起带走：看板仍会挂到配置点名的工作区上，并把
-「回路为什么静默」写进 overview 的 `notes`——两个界面上的条带在任何状态下都会画它，空页也不例外。所以看板
-照旧显示工作区里已有的事实，但不会假装回路在跑。连工作区都点不名的配置，是唯一仍然挂不上看板的情况。
+「循环为什么静默」写进 overview 的 `notes`——两个界面上的条带在任何状态下都会画它，空页也不例外。所以看板
+照旧显示工作区里已有的事实，但不会假装循环在跑。连工作区都点不名的配置，是唯一仍然挂不上看板的情况。
 
 `@dsh-reprise/memory` 插件包是可选的、独立的（行 `reprise-memory`），它把注入包（injection packet）
 作为一个 `dsh-mnemon` Source 暴露出来。`packages/core` 里没有任何东西 import 它。
@@ -172,7 +172,7 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 | `runner.repo` / `runner.dir` | **配置 `candidate` 时必填** | 工作区里的仓库；工作树创建的位置（`<workspace>/worktrees/<candidateId>`） |
 | `runner.keep` | `true` | 保留策略。为 `true` 时内核里没有任何东西会删掉候选工作树；为 `false` 本身也不会删，只是允许显式执行 `worktrees prune` |
 | `runner.base_ref` | git 默认值 | 候选从中拉分支的那个 commit；代码基滚动之后以锚点为准（见 `rounds.anchor`） |
-| `model.command` | **配置了 `rounds` 时必填** | 每个判断相位都通过这个 argv 触达模型 |
+| `model.command` | **配置了 `rounds` 时必填** | 每个判断阶段都通过这个 argv 触达模型 |
 | `rounds.metric.name` / `.direction` | 取领域包的契约 | 轮次闸门优化的那一个指标；重述它就是让这次运行指向另一个目标 |
 | `rounds.metric.contract_ref` | 契约自己的 `name` | 指向已冻结的指标契约（metric contract）的指针 |
 | `rounds.max_rounds` / `.candidates_per_round` | `3` / `2` | 轮次工作流的形状 |
@@ -184,10 +184,10 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 | `stop.regression_windows` / `.regression_floor` | `0`（关闭）/ `0` | 尾部 N 个窗口逐个都比基线差才杀掉候选；下限只抬高容差、从不放宽 |
 | `budget.gpu_hours_limit` | `0`（不限） | 硬上限；未设上限的远程执行器每次读取都会被警告 |
 | `budget.soft_ratio` / `.candidate_gpu_hours` | `0.8` / `0.5` | 到这个比例就停止派发；一次派发预扣多少 |
-| `budget.max_runtime_hours` / `.judge_tokens` | `0`（不限）/ `false` | 墙钟闸门；token 只记录，从不裁决 |
+| `budget.max_runtime_hours` / `.judge_tokens` | `0`（不限）/ `false` | 实际耗时闸门；token 只记录，从不裁决 |
 | `metrics.primary` / `.objectives` | 取领域包的契约 | 在 INIT 时记录；会与轮次契约交叉核对 |
 | `poll.base_ms` / `.max_ms` / `.grace_attempts` | `1000` / `60000` / `2` | 作业轮询退避 |
-| `limits.max_wall_ms` / `.max_idle_ms` | `3600000` / `1800000` | 单作业的墙钟与静默期限 |
+| `limits.max_wall_ms` / `.max_idle_ms` | `3600000` / `1800000` | 单作业的实际耗时与静默期限 |
 
 校验在 `packages/core/lib/config.js` 里，启动时只跑一次。本包不导出 `Config` 对象，所以宿主对这条
 配置行没有 schema：配置有问题只是一行日志，永远不会变成启动失败。有两处拒绝值得在你撞上之前先知道——有
@@ -208,7 +208,7 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 | 面 | 标识符 | 作用 |
 |---|---|---|
 | 模型工具 | `reprise_status` | 运行进度以 JSON 返回，只读，取自页面绘制所用的同一份投影 |
-| 侧边栏面板 | `sidebar.panellist` id `reprise`，order `25`，外加 `main` key `reprise` | **Reprise** 按钮（zh: 复现）以及它打开的页面；文案跟随当前语言（`en`、`zh`） |
+| 侧边栏面板 | `sidebar.panellist` id `reprise`，order `25`，外加 `main` key `reprise` | **Reprise** 按钮（中英同名：产品名不翻译）以及它打开的页面；文案跟随当前语言（`en`、`zh`） |
 | HTTP 路由 | `GET /api/reprise/{overview,rounds,candidate,conclusion,calls,call}` | 四个视图与模型调用审计，各自通过自己的只读句柄读取 |
 | 静态资源 | `GET /api/reprise/page`、`/api/reprise/dashboard.js`、`/api/reprise/format.js` | 给没有客户端 slot 的宿主用的独立页面，以及页面与面板共用的格式化模块 |
 | CLI | `node packages/core/lib/cli/run.js --workspace <dir> --config <file>` | 与宿主 tick 的同一套接线，由循环驱动；退出码 0 表示有结论、1 表示没有可比的指标、2 用法错误、3 超时 |
@@ -245,7 +245,7 @@ node examples/feed-structure/init.mjs .workspace/feed
 
 一次真实的搭建，不是 fixture：它复制玩具模型仓库并提交（候选从那个 commit 拉分支），冻结一份记录
 运行起点的 sha256 清单，并通过真实的本地执行器跑 `metric.mjs` 测出基线。那个数字只是旁证：运行自己在
-BASELINE 相位跑一次基线（提交、等待、采集）并冻结成事实，分母与所有跟它比的东西出自同一次执行器运行。
+BASELINE 阶段跑一次基线（提交、等待、采集）并冻结成事实，分母与所有跟它比的东西出自同一次执行器运行。
 
 ### Step 3 — 看你拥有的领域包
 
@@ -262,7 +262,7 @@ node examples/feed-structure/inspect.mjs
 node packages/core/lib/cli/run.js --workspace .workspace/feed --config examples/feed-structure/config.json
 ```
 
-每个相位步一行，然后是胜出者、它的指标、它打败的基线，以及结束这次运行的那条规则。这就是宿主插件
+每个阶段步一行，然后是胜出者、它的指标、它打败的基线，以及结束这次运行的那条规则。这就是宿主插件
 用的同一套接线——`workspace.js` 和 `tick()`——只是由循环而不是宿主的 timer 驱动，所以你刚看到的就是
 插件的行为。
 
@@ -344,7 +344,7 @@ ln -s ~/.dsh/profiles/node_modules node_modules
 | 路径 | 角色 |
 |---|---|
 | `packages/contract` | 四态校验、身份绑定链、artifact schema、指标契约 |
-| `packages/core` | 相位机、tick、事实存储、派生视图、判停策略、插件接线、CLI |
+| `packages/core` | 阶段机、tick、事实存储、派生视图、判停策略、插件接线、CLI |
 | `packages/exec` | 候选实现者与外部作业适配器（local、ray、claude、dsh），带一致性套件 |
 | `packages/memory` | 注入包，以 `dsh-mnemon` Source 暴露 |
 | `packages/ui` | 只读看板：宿主侧对路由的投影，加一个纯 ESM 客户端 |
@@ -401,7 +401,7 @@ system prompt。
 
 这些局限定义了它何时不合适——它们不是一份任务清单。
 
-- **只在离线环境验证过。** 相位机、校验器、身份链、事实面、账本、前沿、判停规则、执行器与 harness
+- **只在离线环境验证过。** 阶段机、校验器、身份链、事实面、账本、前沿、判停规则、执行器与 harness
   端口、`dump`，以及那五条命令组成的路径，全都在 `npm test` 里跑。未在这里端到端验证的：活的模型、真实的
   编码 harness、真实集群，以及浏览器真正对着一个真实宿主加载页面。
 - **不在 npm 上。** 每个包都是 `private`，版本 `0.0.0`，通过 `workspace:*` 依赖它的兄弟包。请分享
@@ -425,7 +425,7 @@ system prompt。
 还是实验性的）。`npm test` 就是全部闸门；pre-commit hook 跑的正是它，只是剥掉了 git 的环境变量，因为
 测试会创建自己的临时仓库，而继承来的 `GIT_DIR` 会把它们指向本仓库。
 
-值得在评审时不要重新发明的独特机制：相位级的 artifact 契约、四态结论词汇（`ok` / `conflict` /
+值得在评审时不要重新发明的独特机制：阶段级的 artifact 契约、四态结论词汇（`ok` / `conflict` /
 `missing` / `invalid`）、身份绑定链，以及写成代码而不是策略配置的前沿与判停规则。一个决定的权威链
 就是代码；代码是「什么被接受、什么被拒绝」的记录。
 

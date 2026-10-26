@@ -615,7 +615,7 @@ function renderStrips(answer) {
 
   for (const warning of data.warnings ?? []) {
     root.append(el('p', { class: warning.severity === 'warning' ? 'warning' : 'note', text: warning.label ?? warning.code }))
-    // The label is the headline ("未声明 GPU 排他"); the message is what it costs. Both are the
+    // The label is the headline ("未声明 GPU 独占"); the message is what it costs. Both are the
     // projection's words, and a warning nobody can act on is only half a warning.
     if (typeof warning.message === 'string' && warning.message !== '' && warning.message !== warning.label) {
       root.append(el('p', { class: 'dim', text: warning.message }))
