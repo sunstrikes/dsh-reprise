@@ -120,20 +120,41 @@ export function percent(value, { digits = 2, sign = false } = {}) {
 const CURSOR = /^(\d+):(.+):(\d+)$/
 
 /**
+ * The instant a cursor names, in epoch milliseconds — or `null` when the string is not a cursor.
+ *
+ * The envelope's `cursor` is the order key of the newest fact in the workspace, and its first field is
+ * that fact's wall clock. Both surfaces print "last fact: 22:24:40", and both read it *here*: a
+ * renderer that instead kept a running maximum over the facts it happened to have read would print a
+ * different instant for the same run — the page sees one window of facts, the panel another, and
+ * neither is the whole history.
+ *
+ * @param {unknown} value
+ * @returns {number | null}
+ */
+export function cursorAt(value) {
+  if (typeof value !== 'string' || value === '') return null
+  const match = CURSOR.exec(value)
+  if (match === null) return null
+  const at = Number(match[1])
+  return Number.isFinite(at) ? at : null
+}
+
+/**
  * A cursor a person can read: `22:36:48 · r6-g1 · seq 8`.
  *
  * The grammar is the host's own (`views.js` `cursorOf`), and this is the reader-facing rendering of it.
  * A string that does not match is passed through unchanged rather than hidden: if the host ever sends
  * a different cursor shape, the page should show the cursor it was given, not a dash that looks like
- * "no facts".
+ * "no facts". It parses through `cursorAt`, so the instant this prints and the instant `cursorAt`
+ * returns cannot disagree.
  *
  * @param {unknown} value
  */
 export function cursor(value) {
-  if (typeof value !== 'string' || value === '') return EM_DASH
+  const at = cursorAt(value)
+  if (at === null) return typeof value === 'string' && value !== '' ? value : EM_DASH
   const match = CURSOR.exec(value)
-  if (match === null) return value
-  return `${clock(Number(match[1]))} · ${match[2]} · seq ${match[3]}`
+  return `${clock(at)} · ${match[2]} · seq ${match[3]}`
 }
 /**
  * A path shortened to its last `segments` parts: `/Users/me/code/ws/run` → `…/code/ws/run`.

@@ -21,7 +21,7 @@
  * the percentage on this page and the number `dump` prints are the same derivation.
  */
 
-import { EM_DASH, change, clock, cursor, fixed, number, pathTail, percent } from './format.js'
+import { EM_DASH, change, clock, cursor, cursorAt, fixed, number, pathTail, percent } from './format.js'
 import { SHAPE_WORDS, VERDICT_WORDS, phaseMark } from './states.js'
 
 /**
@@ -339,6 +339,11 @@ function renderReadings(answer) {
   }
   if (cluster.read !== true && cluster.reason) clusterSubs.push(cluster.reason)
 
+  // Who is waiting, and *why*: the projection's own hold vocabulary, mapped to a sentence here. A
+  // count with no cause leaves a reader unable to tell "the budget is spent" from "another job is
+  // holding the cards", which are two different things to do about it.
+  const waiting = queue.waiting ?? []
+
   root.append(
     reading(
       'Rounds',
@@ -393,9 +398,31 @@ function renderReadings(answer) {
     ),
     reading('Cluster', clusterValue, 'cards in use', clusterSubs, [
       el('dd', { class: 'reading-sub', text: `waiting ${number(queue.count)}` }),
+      waiting.length === 0
+        ? null
+        : el(
+            'ul',
+            { class: 'reading-list' },
+            waiting.map((entry) =>
+              el('li', { text: `${entry.candidate_id} — ${HOLD_WORDS[entry.reason] ?? entry.reason ?? 'no hold recorded'}` }),
+            ),
+          ),
     ]),
   )
 }
+
+/**
+ * Why a candidate is sitting at SUBMIT_QUEUED, in the words the decision used.
+ *
+ * The reason is `holdReason()`'s in the projection — `budget` or `single_job_gpu` — and this is only
+ * its label: the page must not decide *whether* a candidate is held, because the loop holds it and the
+ * two would eventually disagree. A reason the kernel adds and this table forgets falls back to its
+ * identifier: visible and ugly, which is the honest failure.
+ */
+const HOLD_WORDS = Object.freeze({
+  budget: 'the budget soft limit is reached',
+  single_job_gpu: 'another job holds the cards (gpu_exclusivity: single_job)',
+})
 
 /** One element, with text and listeners attached safely. */
 function el(tag, props = {}, children = []) {
@@ -432,8 +459,6 @@ const state = {
   events: [],
   /** How many facts the page has read at all — the number beside the stream's title. */
   factTotal: 0,
-  /** The wall clock of the newest fact read, for the `last fact` stamp. Tracked as facts arrive. */
-  lastFactMs: null,
   selected: null,
   /** When the last *successful* poll completed: the `read at` stamp, and what "last good read" means. */
   readAt: null,
@@ -484,10 +509,6 @@ async function read(view, options = {}) {
     state.seen.add(event.cursor)
     state.events.push(event)
     state.factTotal += 1
-    // A running "newest so far" over the facts as they arrive — the same instant the cursor names.
-    if (typeof event.wall_clock_ms === 'number' && (state.lastFactMs === null || event.wall_clock_ms > state.lastFactMs)) {
-      state.lastFactMs = event.wall_clock_ms
-    }
   }
   if (state.events.length > STREAM_LIMIT) state.events.splice(0, state.events.length - STREAM_LIMIT)
   return answer
@@ -1527,18 +1548,21 @@ const stamp = (id, text) => {
  *
  * They are different instants and the page used to print one of them with no label at all — a reader
  * could not tell "17:15:30" from "22:24:40" without knowing which question each answered (spec §6.1).
- * `read at` is the successful poll; `last fact` is the newest fact this page has read, which is the
- * same instant the cursor names, in the shape a person reads.
+ * `read at` is this browser's successful poll; `last fact` is the newest fact *in the workspace*, and
+ * it is the envelope's own `cursor` rendered two ways — the instant here, the order key beside it. It
+ * is deliberately not a running maximum over the facts this page has read: the page sees a window and
+ * the Web UI panel sees another, so a tally in each renderer would print two different instants for
+ * one run (and did).
  */
-const stamps = (workspace) => {
+const stamps = (answer) => {
+  const workspace = answer?.workspace
   // The last three segments, with the whole path on the element: a masthead is a place for a name,
   // not for a scrollbar, and `title` keeps the address recoverable (spec §6.1).
   stamp('workspace', pathTail(workspace))
-  document.getElementById('workspace').title = workspace ?? ''
+  document.getElementById('workspace').title = typeof workspace === 'string' ? workspace : ''
   stamp('read-at', clock(state.readAt))
-  stamp('last-fact', state.lastFactMs === null ? EM_DASH : clock(state.lastFactMs))
-  const latest = [...state.cursors.values()].at(-1)
-  stamp('cursor', latest === undefined ? '' : cursor(latest))
+  stamp('last-fact', clock(cursorAt(answer?.cursor)))
+  stamp('cursor', answer?.cursor === undefined || answer?.cursor === null ? '' : cursor(answer.cursor))
 }
 
 async function select(candidateId) {
@@ -1563,7 +1587,7 @@ async function refresh() {
     renderPhase(overview)
     // Which workspace this page watches. Two windows open on two workspaces must be distinguishable
     // without reading the URL.
-    stamps(overview.workspace)
+    stamps(overview)
     // The loud facts a reader owes themselves before believing anything: warnings, notes, and a
     // metric contract that cannot rank.
     renderStrips(overview)

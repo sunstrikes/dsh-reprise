@@ -589,3 +589,33 @@ test('the audit is one collapsed line that opens into call sites and refs, and f
   assert.match(audit, /opened\.prompt/, 'and the prompt it was given is drawn verbatim')
   assert.match(audit, /opened\.response/, 'as is what came back')
 })
+
+// ------------------------------------------- the two instants and the reason it is waiting
+
+test('the masthead stamps come from the published cursor, not from a running tally in the page', () => {
+  // Gate finding: `last fact` was a running maximum over whatever facts this page had happened to
+  // read, while `cursor` beside it came from the server. Two readers of one run could therefore print
+  // two instants — and the Web UI panel, which sees only its own window, a third. The envelope's
+  // `cursor` already names the newest fact; both stamps now read it, through one parser.
+  const source = code('dashboard.js')
+
+  assert.doesNotMatch(source, /lastFactMs/, 'no running maximum over the fact window')
+  assert.match(source, /cursorAt\(/, 'the instant comes from the published cursor')
+  assert.match(source, /cursorAt\(\w+\??\.cursor\)/, 'read off the answer envelope')
+  // Both stamps read one value: `last fact` is the cursor's instant, `cursor` is the same key rendered.
+  assert.match(source, /clock\(cursorAt\(/, 'the `last fact` stamp is the cursor\'s instant')
+  assert.match(source, /cursor\(\w+\??\.cursor\)/, 'and the cursor stamp renders the same key')
+})
+
+test('the cluster cell says why a queued candidate is waiting, not just that one is', () => {
+  // Gate finding: `holdReason()` — "budget" / "single_job_gpu" — lost its only renderer when the
+  // Overview card retired, so the cell showed a count with no cause. The payload carries the reason
+  // (`cluster.queue.waiting[]`), so the cell is where it speaks.
+  const source = code('dashboard.js')
+
+  assert.match(source, /queue\?\.waiting|queue\.waiting/, 'the cluster cell reads the waiting list')
+  assert.match(source, /reason/, 'and prints the reason the projection recorded for each waiter')
+  assert.match(source, /single_job_gpu|budget/, 'in the decision\'s own vocabulary, not a new one')
+  // The reason is a published word; the page maps it to a sentence, it does not re-decide the hold.
+  assert.doesNotMatch(source, /holdReason\(/, 'the page does not recompute the hold')
+})

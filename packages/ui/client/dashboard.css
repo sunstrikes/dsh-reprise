@@ -80,6 +80,18 @@
   box-sizing: border-box;
 }
 
+/*
+ * A docked mount: the Web UI panel (ticket #6) renders these same components inside the host's
+ * layout rather than as a document of its own, so it owns its scrollbar — otherwise the dock clips
+ * whatever does not fit and the fact stream simply disappears. That is the only difference between
+ * the two mounts, and it is a fact about the box, not a design decision: every colour, size and
+ * spacing above applies unchanged.
+ */
+.reprise[data-mount='panel'] {
+  height: 100%;
+  overflow: auto;
+}
+
 .reprise h1 {
   margin: 0;
   font-size: 0.8125rem;

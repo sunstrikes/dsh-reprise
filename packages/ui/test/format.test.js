@@ -20,7 +20,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { EM_DASH, change, clock, cursor, fixed, number, pathTail, percent, stamp } from '../client/format.js'
+import { EM_DASH, change, clock, cursor, cursorAt, fixed, number, pathTail, percent, stamp } from '../client/format.js'
 
 /** A local wall clock the test can state exactly: 2026-10-22 14:36:48 in whatever zone this runs. */
 const LOCAL = new Date(2026, 9, 22, 14, 36, 48, 0).getTime()
@@ -81,6 +81,20 @@ test('the cursor becomes a time, a subject and a sequence instead of eighteen di
   assert.equal(cursor('1792679080000:r6-g1:8'), `${clock(1792679080000)} · r6-g1 · seq 8`)
   // A string that is not a cursor is still what the server called the cursor: pass it through.
   assert.equal(cursor('some-new-cursor-shape'), 'some-new-cursor-shape')
+})
+
+test('a cursor names one instant, and both surfaces read that instant the same way', () => {
+  // The `last fact` stamp used to be a running maximum the renderer kept over the facts it happened
+  // to have read, while the cursor beside it came from the server. Two readers of one page could then
+  // print two different instants for "the newest fact" — and the Web UI panel, which sees only a
+  // window of facts, would have printed a third. The envelope's `cursor` already names the instant, so
+  // that is where it comes from, and `cursor()` is parsed by this one function.
+  assert.equal(cursorAt('1792679080000:r6-g1:8'), 1792679080000)
+  assert.equal(cursor('1792679080000:r6-g1:8'), `${clock(cursorAt('1792679080000:r6-g1:8'))} · r6-g1 · seq 8`)
+
+  for (const value of ABSENT_CURSOR) assert.equal(cursorAt(value), null, `cursorAt(${String(value)})`)
+  assert.equal(cursorAt(''), null, 'an empty cursor names no instant')
+  assert.equal(cursorAt('some-new-cursor-shape'), null, 'a string that is not a cursor names no instant')
 })
 
 test('a workspace path is shortened to its last segments, and a short one is left alone', () => {
