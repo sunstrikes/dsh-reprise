@@ -25,6 +25,9 @@ import { readRoundsState } from '../rounds.js'
 import { Store } from '../store.js'
 import {
   candidateDetail,
+  conclusion,
+  modelCall,
+  modelCalls,
   overview,
   summariseEvent,
 } from '../projection.js'
@@ -132,6 +135,33 @@ function workspaceStopLines(store, { config } = {}) {
 }
 
 /**
+ * The gate chain, one step per line: passed / failed / **missing**.
+ *
+ * `missing` gets its own word and its own sentence, because the candidate panel exists to answer
+ * "was the candidate refused, or was it never judged?" — and a page that printed "failed" for a gate
+ * nobody reached would answer the wrong question with a confident word.
+ */
+function gateChainLines(detail) {
+  const chain = detail.gateChain
+  if (chain === undefined) return []
+  const lines = ['', 'gate chain']
+  const width = Math.max(...chain.chain.map((step) => step.name.length), 4)
+  for (const step of chain.chain) {
+    const reason = step.detail === '' ? '' : `   ${step.detail}`
+    lines.push(`  ${pad(step.name, width)}  ${pad(step.status, 7)}${reason}`)
+  }
+  if (chain.attempts.length > 0) {
+    lines.push('', 'gate attempts')
+    for (const attempt of chain.attempts) {
+      const verdict = attempt.review?.verdict === undefined ? '' : `  review=${attempt.review.verdict}`
+      const failed = attempt.failed_checks.length === 0 ? '' : `  failed=${attempt.failed_checks.join(',')}`
+      lines.push(`  ${pad(attempt.attempt, 3)}${pad(attempt.passed === true ? 'passed' : 'failed', 8)}${verdict}${failed}`)
+    }
+  }
+  return lines
+}
+
+/**
  * The denominator, and which job produced it.
  *
  * `dump` answers "why did the run end" from the fact plane alone, and "the run had nothing to compare
@@ -170,6 +200,98 @@ function baselineLines(store) {
     )
   }
   return lines
+}
+
+/**
+ * The workspace page: what the run holds on the cluster, what is waiting, and the conclusion line.
+ *
+ * This is the renderer for the overview and the conclusion panels. Both are printed from the same
+ * projection functions the routes call — `overview()` and `conclusion()` — so a number on the page
+ * and a number in this text come from one derivation.
+ */
+export function renderWorkspaceDump(store, { config } = {}) {
+  const page = overview(store, { config })
+  const final = conclusion(store, { config })
+  const cluster = page.cluster
+  const lines = []
+
+  lines.push(`workspace  ${store.path}`)
+  lines.push(
+    `state      ${
+      page.stop.stopped
+        ? `stopped (${page.stop.rule}: ${page.stop.message})`
+        : `running (${page.rounds.completed} round(s) complete; empty streak ${page.rounds.emptyStreak}, no-improvement streak ${page.rounds.noImprovementStreak})`
+    }`,
+  )
+
+  // A card count the page cannot know is printed as unknown, never as 0: "0 cards" is an answer
+  // somebody acts on, and a dashboard that never asked the cluster has no business giving it.
+  lines.push(
+    `cards      per job ${cluster.cards.perJob ?? 'unknown'}; ` +
+      `in use ${cluster.cards.inUse === null ? 'unknown' : cluster.cards.inUse}; ` +
+      `our ledger floor ${cluster.cards.floor ?? 'unknown'} (${cluster.jobs.open.length} open job)`,
+  )
+  lines.push(`queue      ${cluster.queue.count} waiting`)
+  for (const entry of cluster.queue.waiting) lines.push(`  ${pad(entry.candidate_id, 12)}${entry.reason ?? 'not yet dispatched'}`)
+  if (!cluster.read) lines.push(`listing    not read — ${cluster.reason}`)
+
+  if (final.best !== undefined) {
+    lines.push(`best       ${final.best.candidate_id} ${final.best.metric}=${final.best.value} (round ${final.best.round})`)
+  }
+  const comparison = final.comparison
+  if (comparison.measured !== null) {
+    lines.push(`measured   ${comparison.measured.value}   (${comparison.measured.candidate_id})`)
+    lines.push(
+      comparison.group === null
+        ? 'against    — no comparison group yet: no baseline was measured and no earlier round finished'
+        : `against    ${comparison.group.kind} ${comparison.group.value}   change ${signed(comparison.change)}`,
+    )
+    lines.push(
+      comparison.published === null
+        ? `published  — ${comparison.publishedAbsent}`
+        : `published  ${comparison.published.dataset ?? 'unknown dataset'} ${comparison.published.method} ` +
+            `${comparison.published.metric}=${comparison.published.value}   difference ${signed(comparison.publishedChange)}` +
+            `${comparison.published.source?.file === undefined ? '' : `   (${comparison.published.source.file})`}`,
+    )
+  }
+  return lines.join('\n')
+}
+
+/** `+0.0101` / `-0.0096` / `0` — a signed change, never a bare number the reader has to orient. */
+function signed(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
+  return value > 0 ? `+${value}` : String(value)
+}
+
+/** The audit list: one line per judgement, whatever its outcome. */
+export function renderCallsDump(store, { callSite, config } = {}) {
+  const page = modelCalls(store, { callSite })
+  const lines = [`workspace  ${store.path}`, `calls      ${page.count}`]
+  if (page.reason !== null) lines.push(`           ${page.reason}`)
+  for (const call of page.calls) {
+    const where = [call.call_site ?? '?', call.subject ?? '-'].join('  ')
+    const trouble = call.error_class === null ? '' : `  ${call.error_class}`
+    lines.push(`  ${pad(call.ref, 44)}  ${pad(where, 24)}  ${call.status ?? '?'}${trouble}`)
+  }
+  return lines.join('\n')
+}
+
+/** One judgement, opened: the prompt and the answer, verbatim, between their own headers. */
+export function renderCallDump(store, ref) {
+  const call = modelCall(store, ref)
+  if (call === undefined) return `workspace  ${store.path}\n\nNo model call recorded under "${ref}".`
+  const lines = [
+    `workspace  ${store.path}`,
+    `call       ${call.ref}`,
+    `site       ${call.call_site ?? '(unknown)'}`,
+    `subject    ${call.subject ?? '(none)'}`,
+    `status     ${call.status}${call.error_class === null ? '' : ` (${call.error_class})`}`,
+    `question   ${call.question_id}`,
+  ]
+  if (call.message !== null) lines.push(`message    ${call.message}`)
+  lines.push('', 'prompt', call.prompt, '', 'response', call.response)
+  if (call.answer !== null) lines.push('', 'answer', JSON.stringify(call.answer, null, 2))
+  return lines.join('\n')
 }
 
 /**
@@ -247,6 +369,7 @@ export function renderDump(store, candidateId, { config } = {}) {
     if (rejection.artifact !== undefined) lines.push(`  ${pad('from', 11)}${rejection.artifact}`)
   }
 
+  lines.push(...gateChainLines(detail))
   lines.push(...frontierLines(store, candidateId, { config }))
   lines.push(...workspaceStopLines(store, { config }))
   lines.push(...baselineLines(store))
@@ -332,13 +455,19 @@ export function runDump(argv) {
   const workspace = get('--workspace') ?? process.cwd()
   const rebuild = argv.includes('--rebuild')
   const configPath = get('--config')
+  const workspacePage = argv.includes('--overview')
+  const calls = argv.includes('--calls')
+  const callRef = get('--call')
+  const callSite = get('--site')
 
-  if (candidateId === undefined && !rebuild) {
+  if (candidateId === undefined && !rebuild && !workspacePage && !calls && callRef === undefined) {
     return {
       code: 2,
       output:
         'usage: dump --candidate <id> [--workspace <dir>] [--config <file>] [--rebuild]\n' +
-        '       dump --workspace <dir> --rebuild [--config <file>]',
+        '       dump --workspace <dir> --overview | --rebuild [--config <file>]\n' +
+        '       dump --workspace <dir> --calls [--site <call-site>]\n' +
+        '       dump --workspace <dir> --call <model_call:site:subject[:ref]>',
     }
   }
 
@@ -352,7 +481,10 @@ export function runDump(argv) {
     }
 
     const sections = []
+    if (workspacePage) sections.push(renderWorkspaceDump(store, { config }))
     if (candidateId !== undefined) sections.push(renderDump(store, candidateId, { config }))
+    if (calls) sections.push(renderCallsDump(store, { callSite, config }))
+    if (callRef !== undefined) sections.push(renderCallDump(store, callRef))
     let mismatch = false
     if (rebuild) {
       const verification = renderVerification(store, { config })

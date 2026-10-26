@@ -33,6 +33,9 @@ const DATA_PATHS = [
   '/api/reprise/rounds',
   '/api/reprise/candidate',
   '/api/reprise/conclusion',
+  // The model-call audit (ticket 29): the list, and one record opened.
+  '/api/reprise/calls',
+  '/api/reprise/call',
 ]
 const ASSET_PATHS = ['/api/reprise/page', '/api/reprise/dashboard.js']
 
@@ -52,7 +55,7 @@ test('the dashboard mounts its routes on the host connection and unregisters the
   assert.deepEqual(
     connection.paths(),
     [...DATA_PATHS, ...ASSET_PATHS, '/api/other/thing'].sort(),
-    'four views plus the one page and its module, mounted on the host registry instead of a new server',
+    'the views, the audit and the page with its module, mounted on the host registry instead of a new server',
   )
   assert.deepEqual(connection.paths().filter((path) => !path.startsWith('/api/reprise/')), ['/api/other/thing'])
 

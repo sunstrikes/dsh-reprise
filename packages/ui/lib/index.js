@@ -25,6 +25,8 @@ export {
   ASSETS,
   ROUTES,
   ViewError,
+  callHandler,
+  callsHandler,
   candidateHandler,
   conclusionHandler,
   overviewHandler,
@@ -33,4 +35,14 @@ export {
   roundsHandler,
   withStore,
 } from './routes.js'
-export { allEvents, candidateView, conclusionView, configFrom, cursorOf, overviewView, roundsView } from './views.js'
+export {
+  allEvents,
+  callView,
+  callsView,
+  candidateView,
+  conclusionView,
+  configFrom,
+  cursorOf,
+  overviewView,
+  roundsView,
+} from './views.js'

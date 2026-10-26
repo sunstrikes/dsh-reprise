@@ -108,3 +108,38 @@ test('the severity the page branches on is the one the producer actually emits',
   // A class the stylesheet does not define is a class that cannot make a warning look like one.
   assert.match(read('index.html'), /\.warning\s*\{/, 'the page defines the class it puts on a warning')
 })
+
+test('the page draws the four observability panels, because a value nobody renders is not a panel', () => {
+  // CODING_STANDARDS §3: an acceptance criterion phrased in terms of what a person sees holds on the
+  // screen, not in the payload. These assertions are the cheapest honest check of that without a
+  // browser: the page consumes the fields the projection puts there.
+  const source = read('dashboard.js')
+
+  // 总览: cards in use, the ledger floor, and the queue — with "unknown" as a word of its own.
+  assert.match(source, /cluster\.cards\.inUse/, 'the overview renders the card count')
+  assert.match(source, /cardsInUse/, 'and goes through one place to decide how to say it')
+  assert.match(source, /'unknown'/, 'an unread listing is drawn as unknown, never as 0')
+  assert.match(source, /cluster\.cards\.floor/, 'the ledger floor is shown beside it')
+  assert.match(source, /cluster\?\.queue\?\.waiting/, 'and the queue is drawn, one waiter per line')
+
+  // 候选详情: the gate chain, step by step, with the three-way status as a badge.
+  assert.match(source, /detail\.gateChain/, 'the candidate page renders the gate chain')
+  assert.match(source, /dataset: \{ state: step\.status \}/, 'each step carries its own status word')
+
+  // 结论页: what we measured, against what, and what the domain published.
+  assert.match(source, /comparison\.measured/, 'the conclusion renders what we measured')
+  assert.match(source, /comparison\.published/, 'and what the pack published')
+  assert.match(source, /publishedAbsent/, 'or says why there is nothing to compare against')
+
+  // 审计: the list, and one call opened into its prompt and response.
+  assert.match(source, /\/api\/reprise\/calls/, 'the audit list is fetched')
+  assert.match(source, /\/api\/reprise\/call['"]?,?/, 'and one call is fetched on its own')
+  assert.match(source, /opened\.prompt/, 'the prompt is drawn')
+  assert.match(source, /opened\.response/, 'and the response')
+
+  const page = read('index.html')
+  assert.match(page, /id="audit"/, 'the page has a place for the audit panel')
+  assert.match(page, /\.badge\[data-state='missing'\]/, 'and a style that tells "missing" apart from "failed"')
+  assert.match(page, /\.badge\[data-state='failed'\]/)
+  assert.match(page, /\.calls\s*\{/, 'and a style for the call list')
+})

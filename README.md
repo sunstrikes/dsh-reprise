@@ -46,7 +46,7 @@ what it says enters the fact plane only as an artifact a validator has accepted.
 
 Mounting the bundle adds three surfaces and nothing else: a tick that advances the phase machine in a
 workspace nobody has open, a `reprise_status` tool that reads the same projection from inside a
-conversation, and a **Reprise** panel in the sidebar (backed by six read-only GET routes). It does
+conversation, and a **Reprise** panel in the sidebar (backed by eight read-only GET routes). It does
 not touch your repository, does not open a port, and does not call a model unless you name one in
 `model.command`.
 
@@ -215,10 +215,12 @@ afterwards, so editing the patch mid-run changes nothing the dashboard reports.
 |---|---|---|
 | Model tool | `reprise_status` | the run's progress as JSON, read-only, from the same projection the page draws |
 | Sidebar panel | `sidebar.panellist` id `reprise`, order `25`, plus `main` key `reprise` | the **Reprise** button (zh: 复现) and the page it opens; labels follow the active language (`en`, `zh`) |
-| HTTP routes | `GET /api/reprise/{overview,rounds,candidate,conclusion}` | the four views, each read through its own read-only handle |
+| HTTP routes | `GET /api/reprise/{overview,rounds,candidate,conclusion,calls,call}` | the four views and the model-call audit, each read through its own read-only handle |
 | Static assets | `GET /api/reprise/page`, `/api/reprise/dashboard.js` | a standalone page for a host with no client slots |
 | CLI | `node packages/core/lib/cli/run.js --workspace <dir> --config <file>` | the same wiring the host ticks, driven by a loop; exit 0 conclusion, 1 no comparable metric, 2 usage, 3 timeout |
-| CLI | `node packages/core/lib/cli/dump.js --candidate <id>` | timeline, every gate verdict, identity bindings, frontier position, and why the run stopped |
+| CLI | `node packages/core/lib/cli/dump.js --candidate <id>` | timeline, every gate verdict, the gate chain step by step, identity bindings, frontier position, and why the run stopped |
+| CLI | `node packages/core/lib/cli/dump.js --overview` | the workspace page: cards and queue, the best result, and the measured/published comparison |
+| CLI | `node packages/core/lib/cli/dump.js --calls` / `--call <ref>` | the model-call audit, and one call with its prompt and response verbatim |
 | CLI | `node packages/core/lib/cli/intents.js place <kind>` / `list` | human intents (`proposal`, `grant`, `anchor`, `pause`, `resume`, `approval`, `experience`) written into `<workspace>/pending/` |
 | CLI | `node packages/core/lib/cli/jobs.js list` / `reap --job <id>` | the cluster job ledger: our jobs as the cluster lists them, the orphans (our marker, no ledger row), and the only way an orphan is ever stopped |
 | Skills | `<domain>/prompts/{land,verify,cand-analyze,round-plan,round-reflect}/SKILL.md` | what the model is told at each of the five call sites; markdown on disk, part of the domain pack, read fresh on every call — **not** DSH skills and not registered as such |

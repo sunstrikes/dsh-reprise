@@ -18,7 +18,15 @@
 
 import { dirname } from 'node:path'
 
-import { candidateDetail, conclusion, overview, rounds, summariseEvent } from '../../core/lib/projection.js'
+import {
+  candidateDetail,
+  conclusion,
+  modelCall,
+  modelCalls,
+  overview,
+  rounds,
+  summariseEvent,
+} from '../../core/lib/projection.js'
 
 /**
  * A refusal from the view layer, and the status it deserves.
@@ -191,4 +199,27 @@ export function candidateView(store, query = {}) {
 /** The conclusion page: what this run established, on which number, and against what. */
 export function conclusionView(store, query = {}) {
   return envelope(store, 'conclusion', { data: conclusion(store, { config: configFrom(store) }) }, query)
+}
+
+/**
+ * The audit page: every judgement the run asked a model for, one row each, `?site=` to narrow it.
+ *
+ * The list deliberately carries no prompt bodies — opening a call is a second request, so the page
+ * can show a hundred calls without carrying a hundred prompts, and the reader chooses which original
+ * text to read.
+ */
+export function callsView(store, query = {}) {
+  return envelope(store, 'calls', { data: modelCalls(store, { callSite: query.site }) }, query)
+}
+
+/** One judgement, opened: the prompt it was given and the words that came back, verbatim. */
+export function callView(store, query = {}) {
+  const ref = query.ref
+  if (typeof ref !== 'string' || ref === '') {
+    throw new ViewError(400, 'the audit view needs ?ref=<model_call:call-site:subject[:ref]>')
+  }
+  const call = modelCall(store, ref)
+  // `missing` rather than a 404: a workspace whose record was pruned still has a page, and the
+  // difference between "not a record" and "no such record" is what the two fields state.
+  return envelope(store, 'call', { ref, data: call ?? null, missing: call === undefined }, query)
 }
