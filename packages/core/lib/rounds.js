@@ -420,14 +420,26 @@ function eventPrefixOf(store) {
  * per-axis top-k rotation over that. The baseline is in the set by construction, so a workspace with
  * nothing comparable yet plans its first round from the baseline — the behaviour every existing
  * workspace already had, now as a decision instead of an omission.
+ *
+ * **The rotation offset is the round's, not a constant.** `parentsOf` interleaves the per-axis lists
+ * so every axis leads before any axis gets a second slot, and `offset` decides which axis leads. A
+ * fixed 0 would mean the contract's first axis led every round of the run: the second objective would
+ * be ranked, represented and never *leading*, which is the predecessor's one-axis search wearing a
+ * multi-objective contract. So the offset moves on by one each round — `(round - 1) % axes`, so round
+ * 1 leads with the primary axis and the round after it leads with the next one. The round is the input
+ * rather than a counter because a re-plan of the same round must rotate the same way: the snapshot's
+ * `rotation.offset` has to be re-derivable from the facts, and a tick counter is not a fact.
  */
 function parentRoster({ store }, state, round, settings, view) {
   const set = frontierOf(view, { baseline: state.baseline })
-  const parents = parentsOf(set, { k: settings.candidates_per_round })
-  const snapshot = parentSnapshot({ round, events_prefix: eventPrefixOf(store), set, parents })
+  const axes = set.contract?.ok === true ? set.contract.objectives.length : 0
+  const offset = axes === 0 ? 0 : (round - 1) % axes
+  const parents = parentsOf(set, { k: settings.candidates_per_round, offset })
+  const snapshot = parentSnapshot({ round, events_prefix: eventPrefixOf(store), set, parents, offset })
   return {
     set,
     parents,
+    offset,
     snapshot,
     // What the planner is told: the set with its vectors, and the roster. Whole, unranked, untrimmed.
     facts: {
@@ -580,6 +592,9 @@ async function planNextRound(context, state) {
       candidates: landings.map((landing) => landing.candidateId),
       artifact: stored.path,
       parents: roster.parents,
+      // Which axis led this round's roster, beside whom it produced: a reader asking "why did the
+      // secondary objective lead round 3" gets the rotation, not a hunt through the snapshot file.
+      rotation_offset: roster.offset,
       parent_snapshot: roster.snapshot.address,
       // Recorded beside the parents because a reader asking "where did this round's candidates
       // start from" needs both answers: the parent is whom they build on, the code base is the tree.
