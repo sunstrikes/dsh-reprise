@@ -18,8 +18,11 @@
  */
 
 import assert from 'node:assert/strict'
-import { dirname } from 'node:path'
+import { writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
+
+import { CANDIDATE_PHASES } from '@dsh-reprise/contract'
 
 import { tick } from '../../core/lib/loop.js'
 import { candidateHandler, conclusionHandler, overviewHandler, roundsHandler } from '../lib/routes.js'
@@ -162,6 +165,23 @@ test('the rounds view lists each round with its candidates and whether it moved 
   assert.equal(answer.data[1].best.value, 0.7401)
 })
 
+test('a round best carries the metric it is measured in, so no renderer has to guess one', async () => {
+  // Ticket #2: the page printed `undefined=0.7211` because `rounds()[i].best` was `{candidate_id,
+  // value}` while three renderers (page, panel, dump) all wrote `best.metric`. The projection has the
+  // metric contract in hand where it builds the round history, so the fix belongs there and not in a
+  // `${best.metric ?? '?'}` in each of the three.
+  const { dir } = await concludedWorkspace()
+
+  const rows = roundsHandler(dir, {}).data
+
+  assert.deepEqual(
+    rows.map((entry) => entry.best.metric),
+    ['auc', 'auc'],
+    'every round best names its metric',
+  )
+  assert.equal(roundsHandler(dir, {}).data[1].best.candidate_id, 'r2-c1', 'and still names the candidate that set it')
+})
+
 test('the conclusion view names the best candidate and what it is compared against', async () => {
   const { dir } = await concludedWorkspace({ stop: { max_rounds: 2 }, conclude: true })
 
@@ -173,8 +193,125 @@ test('the conclusion view names the best candidate and what it is compared again
   assert.equal(answer.data.best.value, 0.7401)
   assert.equal(answer.data.against.parent, 'baseline-0', 'the comparison group is a frozen binding, not a memory')
   assert.equal(answer.data.against.best.value, 0.7, 'and the previous best sits next to it')
+  assert.equal(answer.data.against.best.metric, 'auc', 'a previous best without its metric is a bare number')
   assert.equal(answer.data.stopped.stopped, true)
   assert.equal(answer.data.stopped.rule, 'max_rounds', 'the conclusion is the recorded rule, in the words recorded then')
+})
+
+/**
+ * One finished candidate and nothing else: a best result, and nothing comparable to measure it
+ * against. This is the state the conclusion line has to render as "no comparable baseline" instead of
+ * a dash (`ticket #2` checkbox 6).
+ */
+async function singleResultWorkspace() {
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { budget: { gpu_hours_limit: 4 }, stop: { max_rounds: 0 } }) })
+  seed(ports.store, ports.config)
+  await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
+  const dir = dirname(ports.store.path)
+  ports.store.close()
+  return dir
+}
+
+/** A workspace with a frozen baseline on disk, which is what makes the comparison a baseline claim. */
+async function frozenBaselineWorkspace(value) {
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { budget: { gpu_hours_limit: 4 }, stop: { max_rounds: 0 } }) })
+  seed(ports.store, ports.config)
+  await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7401 } })
+  const dir = dirname(ports.store.path)
+  ports.store.close()
+  writeFileSync(join(dir, 'baseline.json'), JSON.stringify({ metric: 'auc', value }))
+  return dir
+}
+
+test('the comparison publishes the change as a percentage, so no renderer divides two numbers itself', async () => {
+  // The page paints "＋5.73%" and the panel will paint the same number. Neither may compute it: the
+  // division is a derivation, and two derivations of one number is how a page and a dump start
+  // disagreeing. 0.0401 spread over a 0.7 comparison group is 5.728571%.
+  const { dir } = await concludedWorkspace()
+
+  const comparison = conclusionHandler(dir, {}).data.comparison
+
+  assert.equal(comparison.group.kind, 'previous-best', 'fixture: the previous round is the only thing to compare against')
+  assert.equal(comparison.change, 0.0401)
+  assert.equal(comparison.changePercent, 5.728571, 'the same change, as a percentage of the group')
+  assert.equal(comparison.measured.round, 2, 'and what we measured says which round it came from')
+})
+
+test('against a frozen baseline the percentage is a different claim, and the comparison names which one', async () => {
+  // 0.0201 over a frozen 0.72 is 2.791667%. Same shape as the previous-best case above and a
+  // different sentence on the page: "against the frozen baseline", never "against the previous best".
+  const dir = await frozenBaselineWorkspace(0.72)
+
+  const comparison = conclusionHandler(dir, {}).data.comparison
+
+  assert.equal(comparison.group.kind, 'baseline')
+  assert.equal(comparison.group.value, 0.72)
+  assert.equal(comparison.change, 0.0201)
+  assert.equal(comparison.changePercent, 2.791667)
+})
+
+test('a run with nothing to compare against says so: no group, and no percentage invented for it', async () => {
+  const dir = await singleResultWorkspace()
+
+  const comparison = conclusionHandler(dir, {}).data.comparison
+
+  assert.equal(comparison.measured.candidate_id, 'r1-c1', 'there is a result')
+  assert.equal(comparison.group, null, 'and nothing to measure it against')
+  assert.equal(comparison.change, null)
+  assert.equal(comparison.changePercent, null, 'a percentage against no group is a made-up number')
+  assert.equal(comparison.better, null)
+})
+
+// --------------------------------------- the retired cards' data (ticket #7)
+
+/**
+ * Ticket #7 deletes the page's last two pre-redesign cards. What must not be deleted is the
+ * projection underneath them: the Web UI panel (#6) and `dump` read the same answer, and a field
+ * removed to make a renderer tidy is a field three surfaces lose.
+ *
+ * The inventory below is the fields those two cards drew, written out rather than read from the
+ * payload — a test that asserts a constant it imports proves nothing about the day the constant is
+ * edited. Every line here is a fact that was on screen yesterday and has to be *reachable* today,
+ * wherever it now lives (the masthead capsule, the strips under the conclusion, the readings row, the
+ * conclusion region).
+ */
+test('the two retired cards retired rendering, not data: every field they read is still answered', async () => {
+  const { dir } = await concludedWorkspace({ stop: { max_rounds: 2 }, conclude: true })
+
+  const overview = (await overviewHandler(dir, {})).data
+  const final = conclusionHandler(dir, {}).data
+
+  for (const key of ['workspace', 'rounds', 'candidates', 'spend', 'best', 'frontier', 'metricContract', 'warnings', 'cluster', 'stop']) {
+    assert.ok(key in overview, `the overview still publishes ${key}`)
+  }
+  // The six-cell card's first line: which phase the workspace is in, and whether it is still running.
+  assert.ok('phase' in overview.workspace, 'the workspace phase, now the masthead capsule')
+  assert.equal(overview.stop.stopped, true, 'and the state word beside it')
+  // Its spend line, including the one number that has nowhere else to go: the token count.
+  for (const key of ['settledGpuHours', 'inFlightGpuHours', 'limitGpuHours', 'tokens']) {
+    assert.ok(key in overview.spend, `the spend reading ${key}`)
+  }
+  assert.ok(overview.spend.budget !== null, 'and the bar materials the readings cell draws')
+  // Its cluster line: the card count, the per-job claim and the ledger floor's own words.
+  for (const key of ['perJob', 'inUse', 'floor', 'floorAbsent']) {
+    assert.ok(key in overview.cluster.cards, `the cluster card field ${key}`)
+  }
+  assert.ok('count' in overview.cluster.queue, 'and how many candidates are waiting')
+  // Its warning list, which `未声明 GPU 排他` only reaches a reader through.
+  assert.ok(Array.isArray(overview.warnings), 'warnings are still published')
+  // The candidates' names, not only their count: the readings cell lists what is in flight.
+  assert.ok(Array.isArray(overview.candidates.inFlight))
+
+  // The measured/published card: the absolute change beside the percentage, the number the domain
+  // published and our distance from it, and which direction each objective runs.
+  for (const key of ['measured', 'group', 'change', 'changePercent', 'better', 'published', 'publishedChange', 'publishedAbsent']) {
+    assert.ok(key in final.comparison, `the comparison still publishes ${key}`)
+  }
+  assert.ok(Array.isArray(final.objectives) && final.objectives.length > 0, 'the objectives are still named')
+  for (const objective of final.objectives) {
+    assert.equal(typeof objective.direction, 'string', `every objective still says which way ${objective.name} runs`)
+    assert.equal(typeof objective.kind, 'string', 'and which one is primary')
+  }
 })
 
 test('a rejected candidate carries the four-state verdict that stopped it', async () => {
@@ -200,4 +337,91 @@ test('a rejected candidate carries the four-state verdict that stopped it', asyn
     answer.data.gates.map((gate) => `${gate.phase}:${gate.status}`),
     ['VERIFY:invalid'],
   )
+})
+// --------------------------------------------- the staircase's inputs (ticket #3)
+
+/**
+ * The chart itself is drawn by the browser, so what these tests can hold is the other half of the
+ * contract: that the two views carry every number the drawing needs, that they are the same rounds,
+ * and that the frame the page is given contains every mark it can place inside it.
+ */
+test('the rounds view carries the step series and a shape per candidate; the conclusion carries the frame', async () => {
+  const { dir } = await concludedWorkspace()
+
+  const rows = roundsHandler(dir, {}).data
+  const ladder = conclusionHandler(dir, {}).data.ladder
+
+  assert.deepEqual(
+    rows.map((entry) => ({ round: entry.round, verdict: entry.verdict, after: entry.cumulative.value })),
+    [
+      { round: 1, verdict: 'raised', after: 0.7 },
+      { round: 2, verdict: 'raised', after: 0.7401 },
+    ],
+    'each round says what it did to the best, and what the best then stood at',
+  )
+  assert.deepEqual(
+    rows.flatMap((entry) => entry.candidates).map((candidate) => `${candidate.candidate_id}:${candidate.shape}`),
+    ['r1-c1:done', 'r2-c1:frontier'],
+    'and each candidate arrives with the shape the rail draws — round 2 both leads and is the last round',
+  )
+
+  assert.equal(ladder.metric, 'auc', 'the frame names the metric it is drawn on')
+  assert.equal(ladder.baseline, null, 'this fixture recorded no frozen baseline')
+  assert.match(ladder.baselineAbsent, /no frozen baseline/i)
+
+  // The frame must contain every mark: a value outside `axis` would be drawn off the top or the
+  // bottom of the plot, which is the silent failure a chart is prone to.
+  const plotted = rows.map((entry) => entry.cumulative.value)
+  assert.ok(ladder.axis.bottom < Math.min(...plotted), 'the lowest mark sits above the bottom edge')
+  assert.ok(ladder.axis.top > Math.max(...plotted), 'and the highest sits below the top edge')
+  assert.equal(ladder.rounds.length, rows.length, 'the chart and the rail are the same rounds, not two lists')
+})
+
+test('a baseline recorded in another metric is not the same absence as no baseline, and says which it is', async () => {
+  // `standingBaseline()` is the one reader of "is there a baseline", and it refuses a baseline measured
+  // in a different metric rather than comparing two quantities. The two cases read differently on
+  // both surfaces: "no frozen baseline" sends a reader looking for a file that is not there, and
+  // "the frozen baseline records logloss, not auc" sends them to the file that *is* there.
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 0 } }) })
+  seedConfig(ports.store, ports.config)
+  await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7401 } })
+  const dir = dirname(ports.store.path)
+  ports.store.close()
+  writeFileSync(join(dir, 'baseline.json'), JSON.stringify({ metric: 'logloss', value: 0.62 }))
+
+  const ladder = conclusionHandler(dir, {}).data.ladder
+
+  assert.equal(ladder.baseline, null, 'a baseline in another metric is not a baseline for this one')
+  assert.match(ladder.baselineAbsent, /records logloss, not auc/, 'and the sentence names both metrics')
+})
+
+// ---------------------------------- the candidate inspector's payload (ticket #5)
+
+test('the candidate route hands the page the whole path, the shape word and the hypothesis', async () => {
+  // The page cannot import the contract, so the phase order has to arrive in the payload; and it must
+  // not keep a second copy of "which shape is this candidate" either. Both are asserted here at the
+  // route, because the route is what the browser actually reads.
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 0 } }) })
+  seed(ports.store, ports.config)
+  await runCandidate(ports, {
+    candidateId: 'r1-c2',
+    round: 1,
+    judge: fakeJudge({
+      verify: ({ candidateId, now }) => ({ candidate_id: candidateId, passed: 'yes-please', checks: [], decided_at_ms: now }),
+    }),
+  })
+  const dir = dirname(ports.store.path)
+  ports.store.close()
+
+  const detail = candidateHandler(dir, { candidate: 'r1-c2' }).data
+
+  assert.deepEqual(detail.phasePath.map((step) => step.phase), CANDIDATE_PHASES, 'all eight phases, in the kernel\'s order')
+  assert.deepEqual(
+    detail.phasePath.filter((step) => step.reached).map((step) => step.phase),
+    ['LAND', 'BUILD', 'VERIFY'],
+    'walked, here, and never reached are three answers the payload keeps apart',
+  )
+  assert.equal(detail.phasePath.find((step) => step.phase === 'VERIFY').status, 'invalid')
+  assert.equal(detail.shape, 'invalid', 'the coarse square the rail draws travels with the detail, decided once')
+  assert.equal(detail.hypothesis, 'hypothesis of r1-c2', 'and the identity row has the sentence to open with')
 })

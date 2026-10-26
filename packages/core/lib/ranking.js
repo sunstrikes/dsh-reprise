@@ -321,9 +321,15 @@ export function rebuildRanking(store, config) {
 }
 
 /**
- * Group the derived view by round and say, per round, whether it is finished, what it achieved, and
- * whether it beat everything before it. The stop rules are statements about this history, so it is
- * computed once, from the facts, and never from a model's claim that a round went well.
+ * Group the derived view by round and say, per round, whether it is finished, what it achieved,
+ * whether it beat everything before it, and what the best result stood at once the round was over.
+ *
+ * That last field (`cumulative`) is what a staircase draws, and it belongs here rather than in a
+ * renderer for the same reason `improving` does: it is a comparison of this round's best against the
+ * best so far, and the stop rules and the page must not be able to answer that question differently.
+ *
+ * The stop rules are statements about this history, so it is computed once, from the facts, and never
+ * from a model's claim that a round went well.
  */
 export function roundHistory(view) {
   const rounds = new Map()
@@ -338,9 +344,13 @@ export function roundHistory(view) {
   for (const round of [...rounds.keys()].sort((left, right) => left - right)) {
     const members = rounds.get(round)
     const ranked = members.filter((candidate) => candidate.complete)
+    // A round best names the metric it is a best *of*. The contract is in hand right here, and every
+    // renderer of a round (the page's table, the panel, `dump`) was otherwise re-attaching
+    // `contract.primary` to a number that looked like a bare value — or printing `undefined=0.7211`.
     const roundBest = ranked
       .map((candidate) => ({
         candidate_id: candidate.candidate_id,
+        metric: view.contract.primary,
         value: candidate.vector[view.contract.primary],
       }))
       .sort((left, right) => {
@@ -363,6 +373,11 @@ export function roundHistory(view) {
       improving,
       // An "empty" round produced nothing comparable: no candidate reached a metric-bearing end.
       empty: roundBest === undefined,
+      // The best result standing once this round is over — the value a staircase draws at this
+      // round's slot. It is published rather than left to the renderer because "hold it, or move it"
+      // is a comparison, and a page that accumulated its own maximum could disagree with `dump`.
+      // Empty rounds carry the previous best forward: the assertion is about the run, not the round.
+      cumulative: bestSoFar === undefined ? undefined : { ...bestSoFar },
     })
   }
   return history

@@ -179,9 +179,13 @@ function notesFor(store) {
  * ask the cluster itself, so an absent listing is not an error — it is the `cards.inUse: null`
  * answer, and the projection says why. Passing it through rather than dropping it is what makes
  * "how many cards are in use" a number the page can print at all.
+ *
+ * `now` is the instant the reading was taken, and it comes from the caller for the same reason: the
+ * projection must not reach for a clock of its own, or "how close is this run to its wall-clock
+ * limit" would answer differently on every read and be untestable besides.
  */
-export function overviewView(store, query = {}, { listing } = {}) {
-  const data = overview(store, { config: configFrom(store), listing })
+export function overviewView(store, query = {}, { listing, now } = {}) {
+  const data = overview(store, { config: configFrom(store), listing, now })
   return envelope(store, 'overview', { data, notes: notesFor(store) }, query)
 }
 

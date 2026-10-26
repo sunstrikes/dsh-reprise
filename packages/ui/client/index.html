@@ -5,306 +5,118 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>reprise — read-only dashboard</title>
-    <style>
-      /*
-       * Colour comes from the host's theme tokens (`--dsw-alias-*`, the names dsh-client-ui-theme
-       * publishes) and from nothing else. A page served on its own has no token sheet loaded, so each
-       * reference carries a CSS *system* colour as its fallback (`Canvas`, `CanvasText`, `GrayText`,
-       * `ButtonBorder`, `AccentColor`) — those follow the reader's OS scheme and `color-scheme`, which
-       * is why there is no palette, and no hard-coded colour, in this file.
-       */
-      :root {
-        color-scheme: light dark;
-        --reprise-bg: var(--dsw-alias-bg-base, Canvas);
-        --reprise-surface: var(--dsw-alias-bg-layer-1, Canvas);
-        --reprise-surface-raised: var(--dsw-alias-bg-layer-2, Canvas);
-        --reprise-text: var(--dsw-alias-label-primary, CanvasText);
-        --reprise-dim: var(--dsw-alias-label-secondary, GrayText);
-        --reprise-border: var(--dsw-alias-border-l1, ButtonBorder);
-        --reprise-border-strong: var(--dsw-alias-border-l3, currentColor);
-        --reprise-accent: var(--dsw-alias-brand-primary, AccentColor);
-        --reprise-radius: var(--dsw-radius-md, 0.5rem);
-        --reprise-font: var(--dsw-font-family, system-ui, sans-serif);
-        --reprise-mono: var(--ds-font-family-code, ui-monospace, monospace);
-      }
-
-      * {
-        box-sizing: border-box;
-      }
-
-      body {
-        margin: 0;
-        padding: 1.5rem;
-        background: var(--reprise-bg);
-        color: var(--reprise-text);
-        font-family: var(--reprise-font);
-        font-size: var(--dsh-content-font-size, 0.875rem);
-        line-height: 1.5;
-      }
-
-      h1 {
-        margin: 0 0 0.25rem;
-        font-size: 1.125rem;
-        font-weight: 600;
-      }
-
-      h2 {
-        margin: 0 0 0.5rem;
-        font-size: 0.9375rem;
-        font-weight: 600;
-      }
-
-      h3 {
-        margin: 1rem 0 0.375rem;
-        font-size: 0.8125rem;
-        font-weight: 600;
-        color: var(--reprise-dim);
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-      }
-
-      .masthead {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: baseline;
-        gap: 0.75rem;
-        margin-bottom: 1rem;
-        padding-bottom: 0.75rem;
-        border-bottom: 1px solid var(--reprise-border);
-      }
-
-      .masthead .meta {
-        color: var(--reprise-dim);
-        font-family: var(--reprise-mono);
-        font-size: 0.75rem;
-      }
-
-      .grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
-        gap: 1rem;
-        align-items: start;
-      }
-
-      section.card {
-        padding: 0.875rem 1rem;
-        background: var(--reprise-surface);
-        border: 1px solid var(--reprise-border);
-        border-radius: var(--reprise-radius);
-      }
-
-      .stats {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
-        gap: 0.75rem;
-        margin: 0;
-      }
-
-      .stat dt {
-        color: var(--reprise-dim);
-        font-size: 0.75rem;
-      }
-
-      .stat dd {
-        margin: 0.125rem 0 0;
-        font-family: var(--reprise-mono);
-        font-size: 1rem;
-      }
-
-      table {
-        width: 100%;
-        border-collapse: collapse;
-        font-family: var(--reprise-mono);
-        font-size: 0.75rem;
-      }
-
-      th,
-      td {
-        padding: 0.25rem 0.5rem 0.25rem 0;
-        border-bottom: 1px solid var(--reprise-border);
-        text-align: left;
-        vertical-align: top;
-      }
-
-      th {
-        color: var(--reprise-dim);
-        font-weight: 500;
-      }
-
-      button {
-        padding: 0.125rem 0.375rem;
-        color: var(--reprise-text);
-        background: var(--reprise-surface-raised);
-        border: 1px solid var(--reprise-border);
-        border-radius: var(--reprise-radius);
-        font-family: var(--reprise-mono);
-        font-size: 0.75rem;
-        cursor: pointer;
-      }
-
-      button[aria-pressed='true'] {
-        border-color: var(--reprise-accent);
-      }
-
-      /*
-       * The four gate states are told apart by their name and by a heavier border, never by hue: the
-       * `ok`/`missing`/`conflict`/`invalid` vocabulary has to survive a screenshot and a reader who
-       * cannot see colour, and the pair `conflict`/`invalid` must never look interchangeable.
-       */
-      .badge {
-        display: inline-block;
-        padding: 0 0.375rem;
-        border: 1px solid var(--reprise-border);
-        border-radius: var(--reprise-radius);
-        font-family: var(--reprise-mono);
-        font-size: 0.6875rem;
-        text-transform: uppercase;
-      }
-
-      .badge[data-state='conflict'],
-      .badge[data-state='invalid'] {
-        border-width: 2px;
-        border-color: var(--reprise-border-strong);
-        font-weight: 600;
-      }
-
-      .badge[data-state='missing'] {
-        border-style: dashed;
-      }
-
-      ol,
-      ul {
-        margin: 0;
-        padding-left: 1.125rem;
-      }
-
-      li {
-        margin: 0.125rem 0;
-      }
-
-      pre,
-      code {
-        font-family: var(--reprise-mono);
-        font-size: 0.75rem;
-      }
-
-      pre {
-        overflow-x: auto;
-        margin: 0.375rem 0 0;
-        padding: 0.5rem;
-        border: 1px solid var(--reprise-border);
-        border-radius: var(--reprise-radius);
-        white-space: pre-wrap;
-      }
-
-      .note {
-        margin: 0.5rem 0 0;
-        padding: 0.375rem 0.5rem;
-        color: var(--reprise-text);
-        border-left: 2px solid var(--reprise-accent);
-      }
-
-      .warning {
-        margin: 0.5rem 0 0;
-        padding: 0.375rem 0.5rem;
-        font-weight: 600;
-        color: var(--reprise-text);
-        border: 1px solid var(--reprise-border-strong);
-        border-left: 2px solid var(--reprise-accent);
-        border-radius: var(--reprise-radius);
-      }
-
-      .empty,
-      .dim {
-        color: var(--reprise-dim);
-      }
-
-      .timeline {
-        margin: 0;
-        padding: 0;
-        list-style: none;
-      }
-
-      .timeline li {
-        display: grid;
-        grid-template-columns: 4.5rem 1fr;
-        gap: 0.5rem;
-        padding: 0.125rem 0;
-      }
-
-      .timeline .seq {
-        color: var(--reprise-dim);
-      }
-
-      /*
-       * A gate-chain step is one of three words, and `missing` must not look like `failed`: the
-       * panel exists to keep "never judged" apart from "judged and refused" (ticket 29).
-       */
-      .badge[data-state='failed'] {
-        border-width: 2px;
-        border-color: var(--reprise-border-strong);
-        font-weight: 600;
-      }
-
-      .badge[data-state='missing'] {
-        border-style: dashed;
-      }
-
-      .badge[data-state='passed'] {
-        border-style: solid;
-      }
-
-      .calls {
-        padding-left: 0;
-        list-style: none;
-      }
-
-      .calls li {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: baseline;
-        gap: 0.375rem;
-      }
-    </style>
+    <!--
+      One stylesheet, served beside this page by the host at `/api/reprise/dashboard.css`. It carries
+      the `--reprise-*` token block (falling back to the host's `--dsw-alias-*` then to CSS system
+      colours) and every component the page draws, and the Web UI panel injects the same file in
+      ticket #6. There is no second `<style>` here on purpose: two places to paint one page is how
+      the two clients drifted apart the first time.
+    -->
+    <link rel="stylesheet" href="./dashboard.css" />
   </head>
-  <body>
+  <body class="reprise">
+    <!--
+      The masthead answers the first question a reader has — *is it still running, and where is it* —
+      and nothing else does. The phase capsule is the only place the workspace phase appears, and it
+      is `aria-live`: a phase change is worth hearing. Beside it are the four stamps the design asks
+      for (workspace, read at, last fact, cursor), each with its own label, so a reader never has to
+      guess which instant they are looking at.
+    -->
     <header class="masthead">
-      <h1>reprise</h1>
-      <span class="meta" id="workspace"></span>
-      <span class="meta" id="status">connecting…</span>
-      <span class="meta" id="cursor"></span>
+      <div class="masthead-run">
+        <h1>reprise</h1>
+        <span class="phase-capsule" id="phase" aria-live="polite">
+          <span class="phase-capsule-dot" aria-hidden="true"></span>
+          <span class="phase-capsule-name">connecting…</span>
+        </span>
+        <span class="masthead-mode">read-only</span>
+      </div>
+      <div class="masthead-stamps">
+        <span class="stamp"><span class="stamp-label">workspace</span><span class="stamp-value" id="workspace"></span></span>
+        <span class="stamp"><span class="stamp-label">read at</span><span class="stamp-value" id="read-at">—</span></span>
+        <span class="stamp"><span class="stamp-label">last fact</span><span class="stamp-value" id="last-fact">—</span></span>
+        <span class="stamp"><span class="stamp-label">cursor</span><span class="stamp-value" id="cursor"></span></span>
+      </div>
     </header>
 
-    <div class="grid">
-      <section class="card" id="overview" aria-live="polite">
-        <h2>Overview</h2>
-        <p class="empty">waiting for facts…</p>
-      </section>
+    <!--
+      The conclusion line, first: the best result, what it is measured against, and by how much. The
+      page's own title sits above it in the masthead; everything below is evidence for this. Under the
+      sentence sit the three numbers the sentence cannot carry — the absolute change, the number the
+      domain published (our distance from it), and the direction of every objective — because a
+      percentage alone does not say how much metric moved, and "should I trust the model's number" is
+      the question this region exists to answer.
+    -->
+    <section class="headline" id="headline" aria-live="polite">
+      <p class="headline-empty">waiting for facts…</p>
+    </section>
 
-      <section class="card" id="conclusion" aria-live="polite">
-        <h2>Conclusion</h2>
-        <p class="empty">waiting for facts…</p>
-      </section>
+    <!--
+      The strip: the loud facts that are not a step in any region — warnings, the notes a route
+      attached to its own answer, and the "nothing can be ranked" note when the metric contract
+      disagrees with itself (spec §6.9 puts that one above the stop rules). They are sentences in the
+      projection's own words, not furniture, so they get their own line and no card.
+    -->
+    <section class="strips" id="strips" aria-live="polite"></section>
 
-      <section class="card" id="rounds" aria-live="polite">
-        <h2>Rounds</h2>
-        <p class="empty">waiting for facts…</p>
-      </section>
+    <!--
+      The stop section: while the run is going, one row of gauges — how close each rule is to firing,
+      which is the question "will this end on its own, and how soon" — and once it has stopped, the
+      same rules as a two-column panel with the recorded conclusion beside them. It sits above the
+      chart because the chart says what the run found, and this says whether the run is still able to
+      find anything.
+    -->
+    <section class="stop" id="stop" aria-live="polite">
+      <h2>Stop rules</h2>
+      <p class="empty">waiting for facts…</p>
+    </section>
 
+    <!--
+      The staircase and the round rail, in place of the old Rounds table. It sits between the
+      conclusion and the readings because it is the evidence for the conclusion: which round raised
+      the best result, which rounds held, and which candidate is still running.
+    -->
+    <section class="card" id="ladder">
+      <h2>Best so far, round by round</h2>
+      <p class="empty">waiting for facts…</p>
+    </section>
+
+    <!--
+      The readings row: how much of the run there is (rounds, candidates), what it has cost (GPU hours
+      with the budget bar), what it found (the frontier) and what it is occupying (the cluster). Five
+      cells of equal height, left aligned — the row is read as one line, not as five cards.
+    -->
+    <dl class="readings" id="readings" aria-live="polite">
+      <div class="reading">
+        <dt class="reading-label">Readings</dt>
+        <dd class="reading-sub">waiting for facts…</dd>
+      </div>
+    </dl>
+
+    <!--
+      The lower half: the candidate inspector on the left, and on the right the two things a reader
+      consults rather than reads — the model-call audit folded into one line, and the fact stream
+      under it. Wide screens get two columns; below 45rem they stack, in the same order.
+    -->
+    <div class="lower">
       <section class="card" id="candidate" aria-live="polite">
         <h2>Candidate</h2>
         <p class="empty">choose a candidate from a round.</p>
       </section>
 
-      <section class="card" id="audit" aria-live="polite">
-        <h2>Model calls</h2>
-        <p class="empty">no judgement has asked a model yet.</p>
-      </section>
+      <div class="lower-side">
+        <section class="card" id="audit" aria-live="polite">
+          <details class="audit">
+            <summary class="audit-line">model calls</summary>
+            <p class="empty">no judgement has asked a model yet.</p>
+          </details>
+        </section>
 
-      <section class="card" id="stream" aria-live="polite">
-        <h2>New facts</h2>
-        <p class="empty">nothing yet.</p>
-      </section>
+        <section class="card" id="stream" aria-live="polite">
+          <h2>New facts</h2>
+          <p class="empty">nothing yet.</p>
+        </section>
+      </div>
     </div>
 
     <script type="module" src="./dashboard.js"></script>

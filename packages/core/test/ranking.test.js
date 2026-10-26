@@ -183,6 +183,55 @@ test('a round whose candidates produced no metrics is empty, which is a differen
   ports.store.close()
 })
 
+test('every round publishes the best result standing after it, so a staircase needs no second derivation', async () => {
+  // The page draws "the best after each round" as a step chart. Either it walks the rounds
+  // accumulating a maximum (a derivation in a renderer), or this view publishes the series once and
+  // the page only places it. This is that series: `cumulative` is the best result standing after the
+  // round is done, and `improving` says whether *this* round is the one that raised it.
+  const ports = openWorkspace()
+  await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
+  await runCandidate(ports, { candidateId: 'r2-c1', round: 2, metrics: { auc: 0.69 } })
+  await runCandidate(ports, { candidateId: 'r3-c1', round: 3, metrics: { auc: 0.75 } })
+
+  const rounds = roundHistory(ranking(ports.store, AUC_ONLY))
+
+  assert.deepEqual(
+    rounds.map((entry) => entry.cumulative?.value),
+    [0.7, 0.7, 0.75],
+    'the cumulative best holds through the round that lost (2) and moves in the round that won (3)',
+  )
+  assert.deepEqual(
+    rounds.map((entry) => entry.cumulative?.candidate_id),
+    ['r1-c1', 'r1-c1', 'r3-c1'],
+    'and it names the candidate that set it, not the round it happens to be drawn above',
+  )
+  assert.deepEqual(
+    rounds.map((entry) => entry.cumulative?.metric),
+    ['auc', 'auc', 'auc'],
+    'a cumulative best without its metric is a bare number — the same defect the round best had',
+  )
+  ports.store.close()
+})
+
+test('a round that produced nothing carries the best from before it, and says so', async () => {
+  const ports = openWorkspace()
+  await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
+  // Round 2 dies in VERIFY with a malformed verdict: a fact, but no comparable number.
+  await runCandidate(ports, {
+    candidateId: 'r2-c1',
+    round: 2,
+    judge: { verify: () => ({ candidate_id: 'r2-c1', passed: 'yes' }) },
+  }).catch(() => {})
+
+  const rounds = roundHistory(ranking(ports.store, AUC_ONLY))
+
+  assert.equal(rounds[1].empty, true)
+  assert.equal(rounds[1].cumulative.value, 0.7, 'the run still had a best standing, and the step holds there')
+  assert.equal(rounds[1].cumulative.candidate_id, 'r1-c1', 'set by round 1, held across round 2')
+  assert.equal(rounds[1].improving, false, 'and nothing was raised, so no marker is filled in')
+  ports.store.close()
+})
+
 test('a metric contract that nobody declared yields no ranking and says why', async () => {
   const ports = openWorkspace()
   await runCandidate(ports, { candidateId: 'c1', metrics: { auc: 0.71 } })

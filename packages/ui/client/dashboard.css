@@ -1,0 +1,1535 @@
+/**
+ * The dashboard's one stylesheet: the token block, and every component the page draws.
+ *
+ * Served by the host at `/api/reprise/dashboard.css` and linked by the page, so there is no build
+ * step between this file and the screen. The Web UI panel injects this same file in ticket #6: that
+ * is why every rule is scoped under `.reprise` and no bare element selector appears anywhere — a
+ * stylesheet that restyled every `table` and `button` in the host document could not be injected.
+ *
+ * Three rules hold this file together, and each has a test:
+ *
+ *   1. **No colour literal.** Not a hex triple, not `rgb()`, not `hsl()`. Colour comes from the
+ *      host's `--dsw-alias-*` tokens, falls back to CSS system colours (which follow the reader's OS
+ *      scheme and `color-scheme`), and is drawn with `currentColor` everywhere else. The scanner in
+ *      `packages/ui/test/client.test.js` reads this file, so the rule is mechanical.
+ *   2. **Shape carries meaning, not hue.** The five candidate squares and the four gate states are
+ *      told apart by fill, hatch, notch and stroke — all of which survive a greyscale screenshot.
+ *   3. **One slot grid.** The staircase and the round rail are two views of the same `n+1` slots
+ *      (INIT, then one per round): the plot places its marks at `--reprise-slot` fractions and the
+ *      rail divides the same width into the same number of equal cells. They cannot drift apart
+ *      without one of the two numbers changing.
+ *
+ * Injecting a sheet into someone else's document means declaring nothing about that document. So the
+ * `:root` block holds our `--reprise-*` properties and nothing else — not even `color-scheme`, which
+ * sits on `.reprise` (the page's body, the panel's container) where it cannot reach the host's own
+ * controls. The scan in `packages/ui/test/client.test.js` holds both halves of that claim.
+ */
+
+:root {
+  /* This block is *only* our custom properties: the panel injects this file into the host's
+     `document.head`, so anything else declared here would repaint the host's own document — which is
+     why `color-scheme` lives on `.reprise` below, where it applies to whichever surface owns the
+     sheet and to nothing else. */
+
+  /* Surfaces and ink. The `--dsw-alias-*` names are the host's; the system colours are what a page
+     served on its own has instead of a theme, not a palette of ours. */
+  --reprise-bg: var(--dsw-alias-bg-base, Canvas);
+  --reprise-surface: var(--dsw-alias-bg-layer-1, Canvas);
+  --reprise-surface-raised: var(--dsw-alias-bg-layer-2, Canvas);
+  --reprise-text: var(--dsw-alias-label-primary, CanvasText);
+  --reprise-dim: var(--dsw-alias-label-secondary, GrayText);
+  --reprise-faint: var(--dsw-alias-label-tertiary, GrayText);
+  --reprise-border: var(--dsw-alias-border-l1, ButtonBorder);
+  --reprise-border-weak: var(--dsw-alias-border-l1, ButtonBorder);
+  --reprise-border-strong: var(--dsw-alias-border-l3, currentColor);
+  --reprise-accent: var(--dsw-alias-brand-primary, AccentColor);
+  --reprise-link: var(--dsw-alias-link, AccentColor);
+  /* The one colour the design spends: committed and not yet settled. It lives only in the budget
+     bar's hatch, which is also a texture, so the meaning survives a reader who cannot see it. */
+  --reprise-committed: var(--dsw-alias-state-warn-primary, currentColor);
+  /* The running mark in the phase capsule. Decoration beside a printed word, never the only signal. */
+  --reprise-live: var(--dsw-alias-state-success-primary, AccentColor);
+
+  /* Type. The host serves a system sans; identifiers and numbers are this design's display face. */
+  --reprise-font: var(--dsw-font-family, system-ui, -apple-system, 'PingFang SC', sans-serif);
+  --reprise-mono: var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace);
+
+  /* Spacing and corners: two radii only, and a 4/8/12/16/20/24/28 spacing scale (spec §5.3). */
+  --reprise-radius: var(--dsw-radius-md, 0.75rem);
+  --reprise-radius-sm: 0.375rem;
+  --reprise-gap: 0.75rem;
+  --reprise-gap-lg: 1.75rem;
+
+  /* The staircase's geometry. `--reprise-slot` is set per render: one slot's share of the plot
+     width, shared by the chart's marks and the rail's cells. */
+  --reprise-axis-width: 3.5rem;
+  --reprise-plot-height: 13rem;
+  --reprise-marker: 9px;
+  --reprise-square-width: 9px;
+  --reprise-square-height: 22px;
+}
+
+/* ------------------------------------------------------------------ the page's own chrome */
+
+.reprise {
+  /* The OS scheme for everything this sheet paints — and only for that. On the page this class is the
+     body; in the panel it is the docked container. Declared on `:root` it would have forced the
+     *host's* controls and scrollbars into the same scheme, which is the host's decision and not ours. */
+  color-scheme: light dark;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 1.5rem;
+  background: var(--reprise-bg);
+  color: var(--reprise-text);
+  font-family: var(--reprise-font);
+  font-size: 0.875rem;
+  line-height: 1.55;
+}
+
+.reprise *,
+.reprise *::before,
+.reprise *::after {
+  box-sizing: border-box;
+}
+
+/*
+ * A docked mount: the Web UI panel (ticket #6) renders these same components inside the host's
+ * layout rather than as a document of its own, so it owns its scrollbar — otherwise the dock clips
+ * whatever does not fit and the fact stream simply disappears. That is the only difference between
+ * the two mounts, and it is a fact about the box, not a design decision: every colour, size and
+ * spacing above applies unchanged.
+ */
+.reprise[data-mount='panel'] {
+  height: 100%;
+  overflow: auto;
+}
+
+.reprise h1 {
+  margin: 0;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.reprise h2 {
+  margin: 0 0 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.reprise h3 {
+  margin: 1rem 0 0.375rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--reprise-faint);
+}
+
+.reprise p {
+  margin: 0.375rem 0 0;
+}
+
+.reprise a {
+  color: var(--reprise-link);
+}
+
+.reprise .masthead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1.25rem;
+  margin-bottom: 1.25rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--reprise-border-weak);
+}
+
+.reprise .masthead-run,
+.reprise .masthead-stamps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.375rem 0.75rem;
+  min-width: 0;
+}
+
+/*
+ * The phase capsule: a dot and two words. The dot is decoration — running is a filled green-adjacent
+ * mark, stopped is the tertiary ink — and the state word beside it is what actually says which. A
+ * reader who cannot see the dot still reads `running` or `stopped`; that is why the word is not
+ * optional (and why no rule here may rely on hue alone).
+ */
+/*
+ * Named `phase-capsule` and not `phase`: the candidate inspector already owns `.phase` for its path of
+ * eight steps, and one class with two components behind it is how a later rule silently restyles the
+ * other one (the capsule rendered as a two-column grid until this was renamed).
+ */
+.reprise .phase-capsule {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  /* A phase name is one token (`ROUND_RUN`) and the state word beside it is the point of the capsule:
+     neither may wrap and turn a one-glyph read into a paragraph. */
+  white-space: nowrap;
+  padding: 0 0.4375rem;
+  border: 1px solid var(--reprise-border);
+  border-radius: 999px;
+  font-family: var(--reprise-mono);
+  font-size: 0.6875rem;
+  line-height: 1.5;
+}
+
+.reprise .phase-capsule-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--reprise-faint);
+}
+
+.reprise .phase-capsule[data-state='running'] .phase-capsule-dot {
+  background: var(--reprise-live);
+}
+
+.reprise .phase-capsule-name {
+  font-weight: 600;
+}
+
+.reprise .phase-capsule-state {
+  color: var(--reprise-dim);
+}
+
+.reprise .masthead-mode {
+  color: var(--reprise-faint);
+  font-size: 0.6875rem;
+}
+
+/*
+ * One stamp: its label and its value. The label is not optional — "17:15:30" alone does not say
+ * whether it is when the page last read or when the run last moved, and those are two different
+ * claims. `overflow-wrap` on the value is what keeps a workspace path from setting the page's
+ * minimum width (a 520px page must not scroll sideways).
+ */
+.reprise .stamp {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3125rem;
+  min-width: 0;
+}
+
+.reprise .stamp-label {
+  color: var(--reprise-faint);
+  font-size: 0.6875rem;
+}
+
+.reprise .stamp-value {
+  min-width: 0;
+  color: var(--reprise-dim);
+  font-family: var(--reprise-mono);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.reprise .card {
+  padding: 0.875rem 1rem;
+  background: var(--reprise-surface);
+  border: 1px solid var(--reprise-border-weak);
+  border-radius: var(--reprise-radius);
+}
+
+.reprise table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--reprise-mono);
+  font-size: 0.71875rem;
+}
+
+.reprise th,
+.reprise td {
+  padding: 0.25rem 0.5rem 0.25rem 0;
+  border-bottom: 1px solid var(--reprise-border-weak);
+  text-align: left;
+  vertical-align: top;
+}
+
+.reprise th {
+  color: var(--reprise-faint);
+  font-weight: 500;
+}
+
+.reprise button {
+  padding: 0.125rem 0.375rem;
+  color: var(--reprise-text);
+  background: var(--reprise-surface-raised);
+  border: 1px solid var(--reprise-border);
+  border-radius: var(--reprise-radius-sm);
+  font-family: var(--reprise-mono);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.reprise button[aria-pressed='true'] {
+  border-color: var(--reprise-accent);
+}
+
+.reprise button:focus-visible,
+.reprise summary:focus-visible {
+  outline: 2px solid var(--reprise-link);
+  outline-offset: 1px;
+}
+
+.reprise ol,
+.reprise ul {
+  margin: 0;
+  padding-left: 1.125rem;
+}
+
+.reprise li {
+  margin: 0.125rem 0;
+}
+
+.reprise pre,
+.reprise code {
+  font-family: var(--reprise-mono);
+  font-size: 0.75rem;
+}
+
+.reprise pre {
+  overflow-x: auto;
+  margin: 0.375rem 0 0;
+  padding: 0.5rem;
+  border: 1px solid var(--reprise-border-weak);
+  border-radius: var(--reprise-radius-sm);
+  white-space: pre-wrap;
+}
+
+/* --------------------------------------------------------------- the conclusion line */
+
+.reprise .headline {
+  margin: 0 0 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--reprise-border-weak);
+}
+
+.reprise .headline-value {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.reprise .headline-number {
+  font-family: var(--reprise-mono);
+  font-size: 2.5rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.reprise .headline-unit {
+  color: var(--reprise-dim);
+  font-family: var(--reprise-mono);
+  font-size: 0.8125rem;
+}
+
+.reprise .headline-sentence,
+.reprise .headline-empty {
+  max-width: 60rem;
+  margin: 0.5rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.55;
+}
+
+.reprise .headline-empty {
+  color: var(--reprise-dim);
+}
+
+/*
+ * The facts row under the conclusion sentence: the absolute change, what the domain published and our
+ * distance from it, and the direction of every objective. They were the body of the retired
+ * `Measured / published` card; they are not a card here, because they are not a subject of their own —
+ * they are the three numbers the sentence above cannot fit.
+ */
+.reprise .facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem 1.75rem;
+  margin: 0.75rem 0 0;
+}
+
+.reprise .fact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.375rem;
+  min-width: 0;
+}
+
+.reprise .fact dt {
+  color: var(--reprise-faint);
+  font-size: 0.6875rem;
+}
+
+.reprise .fact dd {
+  margin: 0;
+  font-family: var(--reprise-mono);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------------------ the strip */
+
+/*
+ * Warnings and notes are facts the run owes a reader — an executor that does not reserve GPUs, a
+ * config nobody recorded, a metric contract that cannot rank anything. They are loud: a full-width
+ * line under the conclusion, in the projection's own sentence, and they are not a card, because a
+ * card is something a reader consults and a warning is something they are told.
+ */
+.reprise .strips {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0 0 1.25rem;
+}
+
+/* An empty strip is not a gap: a run with nothing to declare simply has no strip. */
+.reprise .strips:empty {
+  display: none;
+}
+
+/* --------------------------------------------------------------------- small components */
+
+/*
+ * The four gate states are told apart by their name and by the weight of their border, never by
+ * hue: `ok` / `missing` / `invalid` / `conflict` has to survive a greyscale screenshot, and
+ * `missing` (never judged) must never look like `invalid` (judged and refused).
+ */
+.reprise .badge {
+  display: inline-block;
+  padding: 0 0.375rem;
+  border: 1px solid var(--reprise-border);
+  border-radius: var(--reprise-radius-sm);
+  font-family: var(--reprise-mono);
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+}
+
+.reprise .badge[data-state='ok'],
+.reprise .badge[data-state='passed'] {
+  border-style: solid;
+}
+
+.reprise .badge[data-state='missing'] {
+  border-style: dashed;
+}
+
+.reprise .badge[data-state='invalid'],
+.reprise .badge[data-state='failed'],
+.reprise .badge[data-state='conflict'] {
+  border-width: 2px;
+  border-color: var(--reprise-border-strong);
+  font-weight: 600;
+}
+
+.reprise .badge[data-state='conflict'] {
+  box-shadow: inset 0 0 0 1px var(--reprise-surface);
+}
+
+.reprise .note {
+  margin: 0.5rem 0 0;
+  padding: 0.375rem 0.5rem;
+  color: var(--reprise-text);
+  border-left: 2px solid var(--reprise-border-strong);
+}
+
+.reprise .warning {
+  margin: 0.5rem 0 0;
+  padding: 0.375rem 0.5rem;
+  font-weight: 600;
+  color: var(--reprise-text);
+  border: 1px solid var(--reprise-border-strong);
+  border-left-width: 2px;
+  border-radius: var(--reprise-radius-sm);
+}
+
+.reprise .empty,
+.reprise .dim {
+  color: var(--reprise-dim);
+}
+
+.reprise .timeline {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.reprise .timeline li {
+  display: grid;
+  grid-template-columns: 4.5rem 1fr;
+  gap: 0.5rem;
+  padding: 0.125rem 0;
+}
+
+.reprise .calls {
+  padding-left: 0;
+  list-style: none;
+}
+
+.reprise .calls li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.375rem;
+}
+
+/* ================================================================== the staircase
+ *
+ * One slot grid, `n+1` wide: INIT, then one slot per round. `.ladder` is a two-column, two-row
+ * grid — the axis gutter and the plot on the first row, the same gutter and the rail on the
+ * second. `--reprise-slot` (set by the renderer) is one slot's share of the plot width; the chart's
+ * marks are placed with it, and the rail divides the identical width into `n+1` equal cells. Same
+ * number, two views: they cannot drift.
+ */
+
+.reprise .ladder {
+  display: grid;
+  grid-template-columns: var(--reprise-axis-width) minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 0;
+  row-gap: 0.25rem;
+}
+
+.reprise .ladder-summary {
+  margin: 0 0 0.75rem;
+  font-size: 0.8125rem;
+  color: var(--reprise-dim);
+}
+
+.reprise .ladder-summary strong {
+  color: var(--reprise-text);
+  font-family: var(--reprise-mono);
+  font-weight: 600;
+}
+
+.reprise .ladder-axis {
+  grid-column: 1;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  height: var(--reprise-plot-height);
+  padding-right: 0.5rem;
+  text-align: right;
+}
+
+/*
+ * Three labels, one width: `fixed()` pads them, so `0.7200` and `0.7023` are read as one scale
+ * rather than as two coarser quantities around a finer middle.
+ */
+.reprise .ladder-axis-label {
+  color: var(--reprise-faint);
+  font-family: var(--reprise-mono);
+  font-size: 0.65625rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.reprise .ladder-plot {
+  position: relative;
+  grid-column: 2;
+  grid-row: 1;
+  height: var(--reprise-plot-height);
+  overflow: hidden;
+}
+
+/* The INIT baseline: a dashed line across the full plot, one pixel, tertiary ink (spec §5.4). */
+.reprise .ladder-baseline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 1px dashed var(--reprise-faint);
+}
+
+.reprise .ladder-baseline-label {
+  position: absolute;
+  right: 0;
+  bottom: 2px;
+  padding-left: 0.5rem;
+  background: var(--reprise-surface);
+  color: var(--reprise-faint);
+  font-family: var(--reprise-mono);
+  font-size: 0.65625rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The step: a 2px ink line, axis-aligned — horizontal runs and vertical risers, never a curve. */
+.reprise .ladder-step {
+  position: absolute;
+  height: 2px;
+  background: currentColor;
+}
+
+.reprise .ladder-riser {
+  position: absolute;
+  width: 2px;
+  background: currentColor;
+}
+
+/*
+ * The marker: a 9px diamond. Filled only where a round actually raised the best result; hollow where
+ * it held. An empty round gets no marker at all — the absence is the fact, and it reads as a gap.
+ */
+.reprise .ladder-marker {
+  position: absolute;
+  width: var(--reprise-marker);
+  height: var(--reprise-marker);
+  border: 1.5px solid currentColor;
+  background: var(--reprise-surface);
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.reprise .ladder-marker[data-filled='true'] {
+  background: currentColor;
+}
+
+/* --------------------------------------------------------------------------- the rail */
+
+.reprise .rail {
+  display: flex;
+  grid-column: 2;
+  grid-row: 2;
+  align-items: stretch;
+}
+
+.reprise .rail-gutter {
+  grid-column: 1;
+  grid-row: 2;
+  color: var(--reprise-faint);
+  font-size: 0.625rem;
+  text-align: right;
+  padding: 0.25rem 0.5rem 0 0;
+}
+
+.reprise .rail-cell {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0.25rem 2px 0;
+  text-align: center;
+}
+
+.reprise .rail-candidates {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 3px;
+  min-height: var(--reprise-square-height);
+}
+
+.reprise .rail-round {
+  display: block;
+  color: var(--reprise-faint);
+  font-family: var(--reprise-mono);
+  font-size: 0.625rem;
+  line-height: 1.4;
+}
+
+/*
+ * The five shapes a candidate can be. Fill, hatch, notch and stroke — never hue — so a reader who
+ * cannot see colour still tells "rejected" from "in flight" from "invalid artifact":
+ *
+ *   done      solid ink
+ *   frontier  solid ink with a 3px notch cut out of the foot
+ *   rejected  hollow outline
+ *   in-flight diagonal hatch (the one texture in the design: committed, not settled)
+ *   invalid   hollow with one 2px strike through it (the artifact was there and did not comply)
+ */
+.reprise .rail-candidate {
+  display: inline-block;
+  width: var(--reprise-square-width);
+  height: var(--reprise-square-height);
+  padding: 0;
+  border-radius: 1px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.reprise .rail-candidate[data-shape='done'] {
+  border: 1.5px solid currentColor;
+  background: currentColor;
+}
+
+.reprise .rail-candidate[data-shape='frontier'] {
+  border: 1.5px solid currentColor;
+  background: currentColor;
+  box-shadow: inset 0 -3px 0 0 var(--reprise-surface);
+}
+
+.reprise .rail-candidate[data-shape='rejected'] {
+  border: 1.5px solid currentColor;
+  background: transparent;
+}
+
+.reprise .rail-candidate[data-shape='in-flight'] {
+  border: 1.5px solid currentColor;
+  background-image: repeating-linear-gradient(
+    45deg,
+    currentColor 0 1.5px,
+    transparent 1.5px 4px
+  );
+}
+
+.reprise .rail-candidate[data-shape='invalid'] {
+  border: 1.5px solid currentColor;
+  background-image: linear-gradient(
+    to top right,
+    transparent 44%,
+    currentColor 44% 56%,
+    transparent 56%
+  );
+}
+
+.reprise .rail-candidate[aria-pressed='true'] {
+  outline: 2px solid var(--reprise-accent);
+  outline-offset: 1px;
+}
+
+.reprise .rail-verdict {
+  display: block;
+  font-family: var(--reprise-mono);
+  font-size: 0.625rem;
+  line-height: 1.4;
+  color: var(--reprise-dim);
+}
+
+.reprise .rail-verdict[data-verdict='raised'] {
+  color: var(--reprise-text);
+  font-weight: 600;
+}
+
+.reprise .rail-verdict[data-verdict='empty'] {
+  color: var(--reprise-faint);
+  font-style: italic;
+}
+
+/* A key for the shapes and the baseline, because a shape nobody can name is not information. */
+.reprise .ladder-key {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.75rem 0 0;
+  color: var(--reprise-faint);
+  font-size: 0.625rem;
+}
+
+.reprise .ladder-key span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3125rem;
+}
+
+.reprise .ladder-key .rail-candidate {
+  cursor: default;
+}
+
+.reprise .ladder-key-line {
+  display: inline-block;
+  width: 1.25rem;
+  border-top: 1px dashed var(--reprise-faint);
+}
+
+/* The text alternative: a chart cannot be read aloud, so the same rounds are here as a table. */
+.reprise .ladder-aside {
+  margin: 0.875rem 0 0;
+  font-size: 0.75rem;
+}
+
+.reprise .ladder-aside summary {
+  color: var(--reprise-dim);
+  cursor: pointer;
+}
+
+/* Five narrow columns have to fit a 520px page: fixed layout plus wrapping cells, never a table
+   that sets the page's width. */
+.reprise .ladder-aside table {
+  table-layout: fixed;
+}
+
+.reprise .ladder-aside th,
+.reprise .ladder-aside td {
+  overflow-wrap: anywhere;
+}
+
+/* ================================================================== the stop rules
+ *
+ * One row of gauges while the run is going; a two-column panel once it has stopped. Each rule is a
+ * name, the distance it has covered towards its limit, and the reading in mono — the distance, never
+ * "progress": reaching `max_rounds` is stopping, which is not an achievement.
+ *
+ * Four states, told apart by weight, opacity and the presence of the gauge rather than by hue:
+ *
+ *   measured  a gauge and a reading
+ *   fired     a gauge, a reading, a bold name and a filled dot at the end of the row
+ *   disabled  the word "off", a tertiary name, no gauge (there is nothing to be far from)
+ *   blocked   the word "not measured", no gauge, and the projection's sentence underneath
+ */
+
+.reprise .stop {
+  margin: 0 0 var(--reprise-gap-lg);
+}
+
+.reprise .stop-rules {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1.25rem;
+}
+
+.reprise .stop-rules[data-layout='panel'] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.5rem;
+}
+
+/* In the panel the three columns line up, so "how far along is each rule" is one glance down the
+   right-hand side rather than five ragged rows. */
+.reprise .stop-rules[data-layout='panel'] .stop-rule {
+  display: grid;
+  grid-template-columns: minmax(6rem, 1fr) 3.875rem auto 0.375rem;
+  gap: 0.5rem;
+}
+
+.reprise .stop-rule {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4375rem;
+  font-size: 0.6875rem;
+}
+
+.reprise .stop-rule-name {
+  color: var(--reprise-dim);
+}
+
+.reprise .stop-gauge {
+  display: block;
+  width: 3.875rem;
+  height: 0.375rem;
+  border: 1px solid var(--reprise-border);
+  border-radius: 1px;
+}
+
+.reprise .stop-gauge-fill {
+  display: block;
+  height: 100%;
+  background: currentColor;
+}
+
+.reprise .stop-rule-reading {
+  color: var(--reprise-text);
+  font-family: var(--reprise-mono);
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.reprise .stop-rule[data-state='measured'] .stop-rule-reading {
+  color: var(--reprise-text);
+}
+
+.reprise .stop-rule[data-state='disabled'] .stop-rule-name,
+.reprise .stop-rule[data-state='blocked'] .stop-rule-name {
+  color: var(--reprise-faint);
+}
+
+.reprise .stop-rule[data-state='disabled'] .stop-rule-reading,
+.reprise .stop-rule[data-state='blocked'] .stop-rule-reading {
+  color: var(--reprise-faint);
+  font-style: italic;
+}
+
+.reprise .stop-rule[data-state='fired'] .stop-rule-name {
+  color: var(--reprise-text);
+  font-weight: 600;
+}
+
+.reprise .stop-rule[data-state='fired'] .stop-rule-reading {
+  font-weight: 600;
+}
+
+/* The dot that marks the rule which fired: a shape, so it reads in black and white too. */
+.reprise .stop-dot {
+  display: inline-block;
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.reprise .stop-summary {
+  margin: 0.625rem 0 0;
+  color: var(--reprise-dim);
+  font-size: 0.75rem;
+}
+
+/* The panel: "why here" on the left, every rule on the right, so "which one was next" is answerable. */
+.reprise .stop-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--reprise-gap-lg);
+}
+
+.reprise .stop-why {
+  min-width: 0;
+  padding-right: var(--reprise-gap);
+  border-right: 1px solid var(--reprise-border-weak);
+}
+
+.reprise .stop-why-rule {
+  margin: 0;
+  font-family: var(--reprise-mono);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.reprise .stop-why-message {
+  margin: 0.375rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.55;
+}
+
+.reprise .stop-why-reading {
+  margin: 0.5rem 0 0;
+  font-family: var(--reprise-mono);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ================================================================== the readings row */
+
+.reprise .readings {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: var(--reprise-gap);
+  margin: 0 0 var(--reprise-gap-lg);
+}
+
+.reprise .reading {
+  min-width: 0;
+  padding: 0.75rem 0.875rem;
+  background: var(--reprise-surface);
+  border: 1px solid var(--reprise-border-weak);
+  border-radius: var(--reprise-radius);
+}
+
+.reprise .reading-label {
+  color: var(--reprise-faint);
+  font-size: 0.6875rem;
+}
+
+.reprise .reading-headline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.375rem;
+  margin: 0.125rem 0 0;
+}
+
+.reprise .reading-value {
+  font-family: var(--reprise-mono);
+  font-size: 1.375rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.reprise .reading-unit {
+  color: var(--reprise-dim);
+  font-family: var(--reprise-mono);
+  font-size: 0.75rem;
+}
+
+.reprise .reading-sub {
+  margin: 0.25rem 0 0;
+  color: var(--reprise-dim);
+  font-size: 0.6875rem;
+  line-height: 1.5;
+}
+
+.reprise .reading-list {
+  margin: 0.375rem 0 0;
+  padding-left: 0;
+  list-style: none;
+  color: var(--reprise-dim);
+  font-family: var(--reprise-mono);
+  font-size: 0.6875rem;
+}
+
+/* ---------------------------------------------------------------- the budget bar
+ *
+ * Three materials, and the whole point is that they are *materials*: solid ink for what has been
+ * settled, a hatch for what is reserved and not yet settled, empty track for what remains. Amber is
+ * the one hue this design spends, and it lives only in the hatch — so a greyscale screenshot still
+ * separates the three, and a reader who cannot see colour separates them too.
+ *
+ * The frame is the cap (a 1px strong border) and the soft limit is a thin vertical line inside it;
+ * both are named in the legend under the bar, because a marker nobody can name is not information.
+ */
+
+.reprise .budget {
+  margin: 0.375rem 0 0;
+}
+
+.reprise .budget-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.375rem;
+}
+
+.reprise .budget-track {
+  position: relative;
+  display: flex;
+  height: 0.5rem;
+  margin: 0.375rem 0 0;
+  overflow: hidden;
+  border: 1px solid var(--reprise-border-strong);
+  border-radius: 2px;
+}
+
+.reprise .budget-segment {
+  display: block;
+  height: 100%;
+}
+
+.reprise .budget-segment[data-material='settled'] {
+  background: currentColor;
+}
+
+.reprise .budget-segment[data-material='reserved'] {
+  background-color: transparent;
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--reprise-committed) 0 2px,
+    transparent 2px 5px
+  );
+}
+
+.reprise .budget-segment[data-material='remaining'] {
+  background: transparent;
+}
+
+.reprise .budget-marker {
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  width: 0;
+}
+
+.reprise .budget-marker[data-marker='soft'] {
+  border-left: 1px solid var(--reprise-faint);
+}
+
+.reprise .budget-marker[data-marker='limit'] {
+  transform: translateX(-2px);
+  border-left: 2px solid var(--reprise-border-strong);
+}
+
+.reprise .budget-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.625rem;
+  margin: 0.375rem 0 0;
+  color: var(--reprise-faint);
+  font-size: 0.625rem;
+}
+
+.reprise .budget-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.reprise .budget-key i {
+  display: inline-block;
+  width: 0.75rem;
+  height: 0.4375rem;
+  border: 1px solid var(--reprise-border);
+  border-radius: 1px;
+}
+
+.reprise .budget-key i[data-material='settled'] {
+  background: currentColor;
+}
+
+.reprise .budget-key i[data-material='reserved'] {
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--reprise-committed) 0 2px,
+    transparent 2px 4px
+  );
+}
+
+.reprise .budget-key i[data-material='remaining'] {
+  border-style: dashed;
+}
+
+.reprise .budget-key i[data-marker='soft'] {
+  width: 0;
+  height: 0.5rem;
+  border: 0;
+  border-left: 1px solid var(--reprise-faint);
+  border-radius: 0;
+}
+
+.reprise .budget-key i[data-marker='limit'] {
+  width: 0;
+  height: 0.5rem;
+  border: 0;
+  border-left: 2px solid var(--reprise-border-strong);
+  border-radius: 0;
+}
+
+/* ================================================================= the lower half
+ *
+ * Two columns on a wide page: the candidate inspector on the left (it is the argument) and, on the
+ * right, the audit folded above the fact stream (they are the evidence, and they are read on demand).
+ * One column below 45rem, where the host docks the panel and there is no room for a second body of
+ * prose beside the first.
+ */
+
+.reprise .lower {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: var(--reprise-gap);
+  align-items: start;
+  margin-top: var(--reprise-gap);
+}
+
+.reprise .lower-side {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--reprise-gap);
+  min-width: 0;
+}
+
+/*
+ * A grid item's automatic minimum is its min-content width, and one of the rows in these cards holds a
+ * single-line summary that must not wrap. Without this the right column sized itself from the longest
+ * summary in the run and pushed the cards past the viewport — the page scrolled sideways while every
+ * rule that set the column asked for exactly one third.
+ */
+.reprise .lower > *,
+.reprise .lower-side > * {
+  min-width: 0;
+}
+
+/* A card's own header when the title is not the whole of it: `Facts` and its count. */
+.reprise .card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.reprise .card-head h2 {
+  margin: 0 0 0.5rem;
+}
+
+.reprise .inspector-section {
+  margin: 1rem 0 0;
+}
+
+.reprise .inspector-section h3,
+.reprise .rejection-title {
+  margin: 0 0 0.5rem;
+}
+
+/* ------------------------------------------------------------------ the identity row */
+
+.reprise .identity-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.reprise .identity-id {
+  font-family: var(--reprise-mono);
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.reprise .identity-round,
+.reprise .identity-shape {
+  color: var(--reprise-dim);
+  font-size: 0.75rem;
+}
+
+/* The sentence beside the id is a fact ("completed, on the frontier"), not a judgement, so it is
+   set in the same ink as the round it belongs to rather than in a badge. */
+.reprise .identity-shape {
+  margin-left: auto;
+  color: var(--reprise-text);
+  font-family: var(--reprise-mono);
+  font-size: 0.6875rem;
+}
+
+.reprise .identity-meta {
+  color: var(--reprise-dim);
+  font-family: var(--reprise-mono);
+  font-size: 0.6875rem;
+  overflow-wrap: anywhere;
+}
+
+.reprise .identity-hypothesis {
+  max-width: 68ch;
+  font-size: 0.8125rem;
+}
+
+/* ---------------------------------------------------------------------- the phase path */
+
+.reprise .phase-path {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.625rem 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.reprise .phase {
+  display: grid;
+  grid-template-columns: auto auto;
+  grid-template-rows: auto auto auto;
+  align-items: center;
+  gap: 0 0.375rem;
+  min-width: 6rem;
+}
+
+.reprise .phase-mark {
+  grid-row: 1;
+  width: 9px;
+  height: 9px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+}
+
+.reprise .phase-name {
+  grid-row: 1;
+  font-family: var(--reprise-mono);
+  font-size: 0.6875rem;
+}
+
+.reprise .phase-word {
+  grid-column: 2;
+  grid-row: 2;
+  color: var(--reprise-dim);
+  font-size: 0.65625rem;
+}
+
+.reprise .phase-stamp {
+  grid-column: 2;
+  grid-row: 3;
+  color: var(--reprise-faint);
+  font-family: var(--reprise-mono);
+  font-size: 0.625rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Where the candidate is now: a word, because a bolder square is not a fact a reader can name. */
+.reprise .phase-here {
+  grid-column: 1 / -1;
+  grid-row: 4;
+  color: var(--reprise-text);
+  font-size: 0.625rem;
+  font-weight: 600;
+}
+
+/*
+ * The four states, drawn as four shapes, plus the two facts about a phase that are not states at all.
+ * No hue anywhere: `currentColor` and border weight are the whole vocabulary, so this survives a
+ * greyscale screenshot and a colour-blind reader. The word beside every mark is the primary encoding;
+ * the mark is the thing you can scan for.
+ *
+ *   ok           filled square
+ *   missing      dashed outline — the artifact is not there
+ *   invalid      hatched — it is there and breaks its schema
+ *   conflict     heavy border, doubled — two facts disagree
+ *   no-verdict   thin outline, faint — the candidate got here and nothing judged it
+ *   not-reached  dotted outline, faintest — the candidate never arrived
+ */
+.reprise .phase[data-mark='ok'] .phase-mark {
+  background: currentColor;
+}
+
+.reprise .phase[data-mark='missing'] .phase-mark {
+  border-style: dashed;
+  border-width: 1.5px;
+  background: transparent;
+}
+
+.reprise .phase[data-mark='invalid'] .phase-mark {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    currentColor 0 1.5px,
+    transparent 1.5px 3.5px
+  );
+}
+
+.reprise .phase[data-mark='conflict'] .phase-mark {
+  border-width: 2.5px;
+  box-shadow: inset 0 0 0 1px var(--reprise-surface);
+}
+
+.reprise .phase[data-mark='no-verdict'] .phase-mark {
+  border-color: var(--reprise-faint);
+  background: transparent;
+}
+
+.reprise .phase[data-mark='not-reached'] .phase-mark {
+  border-style: dotted;
+  border-color: var(--reprise-faint);
+  background: transparent;
+}
+
+.reprise .phase[data-mark='not-reached'] .phase-name,
+.reprise .phase[data-mark='not-reached'] .phase-word {
+  color: var(--reprise-faint);
+}
+
+.reprise .phase[data-current='true'] .phase-name {
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------------- the rejection block */
+
+.reprise .rejection {
+  margin: 1rem 0 0;
+  padding: 0.625rem 0.75rem;
+  background: var(--reprise-surface-raised);
+  border: 1px solid var(--reprise-border);
+  border-left-width: 2px;
+  border-radius: var(--reprise-radius-sm);
+}
+
+.reprise .rejection-words {
+  margin: 0;
+  padding: 0.5rem;
+  border: 1px solid var(--reprise-border-weak);
+  background: var(--reprise-surface);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.reprise .rejection-reason {
+  font-size: 0.75rem;
+}
+
+.reprise .rejection-when {
+  font-family: var(--reprise-mono);
+  font-size: 0.65625rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * The timeline of 29's inspector: time / type / summary / #seq, newest first. Four columns wide, and
+ * two narrow rows below 45rem — the summary moves under the type rather than being squeezed into a
+ * 40px gutter, because a truncated `candidate_rej…` is not a name anyone can look up.
+ */
+.reprise .timeline li {
+  grid-template-columns: 4.5rem 7.5rem minmax(0, 1fr) 2.5rem;
+  grid-template-areas: 'time type summary stamp';
+  align-items: baseline;
+  font-size: 0.6875rem;
+}
+
+.reprise .timeline-time {
+  grid-area: time;
+  font-variant-numeric: tabular-nums;
+}
+
+.reprise .timeline-type {
+  grid-area: type;
+  font-family: var(--reprise-mono);
+  overflow-wrap: anywhere;
+}
+
+.reprise .timeline-summary {
+  grid-area: summary;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reprise .timeline-stamp {
+  grid-area: stamp;
+  color: var(--reprise-faint);
+  font-family: var(--reprise-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* Reference material: present, one click away, and not in the way. */
+.reprise .inspector-aside {
+  margin: 1rem 0 0;
+  font-size: 0.75rem;
+}
+
+.reprise .inspector-aside summary {
+  color: var(--reprise-dim);
+  cursor: pointer;
+}
+
+.reprise .inspector-aside-body {
+  margin-top: 0.5rem;
+}
+
+/* ------------------------------------------------------------------------ the fact stream */
+
+.reprise .stream {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.reprise .stream-row {
+  padding: 0.25rem 0;
+  border-bottom: 1px solid var(--reprise-border-weak);
+}
+
+.reprise .stream-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.375rem;
+  font-family: var(--reprise-mono);
+  font-size: 0.6875rem;
+}
+
+.reprise .stream-time {
+  font-variant-numeric: tabular-nums;
+}
+
+.reprise .stream-candidate,
+.reprise .stream-summary {
+  color: var(--reprise-dim);
+}
+
+.reprise .stream-seq {
+  margin-left: auto;
+  color: var(--reprise-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* One line, ellipsis, whole text on hover: the right column is narrow on purpose, and a wrapped
+   summary pushes the rows a reader came for off the top. */
+.reprise .stream-summary {
+  display: block;
+  overflow: hidden;
+  font-family: var(--reprise-mono);
+  font-size: 0.625rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------------- the audit line */
+
+.reprise .audit summary {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  cursor: pointer;
+  font-size: 0.8125rem;
+}
+
+.reprise .audit-count {
+  color: var(--reprise-text);
+  font-family: var(--reprise-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.reprise .audit .calls {
+  margin: 0.5rem 0 0;
+}
+
+.reprise .call-site {
+  min-width: 5rem;
+  color: var(--reprise-dim);
+  font-family: var(--reprise-mono);
+  font-size: 0.6875rem;
+}
+
+.reprise .call-ref {
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+/* ------------------------------------------------------------------------------ narrow */
+
+@media (max-width: 45rem) {
+  .reprise {
+    padding: 0.875rem;
+  }
+
+  .reprise .ladder {
+    --reprise-axis-width: 2.75rem;
+    --reprise-plot-height: 9.5rem;
+  }
+
+  .reprise .ladder-summary {
+    font-size: 0.75rem;
+  }
+
+  .reprise .ladder-baseline-label {
+    font-size: 0.59375rem;
+  }
+
+  .reprise .rail-round,
+  .reprise .rail-verdict {
+    font-size: 0.5625rem;
+  }
+
+  .reprise .lower {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .reprise .phase {
+    min-width: 6rem;
+  }
+
+  .reprise .timeline li {
+    grid-template-columns: 4rem minmax(0, 1fr) 2.25rem;
+    grid-template-areas:
+      'time type stamp'
+      '. summary summary';
+    row-gap: 0.125rem;
+  }
+
+  .reprise .timeline-summary {
+    overflow: visible;
+    white-space: normal;
+  }
+
+  .reprise .stop-panel {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--reprise-gap);
+  }
+
+  .reprise .stop-why {
+    padding-right: 0;
+    padding-bottom: var(--reprise-gap);
+    border-right: 0;
+    border-bottom: 1px solid var(--reprise-border-weak);
+  }
+
+  .reprise .readings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

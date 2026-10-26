@@ -9,6 +9,8 @@
  */
 
 import assert from 'node:assert/strict'
+import { writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
 
 import { Store } from '../lib/store.js'
@@ -100,6 +102,106 @@ test('the rounds projection says which rounds improved and which produced nothin
   ports.store.close()
 })
 
+test('the rounds projection publishes the step series and one shape per candidate, for the rail', async () => {
+  // The rail draws one square per candidate and a step per round, and it must not decide either for
+  // itself: "which shape is this candidate" is a reading of facts (a status, the frontier, the
+  // four-state verdict), and a renderer that derived it would disagree with `dump` the first time
+  // either side changed. So the roadmap is published here, as data.
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 0 } }) })
+  await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } }) // completes, and leads
+  await runCandidate(ports, { candidateId: 'r1-c2', round: 1, metrics: { auc: 0.69 } }) // completes, dominated
+  // Round 2: one candidate whose artifact is present but malformed, one whose artifact never landed.
+  await runCandidate(ports, { candidateId: 'r2-c1', round: 2, judge: fakeJudge({ verify: ({ candidateId, now }) => ({ candidate_id: candidateId, passed: 'yes-please', checks: [], decided_at_ms: now }) }) })
+  // Round 4: a round with a real result that lost, so "held" is covered too.
+  await runCandidate(ports, { candidateId: 'r4-c1', round: 4, metrics: { auc: 0.68 } })
+  // The two states no executor run produces on demand are written as facts directly, and only after
+  // every kernel-driven candidate is done: a later tick would otherwise pick them up and finish them.
+  createCandidate(ports, { candidateId: 'r2-c2', round: 2, hypothesis: 'left the artifact behind' })
+  ports.store.appendEvent({
+    candidate_id: 'r2-c2',
+    wall_clock_ms: ports.clock.now(),
+    event_type: 'candidate_rejected',
+    payload: { phase: 'MONITOR_POLL', status: 'missing', blocking_message: 'the metrics artifact is not there' },
+  })
+  // Round 5: created and still running.
+  createCandidate(ports, { candidateId: 'r5-c1', round: 5, hypothesis: 'still in flight' })
+
+  const lines = rounds(ports.store, { config: ports.config })
+  const shapes = Object.fromEntries(
+    lines.flatMap((line) => line.candidates.map((candidate) => [candidate.candidate_id, candidate.shape])),
+  )
+
+  assert.deepEqual(shapes, {
+    'r1-c1': 'frontier',
+    'r1-c2': 'done',
+    'r2-c1': 'invalid',
+    'r2-c2': 'rejected',
+    'r4-c1': 'done',
+    'r5-c1': 'in-flight',
+  })
+  assert.deepEqual(
+    lines.map((line) => ({ round: line.round, verdict: line.verdict, after: line.cumulative?.value })),
+    [
+      { round: 1, verdict: 'raised', after: 0.7 },
+      { round: 2, verdict: 'empty', after: 0.7 },
+      { round: 4, verdict: 'held', after: 0.7 },
+      // Round 5 is still running: it has produced nothing *yet*, which is not the same claim as a
+      // finished round that produced nothing comparable. Its squares are drawn as in flight, so its
+      // word says "running" — the two would otherwise contradict each other in one cell.
+      { round: 5, verdict: 'running', after: 0.7 },
+    ],
+    'the step series is the best standing after each round, and the word for how the round ended',
+  )
+  assert.equal(
+    lines.flatMap((line) => line.candidates).find((candidate) => candidate.candidate_id === 'r2-c2').verdict,
+    'missing',
+    'the four-state name travels with the shape, because a shape is a coarse read of it',
+  )
+  ports.store.close()
+})
+
+test('the readings cell counts the rounds the stop gauge measures — not one more', async () => {
+  // A live run: one finished round, and a second whose candidate is still in flight, so that round has
+  // produced nothing comparable *yet*. The cell used to walk every round in the history and print
+  // "empty streak 1" while the gauge measured 0 over the completed ones: one number, two counters.
+  const ports = openWorkspace({
+    config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 0, consecutive_empty_rounds: 2, max_no_improvement_rounds: 2 } }),
+  })
+  await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
+  createCandidate(ports, { candidateId: 'r2-c1', round: 2, hypothesis: 'still in flight' })
+
+  const page = overview(ports.store, { config: ports.config })
+  const gauge = (name) => page.stop.rules.find((rule) => rule.rule === name).observed
+
+  assert.equal(page.rounds.emptyStreak, 0, 'the in-flight round has not produced nothing — it has not finished')
+  assert.equal(gauge('consecutive_empty_rounds'), 0)
+  assert.equal(page.rounds.emptyStreak, gauge('consecutive_empty_rounds'), 'one derivation, so the two cannot disagree')
+  assert.equal(page.rounds.noImprovementStreak, gauge('max_no_improvement_rounds'))
+  ports.store.close()
+})
+
+test('a gain smaller than the contract\'s tolerance is a round without improvement, on the cell as on the gauge', async () => {
+  // The two counters also have to agree about *what counts as an improvement*: `roundHistory` says
+  // "raised" for any strictly better number, while the stop rule measures against the contract's
+  // `minimum_effective_delta`. The cell follows the rule, because the gauge is the number a reader
+  // compares it to.
+  const ports = openWorkspace({
+    config: {
+      metrics: { primary: 'auc', objectives: { auc: 'up' }, minimum_effective_delta: 0.01 },
+      stop: { max_rounds: 0, max_no_improvement_rounds: 3 },
+    },
+  })
+  await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
+  await runCandidate(ports, { candidateId: 'r2-c1', round: 2, metrics: { auc: 0.705 } })
+
+  const page = overview(ports.store, { config: ports.config })
+  const gauge = page.stop.rules.find((rule) => rule.rule === 'max_no_improvement_rounds')
+
+  assert.equal(page.rounds.noImprovementStreak, 1, 'a 0.005 gain under a 0.01 tolerance did not clear the contract')
+  assert.equal(page.rounds.noImprovementStreak, gauge.observed, 'and the cell prints the number the gauge measures')
+  ports.store.close()
+})
+
 test('the candidate detail carries the timeline, every gate verdict, the failure text and the artifacts', async () => {
   const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 0 } }) })
   await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
@@ -130,6 +232,66 @@ test('the candidate detail carries the timeline, every gate verdict, the failure
   assert.ok(detail.timeline.length >= 3, 'the reader can see the steps that led there')
   assert.equal(detail.frontier.complete, false, 'and where it sits — here, nowhere: it has no metric')
   assert.deepEqual(detail.frontier.missing, ['auc'])
+  ports.store.close()
+})
+
+test('the conclusion publishes the frame the staircase draws in: the baseline, and the axis it spans', async () => {
+  // The chart needs three things it must not derive: where the INIT line sits, how tall the axis is,
+  // and what the three axis labels say. All three come from one place, so the numbers on the page and
+  // the numbers a reader takes away cannot be two derivations of the same fact.
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 0 } }) })
+  await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.72 } })
+  await runCandidate(ports, { candidateId: 'r2-c1', round: 2, metrics: { auc: 0.7201 } })
+  await runCandidate(ports, { candidateId: 'r3-c1', round: 3, metrics: { auc: 0.7401 } })
+  writeFileSync(join(dirname(ports.store.path), 'baseline.json'), JSON.stringify({ metric: 'auc', value: 0.71 }))
+
+  const ladder = conclusion(ports.store, { config: ports.config }).ladder
+
+  assert.equal(ladder.metric, 'auc')
+  assert.deepEqual(ladder.baseline, { value: 0.71, metric: 'auc' }, 'the INIT line is the frozen baseline, with its number')
+  assert.equal(ladder.baselineAbsent, null)
+  // The axis spans every value the chart can draw (0.71 … 0.7401 = 0.0301) and pads it by 18% at each
+  // end, so a step never sits on the frame (spec §6.4). 0.0301 * 0.18 = 0.005418.
+  assert.deepEqual(ladder.axis, { top: 0.745518, middle: 0.72505, bottom: 0.704582 })
+  assert.deepEqual(
+    ladder.rounds.map((entry) => ({ round: entry.round, verdict: entry.verdict, after: entry.cumulative.value })),
+    [
+      { round: 1, verdict: 'raised', after: 0.72 },
+      { round: 2, verdict: 'raised', after: 0.7201 },
+      { round: 3, verdict: 'raised', after: 0.7401 },
+    ],
+    'and the series it draws is one row per round',
+  )
+  ports.store.close()
+})
+
+test('a run that recorded no baseline draws no line, and says the baseline was not recorded', async () => {
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 0 } }) })
+  await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
+  await runCandidate(ports, { candidateId: 'r2-c1', round: 2, metrics: { auc: 0.72 } })
+
+  const ladder = conclusion(ports.store, { config: ports.config }).ladder
+
+  assert.equal(ladder.baseline, null, 'a missing baseline is not zero and not the first candidate — it is absent')
+  assert.match(ladder.baselineAbsent, /no frozen baseline/i, 'and the legend can say so in words')
+  assert.deepEqual(ladder.axis, { top: 0.7236, middle: 0.71, bottom: 0.6964 }, 'the axis still spans the candidates')
+  ports.store.close()
+})
+
+test('a run with nothing comparable publishes no axis at all, so the page draws only the rail', async () => {
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 0 } }) })
+  await runCandidate(ports, {
+    candidateId: 'r1-c1',
+    round: 1,
+    judge: fakeJudge({ verify: () => ({ candidate_id: 'r1-c1', passed: 'no' }) }),
+  })
+
+  const ladder = conclusion(ports.store, { config: ports.config }).ladder
+
+  assert.equal(ladder.axis, null, 'there is no value to put on a y-axis, so there is no axis')
+  assert.match(ladder.axisAbsent, /no comparable auc/i, 'and the page can say what is missing instead of drawing an empty box')
+  assert.equal(ladder.rounds.length, 1, 'the rounds are still published — the rail is the part that survives')
+  assert.equal(ladder.rounds[0].empty, true)
   ports.store.close()
 })
 

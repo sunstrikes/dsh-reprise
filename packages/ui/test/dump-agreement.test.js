@@ -320,3 +320,51 @@ test('the audit dump lists the calls the page lists, and prints one call prompt 
   assert.match(text, /^prompt$/m)
   assert.match(text, /^response$/m)
 })
+
+test('the staircase ends on the best result `dump` prints, and its INIT line is the baseline it compares to', async () => {
+  // Two renderers over one projection: `dump` prints the best result and the comparison group, the
+  // page draws a step chart that ends on the best and a dashed line at the baseline. If those drift,
+  // a reader looking at both is told two stories about the same run.
+  const { dir } = await packRun()
+  const final = conclusionHandler(dir, {}).data
+  const text = runDump(['--workspace', dir, '--overview']).output
+  const ladder = final.ladder
+  const last = ladder.rounds.at(-1).cumulative
+
+  assert.equal(last.candidate_id, final.best.candidate_id, 'the last step is set by the candidate the dump calls best')
+  assert.equal(last.value, final.best.value)
+  assert.ok(
+    text.includes(`${final.best.candidate_id} ${final.best.metric}=${final.best.value}`),
+    'and that is the number the dump prints',
+  )
+  assert.equal(final.comparison.group.kind, 'baseline', 'fixture: this run has a frozen baseline to compare against')
+  assert.equal(
+    ladder.baseline.value,
+    final.comparison.group.value,
+    'the dashed INIT line is the same number the conclusion sentence calls the baseline',
+  )
+})
+
+test('the phase path the page draws is the fact the dump names, seq and all', async () => {
+  // Ticket #5 draws the path from `phasePath` and prints the rejection from `rejection`. If those two
+  // ever pointed at different facts the page would show one record's words under another record's
+  // seq — so the agreement is asserted between the two renderers' inputs, not only within each.
+  const dir = await concludedRun()
+  const store = Store.openReadOnly(dir)
+  const text = renderDump(store, 'r1-c2', { config: RUN_CONFIG })
+  store.close()
+
+  const view = candidateHandler(dir, { candidate: 'r1-c2' }).data
+  const why = sections(text).get('why it stopped')
+
+  const judged = view.phasePath.filter((step) => step.status !== null)
+  assert.equal(judged.length, 1, 'one phase carries a four-state word, so there is one fact to agree about')
+  assert.equal(judged[0].phase, view.rejection.phase, 'the path and the rejection block name one phase')
+  assert.equal(judged[0].seq, view.rejection.seq, 'and one fact: the seq printed under the original words')
+  assert.equal(judged[0].eventType, view.rejection.eventType)
+  assert.equal(judged[0].status, field(why, 'status'), 'and the four-state word the dump prints is the mark the page draws')
+  assert.ok(
+    view.phasePath.filter((step) => !step.reached).every((step) => step.status === null && step.seq === null),
+    'no phase the candidate never reached carries a verdict or a seq: nothing was recorded there',
+  )
+})
