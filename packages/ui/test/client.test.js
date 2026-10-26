@@ -17,7 +17,7 @@ import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { registerRoutes } from '../lib/routes.js'
 import { fakeConnection } from './support/fake-connection.js'
@@ -43,7 +43,7 @@ const code = (name) => withoutComments(read(name), name)
  * Every file the browser loads from `client/`. Written out rather than read from `ASSETS`: a test that
  * scans the list it is asserting proves nothing about a file nobody added to the list.
  */
-const CLIENT_MODULES = ['index.html', 'dashboard.js', 'format.js', 'dashboard.css']
+const CLIENT_MODULES = ['index.html', 'dashboard.js', 'format.js', 'states.js', 'dashboard.css']
 
 test('the page and its modules are served by the host at the asset routes', async () => {
   const connection = fakeConnection()
@@ -74,6 +74,14 @@ test('the page and its modules are served by the host at the asset routes', asyn
     assert.match(stylesheet.contentType, /text\/css/)
     assert.match(stylesheet.text, /--reprise-/, 'the shared token block lives here')
     assert.match(stylesheet.text, /\.ladder\b/, 'and the staircase it was added for')
+
+    // The state vocabulary, served beside the page for the same reason `format.js` is: the page
+    // imports it as `./states.js`, and ticket #6's panel needs the identical words for the identical
+    // states (ticket #5).
+    const vocabulary = await connection.dispatch('GET', '/api/reprise/states.js')
+    assert.equal(vocabulary.status, 200)
+    assert.match(vocabulary.contentType, /javascript/)
+    assert.match(vocabulary.text, /export const SHAPE_WORDS/, 'one module names the candidate states')
   } finally {
     dispose()
   }
@@ -136,7 +144,7 @@ test('the modules parse as modules: a bundle served straight from disk has no bu
   // ESM module the browser will load, without executing code that expects a DOM. `format.js` is
   // included because it is loaded by a plain `import` in the browser and by nothing in the suite
   // before ticket #6 imports it — so a syntax error there would be invisible until the page broke.
-  for (const name of ['dashboard.js', 'format.js']) {
+  for (const name of ['dashboard.js', 'format.js', 'states.js']) {
     const result = spawnSync(process.execPath, ['--check', join(CLIENT_DIR, name)], { encoding: 'utf8' })
     assert.equal(result.status, 0, `${name}: ${result.stderr}`)
   }
@@ -368,4 +376,124 @@ test('the stylesheet is scoped, so the panel can inject it without repainting th
   for (const match of read('dashboard.css').matchAll(/^\s+(--[a-z0-9-]+):/gm)) {
     assert.match(match[1], /^--reprise-/, `${match[1]} is not a --reprise-* token`)
   }
+})
+
+// --------------------------------------- the candidate-state vocabulary (ticket #5)
+
+test('the words a candidate state goes by exist once, and both halves of the page import them', async () => {
+  // The rail drew "completed, on the frontier" as a label and the inspector says the same sentence
+  // beside the same candidate. Two copies of that vocabulary is two places to change, and the day one
+  // of them changes the page names one state two ways — the drift constraint 2 forbids for numbers,
+  // applied to the words that stand in for them.
+  const source = read('dashboard.js')
+
+  assert.match(source, /from '\.\/states\.js'/, 'the page imports the vocabulary served beside it')
+  assert.doesNotMatch(code('dashboard.js'), /\bSHAPE_WORDS\s*=\s*\{/, 'and keeps no second copy of the shapes\' words')
+  assert.doesNotMatch(code('dashboard.js'), /\bVERDICT_WORDS\s*=\s*\{/, 'nor a second copy of a round verdict\'s')
+
+  const states = await import(pathToFileURL(join(CLIENT_DIR, 'states.js')).href)
+  assert.equal(states.SHAPE_WORDS.frontier, 'completed, on the frontier', 'one state, one name')
+  assert.equal(states.SHAPE_WORDS.invalid, 'invalid artifact', 'and the coarse shape keeps the precise word in it')
+  assert.deepEqual([...states.STATE_ORDER], ['ok', 'missing', 'invalid', 'conflict'], 'the four states, named')
+})
+
+test('the four states are told apart by mark, and "never got there" is a fifth fact with a mark of its own', async () => {
+  const states = await import(pathToFileURL(join(CLIENT_DIR, 'states.js')).href)
+
+  const marks = ['ok', 'missing', 'invalid', 'conflict'].map((status) => states.phaseMark({ status, reached: true }))
+  assert.deepEqual(
+    marks.map((mark) => mark.word),
+    ['ok', 'missing', 'invalid', 'conflict'],
+    'the four-state word is always on screen beside its mark, never replaced by a colour',
+  )
+  assert.equal(new Set(marks.map((mark) => mark.mark)).size, 4, 'four states, four marks')
+
+  const unjudged = states.phaseMark({ status: null, reached: true })
+  const never = states.phaseMark({ status: null, reached: false })
+  assert.equal(unjudged.word, 'no verdict', 'a phase nothing judged says so instead of borrowing a state')
+  assert.equal(never.word, 'not reached', 'and a phase the candidate never entered is its own word')
+  assert.notEqual(never.mark, states.phaseMark({ status: 'missing', reached: true }).mark,
+    '"the artifact is absent" and "the candidate never got there" are one word apart: they must be two marks apart as well')
+  assert.equal(
+    new Set([...marks, unjudged, never].map((mark) => mark.mark)).size,
+    6,
+    'six marks, no two alike — a greyscale screenshot still separates them',
+  )
+})
+
+test('each of the six marks is a shape in the stylesheet: fill, dash, hatch, heavy border, and two outlines', () => {
+  const css = read('dashboard.css')
+  /** One rule's body, so the check reads what the rule draws rather than that the class exists. */
+  const body = (mark) => {
+    const selector = `.phase[data-mark='${mark}'] .phase-mark`
+    const start = css.indexOf(selector)
+    assert.ok(start >= 0, `the stylesheet draws the "${mark}" mark (${selector})`)
+    const open = css.indexOf('{', start)
+    return css.slice(open + 1, css.indexOf('}', open))
+  }
+
+  assert.match(body('ok'), /background:\s*currentColor/, 'ok is a filled square')
+  assert.match(body('missing'), /border-style:\s*dashed/, 'missing is a dashed outline — nothing was read')
+  assert.match(body('invalid'), /repeating-linear-gradient/, 'invalid is hatched — the artifact arrived and broke its schema')
+  assert.match(body('conflict'), /border-width:\s*2(\.5)?px/, 'conflict is a heavy border — two facts disagree')
+  assert.match(body('not-reached'), /border-style:\s*dotted/, 'never reached is the faintest of the six')
+  assert.equal(new Set(['ok', 'missing', 'invalid', 'conflict', 'no-verdict', 'not-reached'].map(body)).size, 6,
+    'six marks, six drawings')
+})
+
+// ------------------------------------------------- the candidate inspector (ticket #5)
+
+test('the inspector draws the published phase path, and every phase carries a word as well as a mark', () => {
+  const source = read('dashboard.js')
+
+  assert.match(source, /detail\.phasePath/, 'the path is the projection\'s, in the kernel\'s order')
+  assert.match(source, /phaseMark\(/, 'each phase\'s mark and word come from the shared vocabulary')
+  assert.match(source, /class: 'phase-word'/, 'the word is drawn, not only the shape')
+  // Constraint 2: the page does not order, count or classify phases itself.
+  assert.doesNotMatch(source, /CANDIDATE_PHASES|'SUBMIT_QUEUED'/, 'the phase list never appears in the client')
+})
+
+test('a rejection carries its original words, when it was recorded, and which fact recorded it — and no state badge', () => {
+  const source = read('dashboard.js')
+  const rejection = source.slice(source.indexOf('function renderRejection'), source.indexOf('function renderPhaseChain'))
+
+  assert.ok(rejection.length > 0, 'the inspector renders the rejection block')
+  assert.match(rejection, /el\('pre'/, 'the reason is verbatim: a <pre>, in the words the fact plane recorded')
+  assert.match(rejection, /rejection\.message/, 'the gate\'s own failure text')
+  assert.match(rejection, /rejection\.seq/, 'and the #seq of the fact that recorded it')
+  assert.match(rejection, /rejection\.eventType/, 'and the event type, so a reader can look it up')
+  assert.match(rejection, /clock\(rejection\.atMs\)/, 'and a readable time, formatted through format.js')
+  // CODING_STANDARDS §2: "the answer was no" is not one of the four states.
+  assert.doesNotMatch(rejection, /class: 'badge'/, 'a rejection is not given a four-state badge')
+})
+
+test('the page can be pointed at one candidate from its own URL, so a link can name what it shows', () => {
+  const source = read('dashboard.js')
+
+  assert.match(source, /new URLSearchParams\(location\.search\)/, 'the candidate is read from the page\'s own URL')
+  assert.match(source, /state\.selected = requestedCandidate\(\)/, 'and it is what the inspector opens on')
+  // Read-only, and stay out of the reader's history: the page shows a run, it does not navigate one.
+  assert.doesNotMatch(source, /pushState|replaceState/, 'the page does not rewrite the browser history')
+})
+
+test('the fact stream is a column of stamped rows: a readable time, and #seq on every one', () => {
+  const source = read('dashboard.js')
+  const stream = source.slice(source.indexOf('function renderStream'), source.indexOf('// -------', source.indexOf('function renderStream')))
+
+  assert.match(stream, /clock\(event\.wall_clock_ms\)/, 'the time reads as a clock, never as an epoch')
+  assert.match(stream, /seqStamp\(event\.local_seq\)/, 'every row carries the seq a reader can quote')
+  assert.match(source, /const seqStamp = \(seq\) => `#\$\{seq\}`/, 'written as #seq — one spelling for the inspector and the stream')
+  assert.match(stream, /title:/, 'the summary is one line, with the whole of it on hover')
+})
+
+test('the audit is one collapsed line that opens into call sites and refs, and fetches a call only when asked', () => {
+  const source = read('dashboard.js')
+  const audit = source.slice(source.indexOf('function renderAudit'), source.indexOf('function renderStream'))
+
+  assert.match(audit, /el\('details'/, 'collapsed by default: nobody reads prompts while skimming')
+  assert.match(audit, /model calls/, 'and the one line says what it counts')
+  assert.match(source, /async function openCall\(ref\)/, 'opening one call is its own request')
+  assert.match(source, /readOnce\('call', \{ ref \}\)/, 'through the route that already serves it')
+  assert.match(audit, /opened\.prompt/, 'and the prompt it was given is drawn verbatim')
+  assert.match(audit, /opened\.response/, 'as is what came back')
 })

@@ -21,7 +21,8 @@
  * the percentage on this page and the number `dump` prints are the same derivation.
  */
 
-import { EM_DASH, change, clock, cursor, fixed, number, percent, stamp } from './format.js'
+import { EM_DASH, change, clock, cursor, fixed, number, percent } from './format.js'
+import { SHAPE_WORDS, VERDICT_WORDS, phaseMark } from './states.js'
 
 /**
  * The views this page shows. Paths are absolute because the host mounts them on its own origin.
@@ -59,6 +60,15 @@ export function urlFor(view, { cursor, candidate, ref } = {}) {
   return query.length === 0 ? ROUTES[view] : `${ROUTES[view]}?${query.join('&')}`
 }
 
+/**
+ * A fact's stamp on screen: `#9`.
+ *
+ * Three places print it — the phase path, the timeline and the fact stream — and it is written once
+ * because it is the thing a reader quotes back ("that fact"), so `9` and `#9` must not both exist on
+ * one page. `#` and not `seq 9`: one glyph, in the mono face, at the edge of the row.
+ */
+const seqStamp = (seq) => `#${seq}`
+
 /** The card count, or the word for "we could not ask". */
 const cardsInUse = (cluster) => (cluster === undefined ? EM_DASH : cluster.cards.inUse === null ? 'unknown' : number(cluster.cards.inUse))
 
@@ -93,13 +103,33 @@ const measurement = (candidateId, metric, value) =>
 const state = {
   cursors: new Map(),
   seen: new Set(),
+  /** The most recent facts, newest kept bounded: the stream is a window, not a history. */
   events: [],
+  /** How many facts the page has read at all — the number beside the stream's title. */
+  factTotal: 0,
   selected: null,
   lastError: null,
-  /** The audit list as last read, and the one call the reader opened (if any). */
+  /** The audit list as last read, whether the reader left it open, and the one call they opened. */
   audit: null,
+  auditOpen: false,
   openCall: null,
   openCallRecord: null,
+}
+
+/**
+ * The candidate the page was opened on: `?candidate=r5-h2`.
+ *
+ * A dashboard that always starts by asking the reader to click cannot be linked to, quoted in a
+ * review, or screenshotted at a particular candidate — and "look at r3-k1" is the sentence a reader
+ * actually sends. The selection is read, never written back: v1 shows a run, it does not navigate one.
+ */
+function requestedCandidate() {
+  try {
+    const value = new URLSearchParams(location.search).get('candidate')
+    return value === null || value === '' ? null : value
+  } catch {
+    return null
+  }
 }
 
 /** One read with no cursor bookkeeping — the audit's detail request is not part of the increment. */
@@ -124,6 +154,7 @@ async function read(view, options = {}) {
     if (state.seen.has(event.cursor)) continue
     state.seen.add(event.cursor)
     state.events.push(event)
+    state.factTotal += 1
   }
   if (state.events.length > STREAM_LIMIT) state.events.splice(0, state.events.length - STREAM_LIMIT)
   return answer
@@ -361,18 +392,6 @@ function ladderPlot({ rounds, axis, baseline, slot, summary }) {
   return plot
 }
 
-/** The names a shape goes by. A shape nobody can name is a decoration, not a datum. */
-const SHAPE_WORDS = {
-  done: 'completed',
-  frontier: 'completed, on the frontier',
-  rejected: 'rejected',
-  'in-flight': 'in flight',
-  invalid: 'invalid artifact',
-}
-
-/** The words a round's verdict goes by — the projection decides which one applies. */
-const VERDICT_WORDS = { raised: 'raised', held: 'held', empty: 'empty round' }
-
 /** One candidate's accessible name: who it is, what shape it is, and what it scored if it scored. */
 function candidateLabel(candidate, metric) {
   const shape = SHAPE_WORDS[candidate.shape] ?? candidate.shape
@@ -511,6 +530,288 @@ function ladderSentence({ rounds, best, baseline, metric }) {
   return what + against
 }
 
+/** The metric readings a candidate carries, in one line: the primary first, then the rest by name. */
+function measuredText(detail) {
+  const vector = detail.frontier.vector ?? {}
+  const primary = detail.frontier.best?.metric ?? null
+  const names = Object.keys(vector).sort((left, right) => {
+    if (left === primary) return -1
+    if (right === primary) return 1
+    return left < right ? -1 : left > right ? 1 : 0
+  })
+  if (names.length === 0) return 'no metric measured'
+  return `measured ${names.map((name) => measurement(null, name, vector[name])).join(' ')}`
+}
+
+/**
+ * Who this candidate is, in one row: its id, its round, the shape word the rail draws for it, its
+ * job, and what it was measured at — then, under it, what it set out to do.
+ *
+ * The shape word is read from `SHAPE_WORDS`, the same module the rail reads, so the sentence here and
+ * the square over its round cannot call one candidate two things. Nothing in this row says whether
+ * the news is good: "in flight", "rejected" and "invalid artifact" are facts about where it got to.
+ */
+function renderIdentity(detail) {
+  const job = detail.job
+  const identity = el('div', { class: 'identity' })
+
+  identity.append(
+    el('div', { class: 'identity-line' }, [
+      el('span', { class: 'identity-id', text: detail.candidate_id }),
+      el('span', {
+        class: 'identity-round',
+        text: detail.round === null || detail.round === undefined ? 'no round recorded' : `round ${number(detail.round)}`,
+      }),
+      el('span', { class: 'identity-shape', text: SHAPE_WORDS[detail.shape] ?? detail.shape ?? EM_DASH }),
+    ]),
+  )
+
+  identity.append(
+    el('p', { class: 'identity-meta' }, [
+      el('span', {
+        text:
+          job === null || job === undefined
+            ? 'no job recorded'
+            : `job ${job.job_id} · ${job.state} · attempts ${number(job.attempts)}${job.error_class === null || job.error_class === undefined ? '' : ` · ${job.error_class}`}`,
+      }),
+      el('span', { text: ' · ' }),
+      el('span', { text: measuredText(detail) }),
+    ]),
+  )
+
+  // The hypothesis is the one sentence that explains why this candidate exists, and it is recorded
+  // once, when the candidate is created. A candidate a human proposed may have none — that is a
+  // fact too, and it is said in words rather than left as a gap.
+  identity.append(
+    typeof detail.hypothesis === 'string' && detail.hypothesis !== ''
+      ? el('p', { class: 'identity-hypothesis', text: detail.hypothesis })
+      : el('p', { class: 'identity-hypothesis dim', text: 'no hypothesis was recorded for this candidate' }),
+  )
+
+  if (detail.lag.pending > 0) {
+    identity.append(
+      el('p', {
+        class: 'note',
+        text: `${number(detail.lag.pending)} event(s) recorded but not yet folded into state — this page shows the facts, the kernel will catch up`,
+      }),
+    )
+  }
+  return identity
+}
+
+/**
+ * The whole path, all eight phases, drawn from the projection.
+ *
+ * Every phase carries a mark **and** the word for it. The mark is for the reader scanning down the
+ * row and the word is for the reader who cannot see the difference between a dashed square and a
+ * hatched one — which is also what makes the four states survive a greyscale screenshot. The phase
+ * order is the payload's: the page cannot import the contract, and a list kept here would be a
+ * second order to drift from the kernel's.
+ *
+ * "Not reached" is drawn as its own mark rather than as an empty `ok`: ticket 29 exists because a
+ * candidate that never got to a phase was being read as a candidate that failed it.
+ */
+function renderPhasePath(phasePath, status) {
+  const list = el('ol', { class: 'phase-path' })
+  // "Here" answers "where is it now", which is a question only a running candidate has. A finished
+  // one walked the whole path and a rejected one left it, so neither is *in* a phase — and a stale
+  // state row (the kernel folds its state a moment after the fact) must not be drawn as a claim
+  // against a candidate whose own record says it finished.
+  const running = status === 'active'
+  for (const step of phasePath) {
+    const mark = phaseMark({ status: step.status, reached: step.reached })
+    const here = running && step.current === true
+    const item = el(
+      'li',
+      { class: 'phase', 'data-mark': mark.mark, 'data-current': here ? 'true' : 'false' },
+      [
+        el('span', { class: 'phase-mark', 'aria-hidden': 'true' }),
+        el('span', { class: 'phase-name', text: step.phase }),
+        el('span', { class: 'phase-word', text: mark.word }),
+      ],
+    )
+    if (here) item.append(el('span', { class: 'phase-here', text: 'here' }))
+    // The fact that recorded this phase's verdict: its seq and the instant it happened. A reader
+    // checking the page against the fact plane needs both, and neither is derivable from the others.
+    if (Number.isSafeInteger(step.seq)) {
+      item.append(el('span', { class: 'phase-stamp', text: `${seqStamp(step.seq)} ${clock(step.atMs)}` }))
+    }
+    list.append(item)
+  }
+  return el('section', { class: 'inspector-section' }, [el('h3', { text: 'the phases it walked' }), list])
+}
+
+/**
+ * Why it stopped: the original words, and the fact that recorded them.
+ *
+ * Two rules, both from CODING_STANDARDS §2:
+ *
+ *   - **no four-state badge here.** The four states answer "is this fact present and trustworthy";
+ *     "the answer was no" is a decision made *from* them, and a badge on the decision invites a
+ *     reader to file a legitimate rejection as a malformed artifact. The phase path above already
+ *     carries the state word at the phase it was decided at.
+ *   - **the words are verbatim.** A `<pre>`, unwrapped and unparaphrased: this is the message a future
+ *     reader will compare against the artifact, so it is quoted, not summarised.
+ *
+ * The footer names the fact — clock time, event type and `#seq` — because "why did it stop" is only
+ * half an answer without "which record says so".
+ */
+function renderRejection(rejection, verdictStep) {
+  const block = el('section', { class: 'rejection' })
+  block.append(
+    el('h3', {
+      class: 'rejection-title',
+      text: rejection.phase === null || rejection.phase === undefined ? 'why it stopped' : `why it stopped at ${rejection.phase}`,
+    }),
+  )
+  block.append(
+    rejection.message === null || rejection.message === undefined || rejection.message === ''
+      ? el('p', { class: 'dim', text: 'no message was recorded with this decision' })
+      : el('pre', { class: 'rejection-words', text: rejection.message }),
+  )
+  if (rejection.reason !== undefined && rejection.reason !== rejection.message) {
+    block.append(
+      el('p', { class: 'rejection-reason' }, [
+        el('span', { class: 'dim', text: 'the decision recorded: ' }),
+        el('span', { text: rejection.reason }),
+      ]),
+    )
+  }
+  block.append(
+    el('p', {
+      class: 'rejection-when dim',
+      text: `recorded ${clock(rejection.atMs)} · event ${rejection.eventType} ${seqStamp(rejection.seq)}`,
+    }),
+  )
+  // The gate said something too, and it is a different fact from the decision: the schema error, the
+  // missing artifact, the two numbers that disagree. Both are printed, each with its own seq, because
+  // "which fact says what" is the question a reader comparing this page with the artifact store has.
+  if (verdictStep !== undefined && typeof verdictStep.message === 'string' && verdictStep.message !== '') {
+    block.append(
+      el('p', { class: 'rejection-reason dim' }, [
+        el('span', { text: `the gate at ${verdictStep.phase} said ` }),
+        el('span', { text: `${seqStamp(verdictStep.seq)} ${clock(verdictStep.atMs)}` }),
+        el('span', { text: ` (${verdictStep.eventType})` }),
+      ]),
+      el('pre', { class: 'rejection-words', text: verdictStep.message }),
+    )
+  }
+  // The verdict and the decision that followed it are two facts; when they are different events the
+  // second one is named too, or the reader takes the gate's message for the whole decision.
+  if (rejection.terminal !== undefined) {
+    block.append(
+      el('p', {
+        class: 'rejection-when dim',
+        text: `decided ${clock(rejection.terminal.atMs)} · event ${rejection.terminal.eventType} ${seqStamp(rejection.terminal.seq)}`,
+      }),
+    )
+  }
+  return block
+}
+
+/**
+ * Ticket 29's gate chain, step by step: passed / failed / missing, where missing is not failed.
+ *
+ * Kept as it was — the chain answers a different question from the phase path ("did the gate actually
+ * look at this?") — but drawn under the path and the rejection, because it is evidence for them
+ * rather than the first thing a reader should meet.
+ */
+function renderPhaseChain(detail) {
+  const chain = detail.gateChain
+  if (chain === undefined || chain.chain.length === 0) return null
+
+  const rows = chain.chain.map((step) =>
+    el('li', {}, [
+      el('span', { class: 'badge', dataset: { state: step.status }, text: step.status }),
+      el('span', { text: ` ${step.name}${step.detail === '' ? '' : ` — ${step.detail}`}` }),
+    ]),
+  )
+  const block = el('section', { class: 'inspector-section' }, [el('h3', { text: 'gate chain' }), el('ul', {}, rows)])
+  if (chain.attempts.length > 0) {
+    block.append(
+      el('p', {
+        class: 'dim',
+        text: `attempts: ${chain.attempts
+          .map((attempt) => `${attempt.attempt} ${attempt.passed === true ? 'passed' : 'failed'}${attempt.review === null ? '' : ` (review: ${attempt.review.verdict})`}`)
+          .join(' · ')}`,
+      }),
+    )
+  }
+  return block
+}
+
+/** The facts that got it here: time, type, summary and `#seq`, newest first. */
+function renderTimeline(timeline) {
+  const recent = (timeline ?? []).slice(-9).reverse()
+  if (recent.length === 0) return el('span')
+  const list = el('ol', { class: 'timeline' })
+  for (const event of recent) {
+    list.append(
+      el('li', {}, [
+        el('span', { class: 'timeline-time', text: clock(event.atMs) }),
+        el('span', { class: 'timeline-type', text: event.eventType }),
+        el('span', { class: 'timeline-summary', text: event.summary === '' ? EM_DASH : event.summary }),
+        el('span', { class: 'timeline-stamp', text: seqStamp(event.seq) }),
+      ]),
+    )
+  }
+  return el('section', { class: 'inspector-section' }, [
+    el('h3', { text: `the last ${number(recent.length)} facts` }),
+    list,
+  ])
+}
+
+/**
+ * Everything else the fact plane recorded about this candidate, collapsed.
+ *
+ * The frontier position, the identity bindings and the artifact names are reference material: a
+ * reader checking a claim opens them, a reader deciding whether to believe the run does not. They
+ * stay on the page — removing them would make this inspector weaker than the `dump` it mirrors —
+ * but they do not cost a screen by default.
+ */
+function renderCandidateAside(detail) {
+  const body = el('div', { class: 'inspector-aside-body' })
+  body.append(
+    el('p', {
+      text:
+        detail.frontier.position === 'frontier'
+          ? 'on the frontier'
+          : `frontier position: ${String(detail.frontier.position)}`,
+    }),
+    el('p', { class: 'dim', text: `vector ${JSON.stringify(detail.frontier.vector)}` }),
+    el('p', {
+      class: 'dim',
+      text:
+        detail.frontier.best === undefined
+          ? 'best: no comparable result yet'
+          : `best ${measurement(detail.frontier.best.candidate_id, detail.frontier.best.metric, detail.frontier.best.value)}`,
+    }),
+  )
+  const bindingKinds = Object.keys(detail.bindings).sort()
+  if (bindingKinds.length > 0) {
+    body.append(
+      el('h3', { text: 'identity bindings' }),
+      el('pre', { text: bindingKinds.map((kind) => `${kind} ${JSON.stringify(detail.bindings[kind])}`).join('\n') }),
+    )
+  }
+  if (detail.artifacts.length > 0) {
+    body.append(el('h3', { text: 'referenced artifacts' }), el('pre', { text: detail.artifacts.join('\n') }))
+  }
+  return el('details', { class: 'inspector-aside' }, [
+    el('summary', { text: 'the facts behind this candidate' }),
+    body,
+  ])
+}
+
+/**
+ * The candidate inspector: identity, the path it walked, why it stopped, the gate chain, and the
+ * facts that got it there.
+ *
+ * The order is the order a reader asks the questions in — who is this, where did it get to, why did
+ * it stop, can I check — and each answer says which fact it came from. Nothing here decides anything:
+ * the path, the shape word, the four-state marks and the rejection text all arrive from the
+ * projection, and the page decides only how to lay them out.
+ */
 function renderCandidate(answer) {
   const root = document.getElementById('candidate')
   root.replaceChildren(el('h2', { text: state.selected === null ? 'Candidate' : `Candidate ${state.selected}` }))
@@ -525,119 +826,18 @@ function renderCandidate(answer) {
   }
 
   const detail = answer.data
-  root.append(
-    el('dl', { class: 'stats' }, [
-      stat('phase', detail.phase ?? '—'),
-      stat('status', detail.status),
-      stat('round', detail.round ?? '—'),
-      stat('events', detail.lag.maxSeq),
-      stat('unfolded', detail.lag.pending),
-      stat('position', detail.frontier.position),
-    ]),
-  )
-  if (detail.lag.pending > 0) {
-    root.append(
-      el('p', { class: 'note', text: `${detail.lag.pending} event(s) recorded but not yet folded into state — this page shows the facts, the kernel will catch up` }),
-    )
-  }
-
+  root.append(renderIdentity(detail), renderPhasePath(detail.phasePath ?? [], detail.status))
   if (detail.rejection !== undefined) {
-    const rejection = detail.rejection
-    root.append(
-      el('h3', { text: 'why it stopped' }),
-      el('p', {}, [
-        el('span', { class: 'badge', dataset: { state: rejection.status ?? 'missing' }, text: rejection.status ?? 'no verdict' }),
-        el('span', { text: ` at ${rejection.phase ?? EM_DASH}` }),
-      ]),
-      rejection.message ? el('pre', { text: rejection.message }) : el('p', { class: 'dim', text: '(no message recorded)' }),
-      el('p', { class: 'dim', text: `recorded ${stamp(rejection.atMs)} (event ${rejection.seq} ${rejection.eventType})` }),
+    // The gate's words for the phase the candidate stopped at, when they are not the words of the
+    // decision — both are quotes, and the reader is owed both.
+    const verdictStep = (detail.phasePath ?? []).find(
+      (step) => step.phase === detail.rejection.phase && step.message !== null && step.message !== detail.rejection.message,
     )
+    root.append(renderRejection(detail.rejection, verdictStep))
   }
-
-  if (detail.gates.length > 0) {
-    root.append(
-      el('h3', { text: 'gate verdicts' }),
-      el(
-        'ul',
-        {},
-        detail.gates.map((gate) =>
-          el('li', {}, [
-            el('span', { class: 'badge', dataset: { state: gate.status }, text: gate.status }),
-            el('span', { text: ` ${gate.phase ?? EM_DASH} (event ${gate.seq})` }),
-            gate.message ? el('pre', { text: gate.message }) : null,
-          ]),
-        ),
-      ),
-    )
-  }
-
-  const chain = detail.gateChain
-  if (chain !== undefined && chain.chain.length > 0) {
-    const rows = chain.chain.map((step) =>
-      el('li', {}, [
-        el('span', { class: 'badge', dataset: { state: step.status }, text: step.status }),
-        el('span', { text: ` ${step.name}${step.detail === '' ? '' : ` — ${step.detail}`}` }),
-      ]),
-    )
-    root.append(el('h3', { text: 'gate chain' }), el('ul', {}, rows))
-    if (chain.attempts.length > 0) {
-      root.append(
-        el(
-          'p',
-          { class: 'dim', text: `attempts: ${chain.attempts.map((attempt) => `${attempt.attempt} ${attempt.passed === true ? 'passed' : 'failed'}${attempt.review === null ? '' : ` (review: ${attempt.review.verdict})`}`).join(' · ')}` },
-        ),
-      )
-    }
-  }
-
-  root.append(
-    el('h3', { text: 'timeline' }),
-    el(
-      'ol',
-      { class: 'timeline' },
-      detail.timeline.map((event) =>
-        el('li', {}, [
-          el('span', { class: 'seq', text: `${event.seq} · ${clock(event.atMs)}` }),
-          el('span', { text: `${event.eventType}${event.summary === '' ? '' : ` — ${event.summary}`}` }),
-        ]),
-      ),
-    ),
-  )
-
-  root.append(
-    el('h3', { text: 'frontier position' }),
-    el('p', { text: detail.frontier.position === 'frontier' ? 'on the frontier' : String(detail.frontier.position) }),
-    el('p', { class: 'dim', text: `vector ${JSON.stringify(detail.frontier.vector)}` }),
-    el(
-      'p',
-      {
-        class: 'dim',
-        text:
-          detail.frontier.best === undefined
-            ? 'best: no comparable result yet'
-            : `best ${measurement(detail.frontier.best.candidate_id, detail.frontier.best.metric, detail.frontier.best.value)}`,
-      },
-    ),
-  )
-
-  if (detail.job !== null) {
-    root.append(
-      el('h3', { text: 'job' }),
-      el('p', { class: 'dim', text: `${detail.job.job_id} state=${detail.job.state} attempts=${detail.job.attempts}${detail.job.error_class ? ` error_class=${detail.job.error_class}` : ''}` }),
-    )
-  }
-
-  if (detail.artifacts.length > 0) {
-    root.append(el('h3', { text: 'referenced artifacts' }), el('pre', { text: detail.artifacts.join('\n') }))
-  }
-
-  const bindingKinds = Object.keys(detail.bindings).sort()
-  if (bindingKinds.length > 0) {
-    root.append(
-      el('h3', { text: 'identity bindings' }),
-      el('pre', { text: bindingKinds.map((kind) => `${kind} ${JSON.stringify(detail.bindings[kind])}`).join('\n') }),
-    )
-  }
+  const chain = renderPhaseChain(detail)
+  if (chain !== null) root.append(chain)
+  root.append(renderTimeline(detail.timeline), renderCandidateAside(detail))
 }
 
 /**
@@ -799,56 +999,83 @@ function renderConclusion(answer) {
 }
 
 /**
- * The audit panel: every judgement the run asked a model for, and — on click — the one that was
- * opened, prompt and response word for word.
+ * The audit: every judgement the run asked a model for, folded into one line until asked.
  *
- * Clicking a call asks the server for that record (`/api/reprise/call?ref=…`) instead of carrying
- * every prompt in the list: a run with a hundred judgements would otherwise ship a megabyte of
- * prose on every poll.
+ * The audit answers "what did it ask the model, and what came back", which is the same kind of thing
+ * as the fact stream beside it — and it is also the thing nobody reads while skimming. So it costs
+ * one line: `model calls 12`. Opening it lists the call sites and the `ref` of each call; opening one
+ * call asks the server for that record (`/api/reprise/call?ref=…`) instead of carrying a hundred
+ * prompts in the list, and draws the prompt and the response verbatim.
+ *
+ * The `<details>` state is kept in `state.auditOpen` because this panel is redrawn on every poll: an
+ * open audit that snapped shut every five seconds would be worse than one that never opened.
  */
 function renderAudit() {
   const root = document.getElementById('audit')
   const answer = state.audit
-  root.replaceChildren(el('h2', { text: 'Model calls' }))
-
   const data = answer?.data
+
+  const details = el('details', { class: 'audit' })
+  details.open = state.auditOpen === true
+  details.addEventListener('toggle', () => {
+    state.auditOpen = details.open
+  })
+  details.append(
+    el('summary', { class: 'audit-line' }, [
+      el('span', { text: 'model calls' }),
+      el('span', { class: 'audit-count', text: number(data?.calls?.length ?? 0) }),
+    ]),
+  )
+
   if (data === undefined || data === null || data.calls.length === 0) {
-    root.append(el('p', { class: 'empty', text: answer?.reason ?? data?.reason ?? 'no judgement has asked a model yet.' }))
+    details.append(el('p', { class: 'empty', text: answer?.reason ?? data?.reason ?? 'no judgement has asked a model yet.' }))
+    root.replaceChildren(details)
     return
   }
 
+  // Call sites first, because the interesting question is usually "was the gate asked anything".
+  const sorted = [...data.calls].sort((left, right) => {
+    const where = String(left.call_site ?? '').localeCompare(String(right.call_site ?? ''))
+    return where !== 0 ? where : String(left.ref).localeCompare(String(right.ref))
+  })
   const list = el('ul', { class: 'calls' })
-  for (const call of data.calls) {
-    const label = `${call.call_site ?? '?'} ${call.subject ?? ''}`.trim()
+  for (const call of sorted) {
     list.append(
       el('li', {}, [
+        el('span', { class: 'call-site', text: call.call_site ?? '?' }),
         el('button', {
           type: 'button',
-          text: call.status === 'answered' ? label : `${label} (${call.status})`,
+          class: 'call-ref',
+          text: call.ref,
           'aria-pressed': state.openCall === call.ref ? 'true' : 'false',
           onclick: () => openCall(call.ref),
         }),
-        el('span', { class: 'dim', text: ` ${call.ref}` }),
+        el('span', { class: 'dim', text: call.status ?? '' }),
       ]),
     )
   }
-  root.append(el('p', { class: 'dim', text: `${data.count} call(s)` }), list)
+  details.append(list)
 
   const opened = state.openCallRecord
-  if (opened === undefined || opened === null) return
-  if (opened.reason !== undefined) {
-    root.append(el('p', { class: 'note', text: opened.reason }))
-    return
+  if (opened !== undefined && opened !== null) {
+    if (opened.reason !== undefined) {
+      details.append(el('p', { class: 'note', text: opened.reason }))
+    } else {
+      details.append(
+        el('h3', { text: opened.ref }),
+        el('p', {
+          class: 'dim',
+          text: `${opened.call_site ?? '?'} · ${opened.status}${opened.error_class === null ? '' : ` (${opened.error_class})`}`,
+        }),
+        opened.message === null ? el('span') : el('p', { class: 'note', text: opened.message }),
+        el('h3', { text: 'prompt' }),
+        el('pre', { text: opened.prompt }),
+        el('h3', { text: 'response' }),
+        el('pre', { text: opened.response === '' ? '(an empty response)' : opened.response }),
+      )
+    }
   }
-  root.append(
-    el('h3', { text: opened.ref }),
-    el('p', { class: 'dim', text: `${opened.call_site ?? '?'} · ${opened.status}${opened.error_class === null ? '' : ` (${opened.error_class})`}` }),
-    opened.message === null ? el('span') : el('p', { class: 'note', text: opened.message }),
-    el('h3', { text: 'prompt' }),
-    el('pre', { text: opened.prompt }),
-    el('h3', { text: 'response' }),
-    el('pre', { text: opened.response === '' ? '(an empty response)' : opened.response }),
-  )
+  root.replaceChildren(details)
 }
 
 /** Open one judgement: one more read, and the panel redraws. */
@@ -864,31 +1091,52 @@ async function openCall(ref) {
   renderAudit()
 }
 
+/**
+ * The fact stream: what just happened, newest first, one row per fact.
+ *
+ * Each row is two lines — `22:14:40 gate_result r6-g1 #9` over the one-line summary — because a
+ * reader scanning the right column is looking for a time, an event and a candidate, and only then for
+ * the detail. `#seq` is on every row: it is the stamp a reader quotes when they say "that fact",
+ * and the same stamp the inspector prints beside a phase.
+ *
+ * The summary is one line with the whole of it in `title`: the column is narrow on purpose, and a
+ * wrapped summary would push the rows a reader is looking for off the top.
+ */
 function renderStream() {
   const root = document.getElementById('stream')
-  root.replaceChildren(el('h2', { text: 'New facts' }))
-  if (state.events.length === 0) {
+  const recent = state.events.slice(-12).reverse()
+
+  root.replaceChildren(
+    el('div', { class: 'card-head' }, [
+      el('h2', { text: 'Facts' }),
+      el('span', { class: 'dim', text: `${number(state.factTotal)} read` }),
+    ]),
+  )
+
+  if (recent.length === 0) {
     root.append(el('p', { class: 'empty', text: 'nothing yet.' }))
     return
   }
-  const recent = state.events.slice(-20).reverse()
-  root.append(
-    el('table', {}, [
-      el('thead', {}, [el('tr', {}, ['time', 'candidate', 'type', 'summary'].map((label) => el('th', { text: label })))]),
-      el(
-        'tbody',
-        {},
-        recent.map((event) =>
-          el('tr', {}, [
-            el('td', { text: clock(event.wall_clock_ms) }),
-            el('td', { text: event.candidate_id }),
-            el('td', { text: event.event_type }),
-            el('td', { text: event.summary }),
-          ]),
-        ),
-      ),
-    ]),
-  )
+
+  const list = el('ol', { class: 'stream' })
+  for (const event of recent) {
+    list.append(
+      el('li', { class: 'stream-row' }, [
+        el('span', { class: 'stream-head' }, [
+          el('span', { class: 'stream-time', text: clock(event.wall_clock_ms) }),
+          el('span', { class: 'stream-type', text: event.event_type }),
+          el('span', { class: 'stream-candidate', text: event.candidate_id }),
+          el('span', { class: 'stream-seq', text: seqStamp(event.local_seq) }),
+        ]),
+        el('span', {
+          class: 'stream-summary',
+          title: event.summary === '' ? event.event_type : event.summary,
+          text: event.summary === '' ? EM_DASH : event.summary,
+        }),
+      ]),
+    )
+  }
+  root.append(list)
 }
 
 // ---------------------------------------------------------------------- wiring
@@ -941,5 +1189,6 @@ async function refresh() {
   }
 }
 
+state.selected = requestedCandidate()
 await refresh()
 setInterval(refresh, POLL_MS)

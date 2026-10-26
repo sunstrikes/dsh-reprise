@@ -150,11 +150,16 @@ export const ROUTES = [
  * `dashboard.css` is here for the same reason. It holds the `--reprise-*` token block and the
  * component styles as one file with no page-specific glue, so ticket #6's panel injects it verbatim
  * and the two surfaces cannot drift into two palettes.
+ *
+ * `states.js` is the third: the words a candidate state goes by, and the mark names the stylesheet
+ * paints. The page imports it as `./states.js`; the panel will import the identical URL, so one
+ * candidate is described with one vocabulary on both surfaces (ticket #5).
  */
 export const ASSETS = [
   { path: '/api/reprise/page', file: 'index.html', contentType: 'text/html; charset=utf-8' },
   { path: '/api/reprise/dashboard.js', file: 'dashboard.js', contentType: 'text/javascript; charset=utf-8' },
   { path: '/api/reprise/format.js', file: 'format.js', contentType: 'text/javascript; charset=utf-8' },
+  { path: '/api/reprise/states.js', file: 'states.js', contentType: 'text/javascript; charset=utf-8' },
   { path: '/api/reprise/dashboard.css', file: 'dashboard.css', contentType: 'text/css; charset=utf-8' },
 ]
 

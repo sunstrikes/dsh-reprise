@@ -40,6 +40,32 @@
       <p class="empty">waiting for facts…</p>
     </section>
 
+    <!--
+      The lower half: the candidate inspector on the left, and on the right the two things a reader
+      consults rather than reads — the model-call audit folded into one line, and the fact stream
+      under it. Wide screens get two columns; below 45rem they stack, in the same order.
+    -->
+    <div class="lower">
+      <section class="card" id="candidate" aria-live="polite">
+        <h2>Candidate</h2>
+        <p class="empty">choose a candidate from a round.</p>
+      </section>
+
+      <div class="lower-side">
+        <section class="card" id="audit" aria-live="polite">
+          <details class="audit">
+            <summary class="audit-line">model calls</summary>
+            <p class="empty">no judgement has asked a model yet.</p>
+          </details>
+        </section>
+
+        <section class="card" id="stream" aria-live="polite">
+          <h2>New facts</h2>
+          <p class="empty">nothing yet.</p>
+        </section>
+      </div>
+    </div>
+
     <div class="grid">
       <section class="card" id="overview" aria-live="polite">
         <h2>Overview</h2>
@@ -49,21 +75,6 @@
       <section class="card" id="conclusion" aria-live="polite">
         <h2>Conclusion</h2>
         <p class="empty">waiting for facts…</p>
-      </section>
-
-      <section class="card" id="candidate" aria-live="polite">
-        <h2>Candidate</h2>
-        <p class="empty">choose a candidate from a round.</p>
-      </section>
-
-      <section class="card" id="audit" aria-live="polite">
-        <h2>Model calls</h2>
-        <p class="empty">no judgement has asked a model yet.</p>
-      </section>
-
-      <section class="card" id="stream" aria-live="polite">
-        <h2>New facts</h2>
-        <p class="empty">nothing yet.</p>
       </section>
     </div>
 
