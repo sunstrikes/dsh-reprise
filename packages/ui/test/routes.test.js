@@ -37,7 +37,8 @@ const DATA_PATHS = [
   '/api/reprise/calls',
   '/api/reprise/call',
 ]
-const ASSET_PATHS = ['/api/reprise/page', '/api/reprise/dashboard.js']
+// The page, its module, and the formatting module both clients import (ticket #2).
+const ASSET_PATHS = ['/api/reprise/page', '/api/reprise/dashboard.js', '/api/reprise/format.js']
 
 const workspaceDir = () => mkdtempSync(join(tmpdir(), 'reprise-ui-routes-'))
 

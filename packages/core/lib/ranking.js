@@ -338,9 +338,13 @@ export function roundHistory(view) {
   for (const round of [...rounds.keys()].sort((left, right) => left - right)) {
     const members = rounds.get(round)
     const ranked = members.filter((candidate) => candidate.complete)
+    // A round best names the metric it is a best *of*. The contract is in hand right here, and every
+    // renderer of a round (the page's table, the panel, `dump`) was otherwise re-attaching
+    // `contract.primary` to a number that looked like a bare value — or printing `undefined=0.7211`.
     const roundBest = ranked
       .map((candidate) => ({
         candidate_id: candidate.candidate_id,
+        metric: view.contract.primary,
         value: candidate.vector[view.contract.primary],
       }))
       .sort((left, right) => {

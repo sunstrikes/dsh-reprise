@@ -733,6 +733,13 @@ export function publishedOf(contract, metric) {
  * number from the pack. `change` is only ever measured-minus-group; the published difference is its
  * own field, because mixing "better than our baseline" with "closer to their table" is how a run
  * reports a win it did not have.
+ *
+ * `changePercent` is the same change as a percentage *of the group*, because "(0.7331 - 0.706981) /
+ * 0.706981" is arithmetic, and arithmetic in three renderers is three answers. It is a percentage
+ * number (`3.694549`, not the ratio `0.03694549`) so the field name says what the number is. It is
+ * `null` — never `0`, never `Infinity` — whenever there is no group, or the group is 0 and a relative
+ * change does not exist. `group.kind` is what makes the claim readable: the same +2.79% means
+ * "against the frozen baseline" or "against the previous best", and they are not the same news.
  */
 function comparison(store, { workspace, config, rows, best, against }) {
   const contract = config?.metrics ?? workspace.metrics
@@ -749,6 +756,7 @@ function comparison(store, { workspace, config, rows, best, against }) {
       measured: null,
       group: null,
       change: null,
+      changePercent: null,
       better: null,
       published: publishedBlock,
       publishedAbsent: published.absent ?? null,
@@ -757,7 +765,7 @@ function comparison(store, { workspace, config, rows, best, against }) {
     }
   }
 
-  const measured = { candidate_id: best.candidate_id, value: best.value }
+  const measured = { candidate_id: best.candidate_id, round: best.round ?? null, value: best.value }
   const baseline = frozenBaseline(store)
   const parentId = against?.parent ?? null
   let group
@@ -770,12 +778,15 @@ function comparison(store, { workspace, config, rows, best, against }) {
   }
 
   const change = group === null ? null : Number((measured.value - group.value).toFixed(12))
+  const changePercent =
+    change === null || !(Math.abs(group.value) > 0) ? null : Number(((change / Math.abs(group.value)) * 100).toFixed(6))
   const gpuHours = spend.settledGpuHours
   return {
     metric,
     measured,
     group,
     change,
+    changePercent,
     better: change === null || direction === null ? null : direction === 'up' ? change > 0 : change < 0,
     published: publishedBlock,
     publishedAbsent: published.absent ?? null,
