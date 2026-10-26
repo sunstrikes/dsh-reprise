@@ -359,10 +359,10 @@ function pickRule({ limits, rounds, view, contract, samples, now, startedAt }) {
 /**
  * The 「证据无效」 rule: the candidate's last window carries no finite value for the metric that decides.
  *
- * Named for what it found. The window series is a well-formed artifact — it is there, it parses, it
- * satisfies the contract — so nothing about it is *invalid*: the number it should carry is **absent**.
- * The reason says `evidence_missing`, which is the fact, and the rejection carries no four-state
- * status at all, because there is no artifact that breaks its schema to name.
+ * Named for what it found, and so is the reason it reports. The window series is a well-formed
+ * artifact — it is there, it parses, it satisfies the contract — so nothing about it is *invalid*: the
+ * number it should carry is **absent**. `evidence_missing` is that fact; the rejection carries no
+ * four-state status at all, because there is no artifact that breaks its schema to name.
  *
  * Why the last window and not the mean: a run's tail is where a rollout, a divergence or a broken
  * parser shows up, and the contract's `window_mode` decides how a *comparison* collapses — not
@@ -373,7 +373,7 @@ function pickRule({ limits, rounds, view, contract, samples, now, startedAt }) {
  * samples are optional for a candidate), while this rule is about evidence that exists and says
  * nothing where the number should be.
  */
-function invalidEvidence({ contract, candidate, series }) {
+function missingEvidence({ contract, candidate, series }) {
   if (series === undefined || contract.status !== 'ok') return undefined
   const metric = contract.primary
   const windows = windowValues(series, metric)
@@ -463,7 +463,7 @@ function regressedMetric({ limits, contract, candidate, series, baseline }) {
  * evidence is answered before "worse", and a rule added later is appended, not slotted in.
  */
 const CANDIDATE_JUDGES = Object.freeze({
-  last_window_unmeasured: ({ contract, candidate, series }) => ({ kill: invalidEvidence({ contract, candidate, series }), tolerances: [] }),
+  last_window_unmeasured: ({ contract, candidate, series }) => ({ kill: missingEvidence({ contract, candidate, series }), tolerances: [] }),
   metric_regression: ({ limits, contract, candidate, series, baseline }) =>
     regressedMetric({ limits, contract, candidate, series, baseline }),
 })
