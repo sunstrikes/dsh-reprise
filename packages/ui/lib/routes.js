@@ -81,7 +81,14 @@ function answer(workspace, name, render, query) {
 }
 
 /**
- * The overview route's plain handler: `(workspace, query, { platform }) → Promise<JSON>`.
+ * The clock a request reads the run with. Injectable so a test — and a replay — can ask "how close is
+ * this run to its wall-clock limit" and get the same answer twice; the projection never reads a clock
+ * of its own.
+ */
+const SYSTEM_CLOCK = Object.freeze({ now: () => Date.now() })
+
+/**
+ * The overview route's plain handler: `(workspace, query, { platform, clock }) → Promise<JSON>`.
  *
  * The one route that may ask the world a question. `cards.inUse` and `queue.upstream` are facts only
  * the cluster owns, so when a platform port is supplied the handler reads its listing through
@@ -90,12 +97,18 @@ function answer(workspace, name, render, query) {
  * that cannot list ("cannot read", in its own words), and no platform at all (the page says the
  * listing was not read and reports `null`, never 0).
  *
+ * `clock` is the instant the reading is taken — `{ now: () => number }` — and it is stamped here, at
+ * the request boundary, rather than inside the projection: the stop gauges report a distance to a
+ * wall-clock limit, and a distance measured against a clock the projection reached for itself could
+ * not be reproduced by `dump` or by a test.
+ *
  * Asynchronous because a listing is a network call. Every other route stays synchronous; the route
  * adapter awaits uniformly, so a handler's shape is one thing rather than two.
  */
-export async function overviewHandler(workspace, query = {}, { platform } = {}) {
+export async function overviewHandler(workspace, query = {}, { platform, clock = SYSTEM_CLOCK } = {}) {
   const listing = platform === undefined ? undefined : await readListing(platform)
-  return answer(workspace, 'overview', (store) => overviewView(store, query, { listing }), query)
+  const now = clock.now()
+  return answer(workspace, 'overview', (store) => overviewView(store, query, { listing, now }), query)
 }
 
 /** The rounds route's plain handler. */
@@ -192,7 +205,7 @@ function route({ path, methods, fetch }) {
   return { path, methods, requestBody: 'buffered', fetch }
 }
 
-function routeFor({ path, handler, workspace, platform }) {
+function routeFor({ path, handler, workspace, platform, clock }) {
   return route({
     path,
     methods: ['GET'],
@@ -200,7 +213,7 @@ function routeFor({ path, handler, workspace, platform }) {
     // one route that reads the cluster listing.
     fetch: async (request) => {
       try {
-        return json(await handler(workspace, queryOf(request.url), { platform }))
+        return json(await handler(workspace, queryOf(request.url), { platform, clock }))
       } catch (error) {
         if (error instanceof ViewError) return json({ error: { message: error.message } }, error.status)
         return json({ error: { message: error?.message ?? String(error) } }, 500)
@@ -216,15 +229,19 @@ function routeFor({ path, handler, workspace, platform }) {
  *   connection: { fetch: { register(route: object): () => void } },
  *   workspace: string,
  *   platform?: object,
+ *   clock?: { now: () => number },
  * }} options `platform` is optional: it is the only thing any route may ask, and only the overview
  *   route does (the cluster listing). Without it the page is exactly as complete as it was — it just
- *   reports "the cluster listing was not read" instead of a number.
+ *   reports "the cluster listing was not read" instead of a number. `clock` is optional too, and
+ *   defaults to the system clock: it is what the stop gauges measure a wall-clock limit against.
  * @returns {() => void} the disposer that unregisters every route this call mounted
  */
-export function registerRoutes({ connection, workspace, platform }) {
+export function registerRoutes({ connection, workspace, platform, clock }) {
   const disposers = []
   try {
-    for (const entry of ROUTES) disposers.push(connection.fetch.register(routeFor({ ...entry, workspace, platform })))
+    for (const entry of ROUTES) {
+      disposers.push(connection.fetch.register(routeFor({ ...entry, workspace, platform, clock })))
+    }
     for (const entry of ASSETS) {
       disposers.push(
         connection.fetch.register(route({ path: entry.path, methods: ['GET'], fetch: () => assetResponse(entry) })),

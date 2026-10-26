@@ -252,33 +252,72 @@ function windowsMeasured(samples) {
 }
 
 /**
- * Which workspace rule, if any, is satisfied. Pure over the derived view and the samples: no store,
- * no clock of its own, no model.
- * @returns {{ rule: string, limit: number, observed: number, message: string } | undefined}
+ * How far along every workspace rule is — one measurement, for the decision *and* for the gauges.
+ *
+ * This function exists because a page that shows "3/3" beside a conclusion recorded as
+ * `consecutive_empty_rounds 2/2` is a page nobody can act on: two counters, two answers, one run. So
+ * the per-rule reading is taken here, once, and `pickRule` is a comparison over *this* map rather
+ * than a second traversal of the same facts. A rule can only report a distance here by being
+ * measured, and the only thing `pickRule` adds is the limit it is measured against.
+ *
+ * Each entry is `{ observed, message }` when the rule was measured, and `{ observed: null }` when it
+ * was not — with `unmeasured` naming the missing input, because "I did not look" and "I looked and
+ * found 0" are different answers and only one of them belongs on a gauge. A rule that cannot run at
+ * all is *not* decided here: a disabled rule and a rule blocked by a broken metric contract are
+ * `describeRules`' business, which owns the words for them (`disabled (0)`, `no contract (…)`).
+ *
+ * `observed` is what a limit is compared against; `reading` is the same value as it is published,
+ * present only where rounding it would change the comparison (see the wall clock below).
+ *
+ * @param {{
+ *   limits: object,
+ *   view: object,
+ *   rounds?: object[],     // `roundHistory(view)`; absent means "not measured"
+ *   contract?: object,
+ *   samples?: object,      // the window series; absent means "not measured"
+ *   now?: number,
+ *   startedAt?: number,
+ * }} facts
+ * @returns {Map<string, { observed: number | null, reading?: number, message?: string, unmeasured?: string }>}
  */
-function pickRule({ limits, rounds, view, contract, samples, now, startedAt }) {
-  const completed = rounds.filter((entry) => entry.complete)
+function measureRules({ limits, view, rounds, contract = view.contract, samples, now, startedAt }) {
+  const measured = new Map()
+  // `undefined` is "the caller did not supply this input"; `[]` is "the caller looked, and there is
+  // no round yet". Only the first is unmeasured.
+  const completed = rounds === undefined ? undefined : rounds.filter((entry) => entry.complete)
 
-  if (limits.max_rounds > 0) {
+  if (completed === undefined) {
+    measured.set('max_rounds', { observed: null, unmeasured: 'no round history was supplied, so this rule was not measured' })
+  } else {
     const highest = completed.reduce((max, entry) => Math.max(max, entry.round), 0)
-    if (highest >= limits.max_rounds) {
-      return {
-        rule: 'max_rounds',
-        limit: limits.max_rounds,
-        observed: highest,
-        message: `round ${highest} complete and nothing is in flight; stop.max_rounds is ${limits.max_rounds}`,
-      }
-    }
+    measured.set('max_rounds', {
+      observed: highest,
+      message: `round ${highest} complete and nothing is in flight; stop.max_rounds is ${limits.max_rounds}`,
+    })
   }
 
-  // The round rules below are statements about a metric, and the kernel has no domain knowledge of
-  // its own: without a metric contract they are skipped, not guessed at. The ceilings after them need
-  // no contract — a clock and a window count mean the same thing whatever the metric is.
+  // The next two rules are statements about a metric, and the kernel has no domain knowledge of its
+  // own: without a metric contract they are skipped, not guessed at. They are left *unmeasured*
+  // rather than measured as zero, and `describeRules` names the reason (`no contract (…)`).
   const rule = contract.status === 'ok' ? primaryRule(contract) : undefined
   const { primary } = contract
   const tolerance = rule?.minimum_effective_delta ?? 0
+  const measurable = contract.status === 'ok' && completed !== undefined
 
-  if (limits.max_no_improvement_rounds > 0 && contract.status === 'ok') {
+  if (completed === undefined || !measurable) {
+    measured.set('max_no_improvement_rounds', {
+      observed: null,
+      ...(completed === undefined
+        ? { unmeasured: 'no round history was supplied, so this rule was not measured' }
+        : {}),
+    })
+    measured.set('consecutive_empty_rounds', {
+      observed: null,
+      ...(completed === undefined
+        ? { unmeasured: 'no round history was supplied, so this rule was not measured' }
+        : {}),
+    })
+  } else {
     const direction = rule?.direction
     let bestSoFar
     let streak = 0
@@ -296,63 +335,92 @@ function pickRule({ limits, rounds, view, contract, samples, now, startedAt }) {
         streak += 1
       }
     }
-    if (streak >= limits.max_no_improvement_rounds) {
-      const held =
-        bestSoFar === undefined
-          ? `${primary} (no result yet)`
-          : `${primary}=${bestSoFar.value} set by ${bestSoFar.candidate_id} in round ${bestSoFar.round}`
-      const by = tolerance > 0 ? ` by at least ${tolerance}` : ''
-      return {
-        rule: 'max_no_improvement_rounds',
-        limit: limits.max_no_improvement_rounds,
-        observed: streak,
-        message: `${streak} completed round(s) without beating ${held}${by} (stop.max_no_improvement_rounds=${limits.max_no_improvement_rounds})`,
-      }
-    }
-  }
+    const held =
+      bestSoFar === undefined
+        ? `${primary} (no result yet)`
+        : `${primary}=${bestSoFar.value} set by ${bestSoFar.candidate_id} in round ${bestSoFar.round}`
+    const by = tolerance > 0 ? ` by at least ${tolerance}` : ''
+    measured.set('max_no_improvement_rounds', {
+      observed: streak,
+      message: `${streak} completed round(s) without beating ${held}${by} (stop.max_no_improvement_rounds=${limits.max_no_improvement_rounds})`,
+    })
 
-  if (limits.consecutive_empty_rounds > 0 && contract.status === 'ok') {
-    const streak = trailing(completed, (entry) => entry.empty)
-    if (streak >= limits.consecutive_empty_rounds) {
-      return {
-        rule: 'consecutive_empty_rounds',
-        limit: limits.consecutive_empty_rounds,
-        observed: streak,
-        message: `${streak} consecutive completed round(s) produced no comparable ${primary} result (stop.consecutive_empty_rounds=${limits.consecutive_empty_rounds})`,
-      }
-    }
+    const emptyStreak = trailing(completed, (entry) => entry.empty)
+    measured.set('consecutive_empty_rounds', {
+      observed: emptyStreak,
+      message: `${emptyStreak} consecutive completed round(s) produced no comparable ${primary} result (stop.consecutive_empty_rounds=${limits.consecutive_empty_rounds})`,
+    })
   }
 
   // A wall clock is readable without any contract: the run has simply been open too long, and saying
   // so at workspace level is the difference between "the run timed out" and "a candidate timed out".
   // (The budget's own wall clock *pauses* instead — money spent and time spent are different facts,
   // and the tick checks the budget first, so a configured `budget.max_runtime_hours` still pauses.)
-  if (limits.max_wall_hours > 0) {
+  if (typeof now !== 'number' || typeof startedAt !== 'number') {
+    measured.set('max_wall_hours', {
+      observed: null,
+      unmeasured:
+        startedAt === null || startedAt === undefined
+          ? 'this run recorded no start instant, so its wall clock cannot be measured'
+          : 'no clock reading was supplied, so the wall clock was not measured',
+    })
+  } else {
     const hours = Math.max(0, now - startedAt) / HOUR_MS
-    if (hours >= limits.max_wall_hours) {
-      return {
-        rule: 'max_wall_hours',
-        limit: limits.max_wall_hours,
-        observed: Number(hours.toFixed(3)),
-        message: `the run has been open for ${hours.toFixed(2)}h and stop.max_wall_hours is ${limits.max_wall_hours}`,
-      }
-    }
+    // `observed` is the exact duration the rule is compared against; `reading` is the same number to
+    // three decimals, which is what gets published. The two are kept apart on purpose: comparing a
+    // *rounded* clock against a whole-hour limit would have a run stop one tick early, and a page
+    // that then showed "2.00 / 2" for a run that has not stopped would look broken.
+    measured.set('max_wall_hours', {
+      observed: hours,
+      reading: Number(hours.toFixed(3)),
+      message: `the run has been open for ${hours.toFixed(2)}h and stop.max_wall_hours is ${limits.max_wall_hours}`,
+    })
   }
 
   // A window ceiling is the same statement in the run's own unit: enough training has been measured
   // that another candidate would not be compared over the same intervals.
-  if (limits.max_windows > 0) {
+  if (samples === undefined) {
+    measured.set('max_windows', {
+      observed: null,
+      unmeasured: 'the window samples were not read, so the window count was not taken',
+    })
+  } else {
     const windows = windowsMeasured(samples)
-    if (windows >= limits.max_windows) {
+    measured.set('max_windows', {
+      observed: windows,
+      message: `the run has measured ${windows} window(s) and stop.max_windows is ${limits.max_windows}`,
+    })
+  }
+
+  return measured
+}
+
+/**
+ * Which workspace rule, if any, is satisfied. Pure over the derived view and the samples: no store,
+ * no clock of its own, no model.
+ *
+ * A rule fires when the limit it declares has been reached by the value `measureRules` took for it.
+ * In declared order, and the first match wins — so the recorded reason is reproducible rather than a
+ * vote, which is the property the decision had before the gauges existed.
+ *
+ * @returns {{ rule: string, limit: number, observed: number, message: string } | undefined}
+ */
+function pickRule(facts) {
+  const measured = measureRules(facts)
+  for (const rule of STOP_RULES) {
+    const entry = measured.get(rule)
+    // Not measured is not zero: a rule whose counter nobody took cannot have been reached.
+    if (entry === undefined || entry.observed === null) continue
+    if (!(facts.limits[rule] > 0)) continue
+    if (entry.observed >= facts.limits[rule]) {
       return {
-        rule: 'max_windows',
-        limit: limits.max_windows,
-        observed: windows,
-        message: `the run has measured ${windows} window(s) and stop.max_windows is ${limits.max_windows}`,
+        rule,
+        limit: facts.limits[rule],
+        observed: entry.reading ?? entry.observed,
+        message: entry.message,
       }
     }
   }
-
   return undefined
 }
 
@@ -532,13 +600,46 @@ export function decideStop({ limits, view, rounds = [], contract = view.contract
 }
 
 /**
- * Per-rule status. A rule that is enabled but has not fired is a different fact from a rule that is
- * off, and a dashboard or dump that shows only "not stopped" hides the difference.
+ * Per-rule status: is the rule on, what is its limit, and **how far along is it**.
+ *
+ * A rule that is enabled but has not fired is a different fact from a rule that is off, and a
+ * dashboard or dump that shows only "not stopped" hides the difference. The third fact is the one
+ * ticket #4 adds: the observed value, so a reader can see how much room is left before the run ends
+ * rather than only learning the reason afterwards.
+ *
+ * Three fields say why a rule has no reading, and they are not interchangeable:
+ *
+ *   - `enabled: false` — the rule was configured off (`0` disables, as everywhere in this kernel);
+ *   - `reason` — the rule cannot run at all: it is off, or it is a metric rule and the contract is
+ *     `missing` / `invalid` / `conflict`;
+ *   - `unmeasured` — the rule could run, but this call did not supply the input it needs (a caller
+ *     with only a `view` has no round history, no samples and no clock). The value is `null`, never
+ *     `0`, because a rule nobody measured has not been read.
+ *
+ * `distancePercent` is the fraction of its limit a rule has reached, capped at 100 — the fill of a
+ * gauge. It is a *distance*, not progress: reaching `max_rounds` is stopping, not succeeding. It is
+ * computed here, with the observed value, so no renderer divides two numbers of its own.
+ *
+ * @param {{
+ *   limits: object,        // `stopConfig(config)`
+ *   view: object,          // the frontier view
+ *   rounds?: object[],     // `roundHistory(view)`
+ *   samples?: { baseline?: object, candidates?: Record<string, object> },
+ *   now?: number,
+ *   startedAt?: number,
+ * }} facts
  */
-export function describeRules({ limits, view }) {
+export function describeRules({ limits, view, rounds, samples, now, startedAt }) {
   const contract = view.contract
+  const measured = measureRules({ limits, view, rounds, contract, samples, now, startedAt })
   return STOP_RULES.map((rule) => {
-    if (limits[rule] === 0) return { rule, enabled: false, limit: 0, reason: 'disabled (0)' }
+    const entry = measured.get(rule) ?? { observed: null }
+    // What the gauge prints is the same number the decision records — `reading` where a rounded
+    // value is the published one, the measured value everywhere else.
+    const shown = entry.observed === null ? null : (entry.reading ?? entry.observed)
+    if (limits[rule] === 0) {
+      return { rule, enabled: false, limit: 0, observed: null, distancePercent: null, reason: 'disabled (0)' }
+    }
     if (!CONTRACT_FREE_RULES.has(rule) && contract.status !== 'ok') {
       // The same name the other two readers use: `missing` when there is no contract, `conflict` when
       // it disagrees with itself. A rule that cannot run says which, rather than "needs a metric
@@ -548,10 +649,20 @@ export function describeRules({ limits, view }) {
         enabled: true,
         limit: limits[rule],
         contract: contract.status,
+        observed: null,
+        distancePercent: null,
         reason: `no contract (${contract.status}): ${contract.message}`,
       }
     }
-    return { rule, enabled: true, limit: limits[rule], reason: null }
+    return {
+      rule,
+      enabled: true,
+      limit: limits[rule],
+      observed: shown,
+      distancePercent: shown === null ? null : Math.min(100, Number(((shown / limits[rule]) * 100).toFixed(2))),
+      reason: null,
+      unmeasured: shown === null ? (entry.unmeasured ?? 'this rule was not measured') : null,
+    }
   })
 }
 
@@ -562,8 +673,13 @@ export function describeRules({ limits, view }) {
  * Read through `samples.js`, which owns the fact→artifact link, so the baseline and a candidate are
  * read by the same code — a comparison assembled from two different readings of the same document
  * shape would be able to disagree with itself.
+ *
+ * Exported because the projection owns the *other* reader of these samples: the `max_windows` gauge
+ * on the dashboard reports "how many windows has the run measured", which is `windowsMeasured` over
+ * these series. Two readers of the same artifacts would eventually disagree about a count that only
+ * one of them can see, so the dashboard walks the same door the decision does.
  */
-function samplesFor(store, artifacts, view, limits) {
+export function samplesFor(store, artifacts, view, limits) {
   const candidates = {}
   for (const candidate of view.candidates) {
     // Only a completed candidate has a tail to judge; reading a running one's events every tick would
@@ -645,15 +761,17 @@ export function evaluateStop({ store, clock, config, artifacts, log }) {
   const rounds = roundHistory(view)
   const limits = stopConfig(config)
   const at = clock.now()
+  const samples = samplesFor(store, artifacts, view, limits)
+  const startedAt = workspace.started_at_ms ?? at
 
   const decision = decideStop({
     limits,
     view,
     rounds,
     contract,
-    samples: samplesFor(store, artifacts, view, limits),
+    samples,
     now: at,
-    startedAt: workspace.started_at_ms ?? at,
+    startedAt,
   })
 
   if (decision.stop === undefined) {
@@ -678,7 +796,10 @@ export function evaluateStop({ store, clock, config, artifacts, log }) {
       // Enough history to explain the decision later without replaying the whole stream, bounded so
       // the payload stays far below the one-event size limit.
       rounds: { considered: rounds.length, last: rounds.slice(-5) },
-      rules: describeRules({ limits, view }),
+      // The statuses as they stood when the decision was taken, each with the value it had reached —
+      // so "why not that one" is answerable from the recorded fact months later, without replaying
+      // the run's round history against whatever configuration is in force then.
+      rules: describeRules({ limits, view, rounds, samples, now: at, startedAt }),
     },
   )
 
