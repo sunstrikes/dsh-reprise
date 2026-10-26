@@ -39,6 +39,8 @@
   /* The one colour the design spends: committed and not yet settled. It lives only in the budget
      bar's hatch, which is also a texture, so the meaning survives a reader who cannot see it. */
   --reprise-committed: var(--dsw-alias-state-warn-primary, currentColor);
+  /* The running mark in the phase capsule. Decoration beside a printed word, never the only signal. */
+  --reprise-live: var(--dsw-alias-state-success-primary, AccentColor);
 
   /* Type. The host serves a system sans; identifiers and numbers are this design's display face. */
   --reprise-font: var(--dsw-font-family, system-ui, -apple-system, 'PingFang SC', sans-serif);
@@ -111,27 +113,96 @@
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 0.75rem;
+  justify-content: space-between;
+  gap: 0.5rem 1.25rem;
   margin-bottom: 1.25rem;
   padding-bottom: 0.75rem;
   border-bottom: 1px solid var(--reprise-border-weak);
 }
 
-.reprise .masthead .meta {
+.reprise .masthead-run,
+.reprise .masthead-stamps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.375rem 0.75rem;
   min-width: 0;
-  color: var(--reprise-faint);
-  font-family: var(--reprise-mono);
-  font-size: 0.75rem;
-  /* A workspace path is one long unbroken token: it has to be allowed to break, or it sets the
-     page's minimum width and the 520px page scrolls sideways. */
-  overflow-wrap: anywhere;
 }
 
-.reprise .grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
-  gap: var(--reprise-gap);
-  align-items: start;
+/*
+ * The phase capsule: a dot and two words. The dot is decoration — running is a filled green-adjacent
+ * mark, stopped is the tertiary ink — and the state word beside it is what actually says which. A
+ * reader who cannot see the dot still reads `running` or `stopped`; that is why the word is not
+ * optional (and why no rule here may rely on hue alone).
+ */
+/*
+ * Named `phase-capsule` and not `phase`: the candidate inspector already owns `.phase` for its path of
+ * eight steps, and one class with two components behind it is how a later rule silently restyles the
+ * other one (the capsule rendered as a two-column grid until this was renamed).
+ */
+.reprise .phase-capsule {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  /* A phase name is one token (`ROUND_RUN`) and the state word beside it is the point of the capsule:
+     neither may wrap and turn a one-glyph read into a paragraph. */
+  white-space: nowrap;
+  padding: 0 0.4375rem;
+  border: 1px solid var(--reprise-border);
+  border-radius: 999px;
+  font-family: var(--reprise-mono);
+  font-size: 0.6875rem;
+  line-height: 1.5;
+}
+
+.reprise .phase-capsule-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--reprise-faint);
+}
+
+.reprise .phase-capsule[data-state='running'] .phase-capsule-dot {
+  background: var(--reprise-live);
+}
+
+.reprise .phase-capsule-name {
+  font-weight: 600;
+}
+
+.reprise .phase-capsule-state {
+  color: var(--reprise-dim);
+}
+
+.reprise .masthead-mode {
+  color: var(--reprise-faint);
+  font-size: 0.6875rem;
+}
+
+/*
+ * One stamp: its label and its value. The label is not optional — "17:15:30" alone does not say
+ * whether it is when the page last read or when the run last moved, and those are two different
+ * claims. `overflow-wrap` on the value is what keeps a workspace path from setting the page's
+ * minimum width (a 520px page must not scroll sideways).
+ */
+.reprise .stamp {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3125rem;
+  min-width: 0;
+}
+
+.reprise .stamp-label {
+  color: var(--reprise-faint);
+  font-size: 0.6875rem;
+}
+
+.reprise .stamp-value {
+  min-width: 0;
+  color: var(--reprise-dim);
+  font-family: var(--reprise-mono);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
 }
 
 .reprise .card {
@@ -250,25 +321,60 @@
   color: var(--reprise-dim);
 }
 
-/* --------------------------------------------------------------------- small components */
-
-.reprise .stats {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
-  gap: var(--reprise-gap);
-  margin: 0;
+/*
+ * The facts row under the conclusion sentence: the absolute change, what the domain published and our
+ * distance from it, and the direction of every objective. They were the body of the retired
+ * `Measured / published` card; they are not a card here, because they are not a subject of their own —
+ * they are the three numbers the sentence above cannot fit.
+ */
+.reprise .facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem 1.75rem;
+  margin: 0.75rem 0 0;
 }
 
-.reprise .stat dt {
+.reprise .fact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.375rem;
+  min-width: 0;
+}
+
+.reprise .fact dt {
   color: var(--reprise-faint);
   font-size: 0.6875rem;
 }
 
-.reprise .stat dd {
-  margin: 0.125rem 0 0;
+.reprise .fact dd {
+  margin: 0;
   font-family: var(--reprise-mono);
-  font-size: 0.9375rem;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
 }
+
+/* ------------------------------------------------------------------------ the strip */
+
+/*
+ * Warnings and notes are facts the run owes a reader — an executor that does not reserve GPUs, a
+ * config nobody recorded, a metric contract that cannot rank anything. They are loud: a full-width
+ * line under the conclusion, in the projection's own sentence, and they are not a card, because a
+ * card is something a reader consults and a warning is something they are told.
+ */
+.reprise .strips {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0 0 1.25rem;
+}
+
+/* An empty strip is not a gap: a run with nothing to declare simply has no strip. */
+.reprise .strips:empty {
+  display: none;
+}
+
+/* --------------------------------------------------------------------- small components */
 
 /*
  * The four gate states are told apart by their name and by the weight of their border, never by

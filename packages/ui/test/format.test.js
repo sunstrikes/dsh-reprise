@@ -20,7 +20,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { EM_DASH, change, clock, cursor, fixed, number, percent, stamp } from '../client/format.js'
+import { EM_DASH, change, clock, cursor, fixed, number, pathTail, percent, stamp } from '../client/format.js'
 
 /** A local wall clock the test can state exactly: 2026-10-22 14:36:48 in whatever zone this runs. */
 const LOCAL = new Date(2026, 9, 22, 14, 36, 48, 0).getTime()
@@ -81,6 +81,17 @@ test('the cursor becomes a time, a subject and a sequence instead of eighteen di
   assert.equal(cursor('1792679080000:r6-g1:8'), `${clock(1792679080000)} · r6-g1 · seq 8`)
   // A string that is not a cursor is still what the server called the cursor: pass it through.
   assert.equal(cursor('some-new-cursor-shape'), 'some-new-cursor-shape')
+})
+
+test('a workspace path is shortened to its last segments, and a short one is left alone', () => {
+  // Spec §6.1: the masthead names the workspace by its last three segments. The full path stays
+  // available on the element (`title`), because a shortened path nobody can recover is a path lost.
+  assert.equal(pathTail('/Users/sunminqi/code/x/design/ws/run'), '…/design/ws/run')
+  assert.equal(pathTail('/a/b/c/d'), '…/b/c/d')
+  assert.equal(pathTail('/tmp/reprise-ui'), '/tmp/reprise-ui', 'a path with nothing to cut is printed whole')
+  assert.equal(pathTail('/a/b/c'), '/a/b/c')
+  assert.equal(pathTail(undefined), EM_DASH)
+  assert.equal(pathTail(''), EM_DASH)
 })
 
 test('nothing absent ever prints as a number, a date, or the word undefined', () => {
