@@ -16,6 +16,7 @@
  */
 
 import { resolveConfig } from './config.js'
+import { runnerLayout } from './worktrees.js'
 
 const messageOf = (error) => (error instanceof Error ? error.message : String(error))
 
@@ -64,6 +65,53 @@ export function logFor(ctx, config = {}) {
 }
 
 /**
+ * What this host is running, as one object every surface can print.
+ *
+ * The motivating question is blunt: an operator looking at a boot log should be able to answer *what
+ * is this host running?* — which workspace it owns, which repository it branches candidates from,
+ * where their trees are created, and whether it will keep them — without reading the profile patch
+ * that produced it. Before this existed, the answer lived in three places (the patch, `workspace.js`'s
+ * constructor, `ports.js`'s runner) and the log printed one of them.
+ *
+ * @param {object} [config] a resolved configuration (`config.js`)
+ * @returns {{workspace: string|null, workspace_from: string|null, config_file: string|null,
+ *            repo: string|null, worktrees: string|null, base_ref: string|null, keep: boolean|null,
+ *            executor: string, candidate: string, rounds: 'on'|'off'}}
+ */
+export function describeRun(config = {}) {
+  const layout = runnerLayout({ workspaceDir: config.workspaceDir, runner: config.runner })
+  return {
+    workspace: config.workspaceDir ?? null,
+    workspace_from: config.workspaceSource ?? null,
+    config_file: typeof config.config_file === 'string' ? config.config_file : null,
+    repo: layout?.repoDir ?? null,
+    worktrees: layout?.worktreesDir ?? null,
+    base_ref: layout?.baseRef ?? null,
+    keep: layout === undefined ? null : layout.keep,
+    executor: config.executor?.kind ?? 'local',
+    candidate: config.candidate?.kind ?? 'none',
+    rounds: config.rounds === undefined || config.rounds === false ? 'off' : 'on',
+  }
+}
+
+/** The one log line `describeRun` renders to: a boot log is a place, not a paragraph. */
+export function describeRunLine(config) {
+  const run = describeRun(config)
+  const parts = [`workspace ${run.workspace ?? '(none)'}${run.workspace_from === null ? '' : ` (from ${run.workspace_from})`}`]
+  parts.push(
+    run.repo === null
+      ? 'no runner: nothing to branch candidates from'
+      : `repo ${run.repo} (branches from ${run.base_ref == null ? 'HEAD' : run.base_ref})`,
+  )
+  if (run.worktrees !== null) {
+    parts.push(`worktrees ${run.worktrees} (${run.keep === true ? 'kept: runner.keep' : 'prunable: runner.keep: false'})`)
+  }
+  parts.push(`executor ${run.executor}`, `candidate ${run.candidate}`, `rounds ${run.rounds}`)
+  if (run.config_file !== null) parts.push(`config_file ${run.config_file}`)
+  return `run: ${parts.join(' \u00b7 ')}`
+}
+
+/**
  * Resolve the configuration, report the verdict, and hand back the normalised config to mount.
  *
  * `undefined` means "do not tick" — not "something went wrong". Every refusal is already on the log,
@@ -89,6 +137,10 @@ export function resolveForHost(raw, log) {
     for (const problem of resolved.problems.slice(1)) log(`also not ticking: ${problem}`)
     return undefined
   }
+
+  // "What is this host running?" — answered from the resolved configuration, so the log cannot claim
+  // a workspace or a repository the run is not actually pointing at.
+  log(describeRunLine(resolved.config), describeRun(resolved.config))
 
   for (const warning of resolved.warnings) {
     log(`[${warning.severity}] ${warning.code}: ${warning.message}`, { code: warning.code, label: warning.label })

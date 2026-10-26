@@ -17,7 +17,7 @@
  */
 
 import { createWorkspace } from './workspace.js'
-import { logFor } from './boot.js'
+import { describeRun, logFor } from './boot.js'
 import { mountTick } from './host.js'
 
 export const name = 'reprise-tick'
@@ -50,13 +50,9 @@ export function apply(ctx, config = {}) {
     'reprise.dispose()',
   )
 
-  log('tick-applied', {
-    workspace: config.workspaceDir,
-    interval_ms: config.interval_ms,
-    executor: config.executor?.kind ?? 'local',
-    candidate: config.candidate?.kind ?? 'none',
-    rounds: config.rounds === undefined || config.rounds === false ? 'off' : 'on',
-  })
+  // The same "what is this run" object the boot half printed, now that the loop is actually ticking:
+  // one description, two moments, so a reader comparing them is comparing one derivation.
+  log('tick-applied', { ...describeRun(config), interval_ms: config.interval_ms })
 
   // Reconciliation is async (the platform is a network boundary), the interval is not. Starting the
   // interval before reconciliation finishes would let one tick run against facts nobody has checked

@@ -130,6 +130,25 @@ shape below, including the two path rules that cost a debugging round each.
     budget: { candidate_gpu_hours: 0.5, gpu_hours_limit: 0 }
 ```
 
+An operator who starts one run per task should not have to edit that patch at all. Both of these work
+without it, and they compose — the precedence is **inline `config` → `config_file` →
+environment**:
+
+- **One file per run.** Put `config_file: /path/to/run.json` in the patch's `config` (or point
+  `DSH_REPRISE_CONFIG` at it, for a launcher that writes no YAML). The file is read **at mount**,
+  once: it is the base configuration and any inline `config` key wins over it — a shallow merge, key
+  by key. `workspace` written *inside* that file resolves against **the file's own directory**, so a
+  file can sit next to the run it describes; every other path keeps the host-cwd rule below. A
+  missing, unreadable or non-JSON file is a named refusal on the boot log (path and parse error), never
+  a silent fallback to defaults.
+- **One environment variable.** `DSH_REPRISE_WORKSPACE` names the workspace when the configuration
+  does not; a relative value resolves against the host cwd, an absolute one is used as is. An inline
+  `workspace` still outranks it.
+
+Either way, the boot log's `run:` line answers *what is this host running?* in one line: the resolved
+workspace (and where it came from), the repository candidates branch from, where their worktrees are
+created, whether they are kept, and which file the configuration was read from.
+
 Restart the host (bundle lists are read at startup; with HMR a patch edit alone applies live). You are
 mounted when the log carries the boot half's `applied` line, then the tick half's `tick-applied`, the
 sidebar shows **Reprise**, and `reprise_status` is available to the model.
@@ -152,7 +171,8 @@ pack, and a pack missing a part is refused by name at boot instead of running ha
 
 | Field | Default | Meaning |
 |---|---|---|
-| `workspace` | **required** | directory the run owns; the fact plane is `workspace.db` inside it |
+| `workspace` | **required**, or `DSH_REPRISE_WORKSPACE` | directory the run owns; the fact plane is `workspace.db` inside it. Relative resolves against the host cwd; an absolute path is used as is |
+| `config_file` | — (or `DSH_REPRISE_CONFIG`) | one JSON run configuration file, read once at mount: the **base** configuration, with every inline key winning over it (a shallow, key-by-key merge). `workspace` inside the file resolves against the file's directory. A missing/malformed file is a named boot refusal |
 | `domain` | **required** | directory of the domain pack; no pack, no metric contract, no prompts |
 | `interval_ms` | `5000` | tick cadence |
 | `executor.kind` | the pack's | `local` (a subprocess) or `ray` (Job Submission REST) |
@@ -161,7 +181,8 @@ pack, and a pack missing a part is refused by name at boot instead of running ha
 | `executor.root_dir` / `metrics_required` | `'jobs'` / `true` | where job dirs live; a job without metrics is a failure |
 | `candidate.kind` | `'command'` | `command`, `claude` or `dsh` — the LAND implementer |
 | `candidate.command` | **required for `command`** | argv; `{candidate}` and `{worktree}` are substituted |
-| `runner.repo` / `runner.dir` | **required with `candidate`** | repo inside the workspace; where worktrees are created |
+| `runner.repo` / `runner.dir` | **required with `candidate`** | repo inside the workspace; where worktrees are created (`<workspace>/worktrees/<candidateId>`) |
+| `runner.keep` | `true` | retention. With `true` nothing in the kernel removes a candidate worktree; `false` removes nothing by itself either — it only allows the explicit `worktrees prune` |
 | `runner.base_ref` | git default | the commit candidates branch from, until the run rolls its code base (see `rounds.anchor`) |
 | `model.kind` | `'command'` | how a judgement reaches a model: `dsh` (`dsh --profile headless --json -`), `claude` (`claude -p --output-format stream-json --verbose`), or `command` for a wrapper of your own |
 | `model.command` | **required for `kind: command`** | the wrapper's argv: one JSON question on stdin, one JSON answer (a JSON object) on stdout |
@@ -206,8 +227,17 @@ Validation is `packages/core/lib/config.js` and it runs once at boot. The packag
 object, so the host holds no schema for the row: a bad config is a log line, never a boot failure. Two
 refusals are worth knowing before you hit them — `rounds` without `model.command`, and `candidate`
 without `runner` — because the alternative is a run that stalls at the first round instead of at boot.
-`metrics`, `stop`, `budget` and `executor` are copied into the workspace at INIT and read from there
-afterwards, so editing the patch mid-run changes nothing the dashboard reports.
+`metrics`, `stop`, `budget`, `executor` and `runner` are copied into the workspace at INIT and read
+from there afterwards, so editing the patch mid-run changes nothing the dashboard reports (and `dump`
+can still say where the worktrees went, from the workspace directory alone).
+
+**Candidate worktrees are kept, on purpose.** A landed candidate's tree lives at
+`<workspace>/<runner.dir>/<candidateId>` — the diff it was judged on *is* the files in that directory —
+so no phase, recovery path or cleanup routine removes one. `runner.keep` (default `true`) is the
+contract rather than the accident; `dump --candidate <id>` prints the path and whether it is still on
+disk, `worktrees list` is the inventory for the whole run, and `worktrees prune --candidate <id>` is
+the only thing that may remove a tree — it refuses a candidate that has not finished, an unknown id,
+and every candidate of a run that declared `keep: true`.
 
 <a id="what-it-adds"></a>
 ### What it adds
@@ -219,11 +249,12 @@ afterwards, so editing the patch mid-run changes nothing the dashboard reports.
 | HTTP routes | `GET /api/reprise/{overview,rounds,candidate,conclusion,calls,call}` | the four views and the model-call audit, each read through its own read-only handle |
 | Static assets | `GET /api/reprise/page`, `/api/reprise/dashboard.js` | a standalone page for a host with no client slots |
 | CLI | `node packages/core/lib/cli/run.js --workspace <dir> --config <file>` | the same wiring the host ticks, driven by a loop; exit 0 conclusion, 1 no comparable metric, 2 usage, 3 timeout |
-| CLI | `node packages/core/lib/cli/dump.js --candidate <id>` | timeline, every gate verdict, the gate chain step by step, identity bindings, frontier position, and why the run stopped |
+| CLI | `node packages/core/lib/cli/dump.js --candidate <id>` | timeline, every gate verdict, the gate chain step by step, the candidate's worktree path and whether it is still on disk, identity bindings, frontier position, and why the run stopped |
 | CLI | `node packages/core/lib/cli/dump.js --overview` | the workspace page: cards and queue, the best result, and the measured/published comparison |
 | CLI | `node packages/core/lib/cli/dump.js --calls` / `--call <ref>` | the model-call audit, and one call with its prompt and response verbatim |
 | CLI | `node packages/core/lib/cli/intents.js place <kind>` / `list` | human intents (`proposal`, `grant`, `anchor`, `pause`, `resume`, `approval`, `experience`) written into `<workspace>/pending/` |
 | CLI | `node packages/core/lib/cli/jobs.js list` / `reap --job <id>` | the cluster job ledger: our jobs as the cluster lists them, the orphans (our marker, no ledger row), and the only way an orphan is ever stopped |
+| CLI | `node packages/core/lib/cli/worktrees.js list` / `prune --candidate <id>` | `list`: one row per candidate — round, phase, files landed, whether the tree is on disk, its path. `prune`: the only way a worktree is ever removed (`git worktree remove` plus a `worktree_pruned` fact), and only when the run declared `runner.keep: false` |
 | Skills | `<domain>/prompts/{land,verify,cand-analyze,round-plan,round-reflect}/SKILL.md` | what the model is told at each of the five call sites; markdown on disk, part of the domain pack, read fresh on every call — **not** DSH skills and not registered as such |
 
 The bundle provides no service and emits no event: it consumes `timer`, `connection` and `tools`.
