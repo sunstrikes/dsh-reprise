@@ -183,7 +183,7 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 | 模型工具 | `reprise_status` | 运行进度以 JSON 返回，只读，取自页面绘制所用的同一份投影 |
 | 侧边栏面板 | `sidebar.panellist` id `reprise`，order `25`，外加 `main` key `reprise` | **Reprise** 按钮（zh: 复现）以及它打开的页面；文案跟随当前语言（`en`、`zh`） |
 | HTTP 路由 | `GET /api/reprise/{overview,rounds,candidate,conclusion,calls,call}` | 四个视图与模型调用审计，各自通过自己的只读句柄读取 |
-| 静态资源 | `GET /api/reprise/page`、`/api/reprise/dashboard.js` | 给没有客户端 slot 的宿主用的独立页面 |
+| 静态资源 | `GET /api/reprise/page`、`/api/reprise/dashboard.js`、`/api/reprise/format.js` | 给没有客户端 slot 的宿主用的独立页面，以及页面与面板共用的格式化模块 |
 | CLI | `node packages/core/lib/cli/run.js --workspace <dir> --config <file>` | 与宿主 tick 的同一套接线，由循环驱动；退出码 0 表示有结论、1 表示没有可比的指标、2 用法错误、3 超时 |
 | CLI | `node packages/core/lib/cli/dump.js --candidate <id>` | 时间线、每个闸门的结论、身份绑定、前沿（frontier）位置，以及运行为什么停下来 |
 | CLI | `node packages/core/lib/cli/intents.js place <kind>` / `list` | 人的意图（`proposal`、`grant`、`anchor`、`pause`、`resume`、`approval`、`experience`）写入 `<workspace>/pending/` |

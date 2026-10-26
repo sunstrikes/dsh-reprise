@@ -217,7 +217,7 @@ afterwards, so editing the patch mid-run changes nothing the dashboard reports.
 | Model tool | `reprise_status` | the run's progress as JSON, read-only, from the same projection the page draws |
 | Sidebar panel | `sidebar.panellist` id `reprise`, order `25`, plus `main` key `reprise` | the **Reprise** button (zh: 复现) and the page it opens; labels follow the active language (`en`, `zh`) |
 | HTTP routes | `GET /api/reprise/{overview,rounds,candidate,conclusion,calls,call}` | the four views and the model-call audit, each read through its own read-only handle |
-| Static assets | `GET /api/reprise/page`, `/api/reprise/dashboard.js` | a standalone page for a host with no client slots |
+| Static assets | `GET /api/reprise/page`, `/api/reprise/dashboard.js`, `/api/reprise/format.js` | a standalone page for a host with no client slots, with the formatting module the page and the panel share |
 | CLI | `node packages/core/lib/cli/run.js --workspace <dir> --config <file>` | the same wiring the host ticks, driven by a loop; exit 0 conclusion, 1 no comparable metric, 2 usage, 3 timeout |
 | CLI | `node packages/core/lib/cli/dump.js --candidate <id>` | timeline, every gate verdict, the gate chain step by step, identity bindings, frontier position, and why the run stopped |
 | CLI | `node packages/core/lib/cli/dump.js --overview` | the workspace page: cards and queue, the best result, and the measured/published comparison |
