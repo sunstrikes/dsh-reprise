@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "files": ["model/structure.json"],
+  "keys": ["hidden_units", "field_crosses", "l2", "epochs"],
+  "symbols": [],
+  "note": "The adjustable surface: the only file a candidate may edit, and the knobs inside it that a structural hypothesis may move. `files` is the path whitelist gate two checks a candidate's git diff against; `keys` names the knobs (this lab model reads them out of model/structure.json) and `symbols` would name source symbols in a domain where a hypothesis edits code. `priors.json` says which values each knob may take and why — this file says which knobs exist at all. A change outside this surface is out of bounds, not merely unlikely: an adjuster that can edit the evaluation cannot be compared to one that cannot."
+}

@@ -1,19 +1,121 @@
+/**
+ * The fact plane: one SQLite file per workspace, and the rules that make it a fact plane.
+ *
+ * Three of them are worth naming at the top of the file:
+ *
+ *  1. **The `user_version` pragma is the version, and migrations are sequential and append-only.** A
+ *     workspace is opened once at whatever shape it was last left in and brought forward in place;
+ *     nobody has to guess which version a directory is (user story 35). A fresh file and a released
+ *     v1 file both leave `Store.open` at the current shape, with every fact the old file held intact.
+ *  2. **Event identity is the pair `(candidate_id, local_seq)`**, and re-appending one is
+ *     `inserted | duplicate | conflict` — never a silent overwrite.
+ *  3. **The database refuses what the contract forbids** (insert-only bindings), rather than relying
+ *     on every caller to remember.
+ */
+
 import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 
-import { MAX_EVENT_BYTES, PayloadTooLargeError, Store } from '../lib/store.js'
+import { DB_FILENAME, MAX_EVENT_BYTES, PayloadTooLargeError, Store } from '../lib/store.js'
 
 const AT = 1_761_091_200_000
 const workspace = () => mkdtempSync(join(tmpdir(), 'reprise-ws-'))
 
 const openStore = () => Store.open(workspace())
 
+/**
+ * A workspace as the released v1 wrote it: `MIGRATIONS[0]`, copied verbatim and then frozen.
+ *
+ * Copied rather than imported on purpose (user story 35: "顺序 migration 加版本号，不需要猜某个工作区
+ * 是哪个版本"). The migration list is append-only, so this text is what a v1 file on somebody's disk
+ * *is*; importing it would make the fixture follow the code and the test would pass even after a
+ * released migration was edited. Never change this string.
+ */
+const V1_DDL = `
+  CREATE TABLE events (
+    candidate_id  TEXT    NOT NULL,
+    local_seq     INTEGER NOT NULL,
+    wall_clock_ms INTEGER NOT NULL,
+    event_type    TEXT    NOT NULL,
+    payload       TEXT    NOT NULL,
+    PRIMARY KEY (candidate_id, local_seq)
+  ) WITHOUT ROWID;
+
+  CREATE INDEX events_by_time ON events (wall_clock_ms, candidate_id, local_seq);
+
+  CREATE TABLE workspace_state (
+    key        TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL
+  );
+
+  CREATE TABLE candidate_state (
+    candidate_id TEXT NOT NULL,
+    key          TEXT NOT NULL,
+    value_json   TEXT NOT NULL,
+    PRIMARY KEY (candidate_id, key)
+  );
+
+  CREATE TABLE candidate_bindings (
+    candidate_id TEXT    NOT NULL,
+    kind         TEXT    NOT NULL,
+    value_json   TEXT    NOT NULL,
+    frozen_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (candidate_id, kind)
+  );
+
+  CREATE TRIGGER candidate_bindings_no_update
+  BEFORE UPDATE ON candidate_bindings
+  BEGIN SELECT RAISE(ABORT, 'candidate_bindings is insert-only'); END;
+
+  CREATE TRIGGER candidate_bindings_no_delete
+  BEFORE DELETE ON candidate_bindings
+  BEGIN SELECT RAISE(ABORT, 'candidate_bindings is insert-only'); END;
+
+  CREATE TABLE jobs (
+    job_id           TEXT PRIMARY KEY,
+    candidate_id     TEXT    NOT NULL,
+    submission_id    TEXT    NOT NULL,
+    harness          TEXT    NOT NULL,
+    submitted_at_ms  INTEGER NOT NULL,
+    deadline_ms      INTEGER NOT NULL,
+    last_polled_at_ms INTEGER,
+    next_poll_at_ms  INTEGER NOT NULL DEFAULT 0,
+    state            TEXT    NOT NULL,
+    error_class      TEXT,
+    attempts         INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE UNIQUE INDEX jobs_by_submission ON jobs (submission_id);
+  CREATE INDEX jobs_by_candidate ON jobs (candidate_id);
+
+  CREATE TABLE ledger (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_id TEXT    NOT NULL,
+    kind         TEXT    NOT NULL,
+    gpu_hours    REAL    NOT NULL,
+    tokens       INTEGER NOT NULL DEFAULT 0,
+    at_ms        INTEGER NOT NULL
+  );
+
+  CREATE INDEX ledger_by_candidate ON ledger (candidate_id, kind);
+
+  CREATE TABLE ops_log (
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    at_ms  INTEGER NOT NULL,
+    op     TEXT    NOT NULL,
+    detail TEXT    NOT NULL
+  );
+`
+
 test('a fresh workspace is migrated to the current version', () => {
   const store = openStore()
-  assert.equal(store.version, 1, 'a new file must already be at the version this kernel speaks')
+  // 2 = ticket 16's job-ledger identity columns (round, marker, outcome) on top of the initial
+  // shape; 3 = ticket 30's `kind`, which says what a job is for.
+  assert.equal(store.version, 3, 'a new file must already be at the version this kernel speaks')
   const tables = store.db
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
     .all()
@@ -21,6 +123,9 @@ test('a fresh workspace is migrated to the current version', () => {
   for (const table of ['candidate_bindings', 'candidate_state', 'events', 'jobs', 'ledger', 'ops_log', 'workspace_state']) {
     assert.ok(tables.includes(table), `${table} must exist`)
   }
+  // Migration 3: the ledger says what a job is for, so a baseline job is not read as a candidate.
+  const jobColumns = store.db.prepare('PRAGMA table_info(jobs)').all().map((column) => column.name)
+  assert.ok(jobColumns.includes('kind'), 'jobs.kind must exist, with candidate as the default for old rows')
   store.close()
 })
 
@@ -28,7 +133,82 @@ test('re-opening an existing workspace is a no-op, not a re-migration', () => {
   const dir = workspace()
   Store.open(dir).close()
   const again = Store.open(dir)
-  assert.equal(again.version, 1)
+  assert.equal(again.version, 3)
+  again.close()
+})
+
+test('a v1 workspace is brought forward in place, and every fact it held survives the migration', () => {
+  const dir = workspace()
+  const path = join(dir, DB_FILENAME)
+
+  // A file the released v1 left behind: its own shape, its own version, and rows a user's round
+  // already depends on. Written with the raw driver because `Store` speaks only the current version.
+  const v1 = new DatabaseSync(path)
+  v1.exec(V1_DDL)
+  v1.exec('PRAGMA user_version = 1')
+  const eventPayload = JSON.stringify({ round: 1, hypothesis: 'widen the embedding table', seeds: [11, 12] })
+  v1.prepare('INSERT INTO events (candidate_id, local_seq, wall_clock_ms, event_type, payload) VALUES (?, ?, ?, ?, ?)').run(
+    'r1-h1',
+    1,
+    AT,
+    'candidate_created',
+    eventPayload,
+  )
+  v1.prepare(
+    `INSERT INTO jobs (job_id, candidate_id, submission_id, harness, submitted_at_ms, deadline_ms,
+                       last_polled_at_ms, next_poll_at_ms, state, error_class, attempts)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run('raysubmit_0001', 'r1-h1', 'r1-h1', 'ray', AT, AT + 86_400_000, AT + 500, AT + 1_000, 'running', null, 2)
+  v1.prepare('INSERT INTO ops_log (at_ms, op, detail) VALUES (?, ?, ?)').run(AT, 'round_planned', JSON.stringify({ round: 1 }))
+  v1.close()
+
+  const store = Store.open(dir)
+  // The head is whatever a brand-new workspace is at, so this does not need editing every time a
+  // released migration appends a version (it is 3 today: 2 = ticket 16's round/marker/outcome,
+  // 3 = ticket 30's `kind`). A v1 file must walk the whole chain and arrive where a new file is.
+  const fresh = Store.open(workspace())
+  const headVersion = fresh.version
+  fresh.close()
+  assert.equal(store.version, headVersion, 'the file was migrated forward, not recreated at the current shape')
+  assert.ok(headVersion >= 2, 'v1 is behind the head, so this test is really testing a migration')
+
+  // The new columns exist, and an old row has no value in them: v1 never knew about rounds as a
+  // column, or about the outcome of a job, and inventing a value would be a fact nobody wrote.
+  const columns = store.db
+    .prepare('PRAGMA table_info(jobs)')
+    .all()
+    .map((column) => column.name)
+  for (const column of ['round', 'marker', 'outcome']) assert.ok(columns.includes(column), `jobs.${column} must exist after migrating`)
+  const job = store.jobFor('r1-h1')
+  assert.equal(job.round, null)
+  assert.equal(job.marker, null)
+  assert.equal(job.outcome, null)
+  // Migration 3 added `kind` with a default rather than a null: a v1 row *is* a candidate job, and
+  // the default is the only claim the migration is allowed to make about it.
+  assert.equal(job.kind, 'candidate')
+
+  // The old rows are the old rows — same text, same identity, not a re-serialisation of them.
+  const raw = store.db.prepare('SELECT payload FROM events WHERE candidate_id = ? AND local_seq = ?').get('r1-h1', 1)
+  assert.equal(raw.payload, eventPayload, 'the payload column is byte-for-byte what v1 wrote')
+  const event = store.eventsFor('r1-h1')[0]
+  assert.equal(event.event_type, 'candidate_created')
+  assert.deepEqual(event.payload, JSON.parse(eventPayload))
+  assert.equal(job.job_id, 'raysubmit_0001')
+  assert.equal(job.submission_id, 'r1-h1')
+  assert.equal(job.state, 'running')
+  assert.equal(job.attempts, 2)
+  assert.equal(job.deadline_ms, AT + 86_400_000)
+  assert.equal(store.ops()[0].op, 'round_planned')
+
+  // And it is a current-version workspace from here on: the columns the migrations added are
+  // writable, and reopening does not migrate a second time.
+  store.updateJob('raysubmit_0001', { outcome: 'succeeded' })
+  assert.equal(store.jobFor('r1-h1').outcome, 'succeeded')
+  store.close()
+  const again = Store.open(dir)
+  assert.equal(again.version, headVersion)
+  assert.equal(again.jobFor('r1-h1').outcome, 'succeeded', 'the second open did not undo anything')
+  assert.equal(again.eventsFor('r1-h1').length, 1)
   again.close()
 })
 

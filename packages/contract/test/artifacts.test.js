@@ -59,7 +59,7 @@ test('milliseconds are enforced: seconds and nanoseconds are rejected', () => {
 test('a vendor can add a kind without touching the kernel', () => {
   // Nothing below is exported from index.js; the point is that registration is enough.
   const before = artifactKinds().length
-  assert.equal(before, 3)
+  assert.equal(before, 4, 'the four kinds this package defines: three phase artifacts and the windowed sample series')
 })
 test('artifact schema_version is per-kind and rejects a version this kernel cannot speak', () => {
   const base = casesFor('verify_verdict').find((entry) => entry.expect === 'ok').artifact

@@ -95,6 +95,11 @@ little" does not change that.
   `examples/feed-structure/lab/metric.mjs`. No real dataset, no scraped content, no third-party weights.
 - **A predecessor's dataset and checkpoints.** None exist in this repository, and the example needs
   none: it trains on a seeded synthetic dataset.
+- **The generative-recommenders domain pack's upstream.** `examples/generative-recommenders` ships
+  only our own JSON, markdown and a stdlib-only metric reader. It points at
+  https://github.com/meta-recsys/generative-recommenders (Apache-2.0) and quotes its published numbers
+  with the file and section they came from; no upstream source, dataset or checkpoint is copied in, and
+  the pack's executor runs a checkout the operator supplies.
 
 ## 6. Trademark and naming
 

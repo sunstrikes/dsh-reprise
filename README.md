@@ -28,15 +28,17 @@ kind: "package-bundle"
 </div>
 
 > A DeepSeek Harness bundle: reproduce a published number, then iterate on the reproduction under
-> control — deterministic phases, a baseline frozen at INIT, a spend ledger that reserves before it
-> spends, and a stop decision computed from recorded facts rather than remembered intent.
+> control — deterministic phases, a baseline the run measures itself and then freezes, a spend ledger
+> that reserves before it spends, and a stop decision computed from recorded facts rather than
+> remembered intent.
 
 <a id="summary"></a>
 ## Summary
 
 `dsh-reprise` reproduces a published experiment and then iterates on that reproduction under control:
-deterministic phases, a baseline frozen at INIT, a budget that reserves before it spends, and a stop
-decision computed from recorded facts instead of remembered intent.
+deterministic phases, a baseline the run measures with the same executor path a candidate takes and
+then freezes, a budget that reserves before it spends, and a stop decision computed from recorded facts
+instead of remembered intent.
 
 A candidate is **a structural hypothesis plus the batch of code changes it needs to land** — not a
 hyperparameter value. The loop is ordinary code; the model is consulted in exactly five places, and
@@ -44,7 +46,7 @@ what it says enters the fact plane only as an artifact a validator has accepted.
 
 Mounting the bundle adds three surfaces and nothing else: a tick that advances the phase machine in a
 workspace nobody has open, a `reprise_status` tool that reads the same projection from inside a
-conversation, and a **Reprise** panel in the sidebar (backed by six read-only GET routes). It does
+conversation, and a **Reprise** panel in the sidebar (backed by eight read-only GET routes). It does
 not touch your repository, does not open a port, and does not call a model unless you name one in
 `model.command`.
 
@@ -104,8 +106,8 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 ```
 
 Then supply your own configuration. **The shipped patch has no `config` block at all**: a run cannot
-start without a `workspace`, and every path a real config needs belongs to the machine that owns the
-run. Add an entry that targets `reprise-core` by id and restate the whole config — a matching override
+start without a `workspace` and a `domain` pack, and every path a real config needs belongs to the
+machine that owns the run. Add an entry that targets `reprise-core` by id and restate the whole config — a matching override
 *replaces* `config` wholesale rather than deep-merging it. Put it in your profile's
 `cordis.patch.yml` (or `$DSH_HOME/cordis.patch.yml`, which outranks the profile layer);
 [`packages/core/cordis.example.yml`](packages/core/cordis.example.yml) is the filled-in version of the
@@ -116,10 +118,8 @@ shape below, including the two path rules that cost a debugging round each.
   name: dsh-reprise
   config:
     workspace: /absolute/path/to/my-run      # required; created facts live here
+    domain: /absolute/path/to/my-domain-pack # required; the metric contract, priors, surface, prompts, executor
     interval_ms: 5000
-    executor:
-      kind: local
-      command: ['node', 'train.mjs']         # one process per job, run inside the candidate worktree
     candidate:
       kind: command
       command: ['node', '/absolute/path/to/apply-change.mjs', '{candidate}']
@@ -144,35 +144,63 @@ packet as a `dsh-mnemon` Source. Nothing in `packages/core` imports it.
 
 ### Configure it
 
-Everything domain-specific is data. The kernel does not know what AUC means, which direction is
-better, or what a "capacity" hypothesis is.
+Everything domain-specific is data, and it lives in a **domain pack** — a directory whose
+`domain.json` names its metric contract, its priors, its adjustable-surface whitelist, its five
+prompts and its executor entry ([`examples/feed-structure`](examples/feed-structure) is a complete
+one). The kernel does not know a metric name, a model repository or a prompt; it reads them from the
+pack, and a pack missing a part is refused by name at boot instead of running half-configured.
 
 | Field | Default | Meaning |
 |---|---|---|
 | `workspace` | **required** | directory the run owns; the fact plane is `workspace.db` inside it |
+| `domain` | **required** | directory of the domain pack; no pack, no metric contract, no prompts |
 | `interval_ms` | `5000` | tick cadence |
-| `executor.kind` | `'local'` | `local` (a subprocess) or `ray` (Job Submission REST) |
-| `executor.command` | **required for `local`** | argv of one job, resolved inside the candidate worktree |
+| `executor.kind` | the pack's | `local` (a subprocess) or `ray` (Job Submission REST) |
+| `executor.command` | the pack's, **required for `local`** | argv of one job, resolved inside the candidate worktree |
 | `executor.base_url` | **required for `ray`** | Ray dashboard URL |
 | `executor.root_dir` / `metrics_required` | `'jobs'` / `true` | where job dirs live; a job without metrics is a failure |
 | `candidate.kind` | `'command'` | `command`, `claude` or `dsh` — the LAND implementer |
 | `candidate.command` | **required for `command`** | argv; `{candidate}` and `{worktree}` are substituted |
 | `runner.repo` / `runner.dir` | **required with `candidate`** | repo inside the workspace; where worktrees are created |
-| `runner.base_ref` | git default | the commit candidates branch from |
-| `model.command` | **required if `rounds` is set** | every judgement phase reaches a model through this argv |
-| `skills_dir` | `<repo>/skills/` | where the five `SKILL.md` files are read from |
-| `rounds.metric.name` / `.direction` | **required** / `'higher'` | the one metric the round gate optimises |
-| `rounds.metric.contract_ref` | the metric name | pointer to the frozen metric contract |
+| `runner.base_ref` | git default | the commit candidates branch from, until the run rolls its code base (see `rounds.anchor`) |
+| `model.kind` | `'command'` | how a judgement reaches a model: `dsh` (`dsh --profile headless --json -`), `claude` (`claude -p --output-format stream-json --verbose`), or `command` for a wrapper of your own |
+| `model.command` | **required for `kind: command`** | the wrapper's argv: one JSON question on stdin, one JSON answer (a JSON object) on stdout |
+| `model.timeout_ms` | `600000` | how long one judgement may take before it is killed — a phase never waits for a model without a deadline |
+| `rounds.metric.name` / `.direction` | derived from the metric contract | the one metric the round gate optimises; restating it is how a run points at a different objective, and a restatement that disagrees with `metrics` is warned about |
+| `rounds.metric.contract_ref` | the contract's `name` | pointer to the frozen metric contract |
 | `rounds.max_rounds` / `.candidates_per_round` | `3` / `2` | round workflow shape |
+| `rounds.anchor` | `'automatic'` | who may roll the code base forward: `automatic` applies the double-domination rule between rounds (a candidate must dominate both the current anchor and the frozen baseline); `human` files a proposal under `anchor-pending/` and waits for `dsh-reprise intents anchor --candidate-id … --commit …`. Neither mode moves the differential denominator |
 | `rounds.retry.base_ms` / `.max_ms` / `.max_attempts` | `60000` / `3600000` / `3` | backoff for a refused artifact, then a human |
 | `stop.max_rounds` | `3` | `0` disables the rule |
 | `stop.max_no_improvement_rounds` / `.consecutive_empty_rounds` | `0` (off) | opt-in stop rules |
+| `stop.max_wall_hours` / `.max_windows` | `0` (off) | workspace-level ceilings: the run ends when it has been open this long, or has measured this many windows — a conclusion on `_workspace`, unlike a candidate rejection |
+| `stop.regression_windows` / `.regression_floor` | `0` (off) / `0` | kill a candidate worse than the baseline in each of the trailing N windows; the floor may raise a tolerance, never lower one |
 | `budget.gpu_hours_limit` | `0` (unlimited) | hard cap; an uncapped remote executor is warned about, every read |
 | `budget.soft_ratio` / `.candidate_gpu_hours` | `0.8` / `0.5` | stop dispatching at this fraction; what a dispatch reserves |
 | `budget.max_runtime_hours` / `.judge_tokens` | `0` (unlimited) / `false` | wall-clock gate; tokens are recorded, never judged |
-| `metrics.primary` / `.objectives` | — | recorded at INIT; cross-checked against the round contract |
+| `metrics` | the pack's whole contract | one account of "better" — `primary`, `objectives`, `guardrail`, `minimum_effective_delta`, `window_mode` — resolved by `packages/core/lib/metric-contract.js` for the ranking, the stop rules and the gate; a partial or self-contradictory restatement is refused at boot |
 | `poll.base_ms` / `.max_ms` / `.grace_attempts` | `1000` / `60000` / `2` | job poll backoff |
+| `gate.max_attempts` / `.base_ms` / `.max_ms` | `3` / `1000` / `60000` | how many times gate two may run before a candidate stops, and the backoff between attempts; `1` restores a single shot |
 | `limits.max_wall_ms` / `.max_idle_ms` | `3600000` / `1800000` | per-job wall-clock and silence deadlines |
+
+One of `model.kind` and `model.command` must be there when `rounds` is set; the five call sites are the
+only places a model is consulted, and they all go through this one adapter —
+[`packages/exec/lib/model.js`](packages/exec/lib/model.js). It sends one structured question
+(`{protocol, call_site, subject, prompt, facts, answer_schema, question_id}`), accepts one JSON object
+back (a bare object, a stream's final message, or a fenced block inside prose), and reports **one**
+failure class — `model_unavailable` — for all four ways of getting no answer: a missing binary, a
+non-zero exit, a timeout, an unreadable reply. A judgement never becomes "the review said reject" and
+a phase never sits waiting: the outage is recorded once in the ops log
+(`store.ops()` → `model_unavailable`, with the cause beside it) and the phase is retried on a backoff
+(1 min doubling to 1 h).
+
+Every call is also filed where a reader can see the originals — including LAND's briefing of the
+implementer, which is `model_call/land/<candidate>.json`: `<workspace>/artifacts/model_call/<call
+site>/<subject>[/<ref>].json`, holding `prompt`, `facts`, `answer_schema`, `answer` (the parsed
+object), `response` (the words the model actually returned), and `status` / `error_class` / `cause` /
+`message` when no answer arrived. The record has no timestamp and no counter — its identity is the
+question's own `question_id` — so asking the same question twice rewrites the same bytes instead of
+appending a second history. That is the record the audit panel (ticket 29) reads.
 
 Validation is `packages/core/lib/config.js` and it runs once at boot. The package exports no `Config`
 object, so the host holds no schema for the row: a bad config is a log line, never a boot failure. Two
@@ -188,12 +216,15 @@ afterwards, so editing the patch mid-run changes nothing the dashboard reports.
 |---|---|---|
 | Model tool | `reprise_status` | the run's progress as JSON, read-only, from the same projection the page draws |
 | Sidebar panel | `sidebar.panellist` id `reprise`, order `25`, plus `main` key `reprise` | the **Reprise** button (zh: 复现) and the page it opens; labels follow the active language (`en`, `zh`) |
-| HTTP routes | `GET /api/reprise/{overview,rounds,candidate,conclusion}` | the four views, each read through its own read-only handle |
+| HTTP routes | `GET /api/reprise/{overview,rounds,candidate,conclusion,calls,call}` | the four views and the model-call audit, each read through its own read-only handle |
 | Static assets | `GET /api/reprise/page`, `/api/reprise/dashboard.js` | a standalone page for a host with no client slots |
 | CLI | `node packages/core/lib/cli/run.js --workspace <dir> --config <file>` | the same wiring the host ticks, driven by a loop; exit 0 conclusion, 1 no comparable metric, 2 usage, 3 timeout |
-| CLI | `node packages/core/lib/cli/dump.js --candidate <id>` | timeline, every gate verdict, identity bindings, frontier position, and why the run stopped |
+| CLI | `node packages/core/lib/cli/dump.js --candidate <id>` | timeline, every gate verdict, the gate chain step by step, identity bindings, frontier position, and why the run stopped |
+| CLI | `node packages/core/lib/cli/dump.js --overview` | the workspace page: cards and queue, the best result, and the measured/published comparison |
+| CLI | `node packages/core/lib/cli/dump.js --calls` / `--call <ref>` | the model-call audit, and one call with its prompt and response verbatim |
 | CLI | `node packages/core/lib/cli/intents.js place <kind>` / `list` | human intents (`proposal`, `grant`, `anchor`, `pause`, `resume`, `approval`, `experience`) written into `<workspace>/pending/` |
-| Skills | `skills/{land,verify,cand-analyze,round-plan,round-reflect}/SKILL.md` | what the model is told at each of the five call sites; markdown on disk, read fresh on every call — **not** DSH skills and not registered as such |
+| CLI | `node packages/core/lib/cli/jobs.js list` / `reap --job <id>` | the cluster job ledger: our jobs as the cluster lists them, the orphans (our marker, no ledger row), and the only way an orphan is ever stopped |
+| Skills | `<domain>/prompts/{land,verify,cand-analyze,round-plan,round-reflect}/SKILL.md` | what the model is told at each of the five call sites; markdown on disk, part of the domain pack, read fresh on every call — **not** DSH skills and not registered as such |
 
 The bundle provides no service and emits no event: it consumes `timer`, `connection` and `tools`.
 Every route is `GET`; there is no write endpoint to reach for, including one that would let the page
@@ -224,17 +255,20 @@ node examples/feed-structure/init.mjs .workspace/feed
 
 A real setup, not a fixture: it copies the toy model repository, commits it (candidates branch from that
 commit), freezes a sha256 manifest of what the run starts from, and measures the baseline by running
-`metric.mjs` through the actual local executor.
+`metric.mjs` through the actual local executor. That number is a cross-check: the run measures its own
+baseline at the BASELINE phase — submit, wait, collect — and freezes it as a fact, so the denominator
+comes from the same executor run as everything compared against it.
 
-### Step 3 — look at the four files you own
+### Step 3 — look at the domain pack you own
 
 ```
 node examples/feed-structure/inspect.mjs
 ```
 
-The metric contract (direction and role), the priors and hypothesis classes, this round's structural
-hypotheses, and the wiring. Changing any of them is a configuration change; the kernel knows nothing
-about AUC, clicks, or your model.
+The pack manifest, the metric contract (direction and role), the adjustable-surface whitelist, the
+priors and hypothesis classes, this round's structural hypotheses, the executor entry and the wiring.
+Changing any of them is a configuration change; the kernel knows nothing about AUC, clicks, or your
+model.
 
 ### Step 4 — run the loop
 
@@ -242,8 +276,8 @@ about AUC, clicks, or your model.
 node packages/core/lib/cli/run.js --workspace .workspace/feed --config examples/feed-structure/config.json
 ```
 
-One line per phase step, then the winner, its metric, the baseline it beat, and the rule that ended the
-run. This is the same wiring the host plugin uses — `workspace.js` and `tick()` — driven by a loop
+One line per phase step — including the baseline job it submits and the windowed samples it freezes —
+then the winner, its metric, the baseline it beat, and the rule that ended the run. This is the same wiring the host plugin uses — `workspace.js` and `tick()` — driven by a loop
 instead of by the host's timer, so what you just watched is the plugin's behaviour.
 
 ### Step 5 — ask why
@@ -315,6 +349,12 @@ shipped code is plain ESM with no build step.
   `round_reflect`. Each call is a separate process with a prompt rendered from a markdown skill plus
   facts as JSON; the answer shape lives in code next to its parser, so a markdown example cannot drift
   away from what the judge accepts.
+- **Gate two consumes a structured verdict, not an opinion.** The candidate's diff is checked by the
+  kernel — syntax, the domain pack's adjustable-surface whitelist, residual conflict markers — and the
+  adversarial review must answer accept or reject; an answer that does not parse is a failure. When the
+  review accepts over a check that failed the record is a `conflict` and the candidate stops. Each
+  attempt is a numbered record carrying the sha256 of the bytes it checked, so it can be recomputed
+  rather than trusted, and a plain "no" is retried on a backoff instead of killing the candidate.
 - **Read-only is structural, not a promise.** Every read opens its own `readOnly` SQLite handle and
   closes it: the tool physically cannot record a fact, two browser windows cannot interfere, and the
   page works with every session closed — it needs the workspace directory and nothing else.
@@ -335,8 +375,8 @@ shipped code is plain ESM with no build step.
 | `packages/memory` | the injection packet, exposed as a `dsh-mnemon` Source |
 | `packages/ui` | read-only dashboard: host-side projections over routes, plus a plain-ESM client |
 | `packages/exec-python` | optional proxy-metric bridge (needs torch) — manifest only, no code yet |
-| `skills/` | the five call-site skills: markdown, meant to be edited by whoever owns the domain |
-| `examples/feed-structure` | a worked scenario: metric contract, priors, structural hypotheses, local metric |
+| `examples/feed-structure` | a complete domain pack and a worked scenario: `domain.json` plus the metric contract, priors, adjustable surface, five prompts, executor entry, structural hypotheses and a local metric |
+| `examples/generative-recommenders` | a domain pack for someone else's repository (HSTU in meta-recsys/generative-recommenders): metric contract with a tolerance and a guardrail, cited priors, a verified surface whitelist, five prompts and the job's metric reader — data and prompts only, no kernel change |
 
 Dependency direction is acyclic by package name: `contract` depends on nothing here; `exec` and
 `memory` depend on `contract`; `core` depends on all three. One deliberate exception: `ui` reads
@@ -350,9 +390,11 @@ a *write* handle to the fact plane, and a relative import of the read-only reade
 
 - [`CONTEXT.md`](CONTEXT.md) — the ten words the code depends on, with the precise meaning it assumes
 - [`docs/extending.md`](docs/extending.md) — add an executor; add an artifact kind
+- [`docs/windowed-samples.md`](docs/windowed-samples.md) — the one-row-per-window sample shape, its two adapters, and the window intersection rule
 - [`docs/license-audit.md`](docs/license-audit.md) — every dependency and borrowed idea, against Apache-2.0
 - [`docs/adr/0001-acceptance-is-a-reproduced-public-experiment.md`](docs/adr/0001-acceptance-is-a-reproduced-public-experiment.md) — what "done" means for this project
 - [`examples/feed-structure/README.md`](examples/feed-structure/README.md) — the worked scenario in detail
+- [`examples/generative-recommenders/README.md`](examples/generative-recommenders/README.md) — the second pack, and the human-review checklist it ships with
 - [`CODING_STANDARDS.md`](CODING_STANDARDS.md) — how to review a diff here
 
 <a id="model-experience"></a>
@@ -370,7 +412,7 @@ trimmed to six facts and ten frontier members; when a workspace has no facts yet
 stream is never a tool result.
 
 Inside the loop, the model is a subprocess: at each of the five call sites it reads one `SKILL.md` from
-disk plus JSON facts (candidate identity, L1 check results, the metrics the monitor reported), and
+the domain pack plus JSON facts (candidate identity, L1 check results, the metrics the monitor reported), and
 answers in a wire format the judge parses. It is never handed the fact plane, a session, or another
 candidate's outcome.
 
@@ -378,8 +420,8 @@ candidate's outcome.
 
 Small and bounded. A status answer is a single projection page trimmed to six events and ten frontier
 members; the tool is called when someone asks how the run is doing, not on every turn. The five
-judgement calls carry one markdown skill each (`skills/` is 246 lines in total) plus JSON, and each is a
-fresh process, so nothing accumulates across a run.
+judgement calls carry one markdown prompt each (the pack's `prompts/` are 246 lines in total) plus JSON,
+and each is a fresh process, so nothing accumulates across a run.
 
 #### KV Cache effect
 

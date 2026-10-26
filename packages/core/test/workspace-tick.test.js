@@ -20,8 +20,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { fileArtifacts } from '../lib/artifacts.js'
-import { createJudge } from '../lib/judge.js'
-import { DEFAULT_SKILLS_DIR } from '../lib/skills.js'
+import { FEED_PROMPTS_DIR, judgeFor } from './support/domain.js'
 import { tick } from '../lib/loop.js'
 import { readRoundsState } from '../lib/rounds.js'
 import { Store } from '../lib/store.js'
@@ -125,7 +124,7 @@ function setup({ config = ROUND_CONFIG, answers = {}, artifacts } = {}) {
     cand_analyze: { root_cause: 'the wider table removed collisions on rare features' },
     ...answers,
   })
-  const judge = createJudge({
+  const judge = judgeFor({
     model: recorded.model,
     metric: { name: 'auc', direction: 'higher', contract_ref: 'metric-contract.json' },
     baseline: 0.7012,
@@ -208,7 +207,18 @@ test('an adversarial review that rejects stops the candidate before anything is 
     answers: { verify: { verdict: 'reject', rationale: 'it also changes the evaluation split' } },
   })
   ports.store.setState('c1', 'phase', { phase: 'LAND', round: 1, hypothesis: 'widen the embedding table to 2^22' })
-  for (let index = 0; index < 6; index += 1) await tick(ports)
+  // The gate is retried on a backoff, so the clock has to move for the attempt budget to be spent:
+  // reaching REJECTED takes several ticks by design, and one refusal must not be enough.
+  for (let index = 0; index < 4; index += 1) {
+    await tick(ports)
+    ports.clock.advance(10_000)
+  }
+  assert.equal(ports.store.getState('c1', 'phase').phase, 'VERIFY', 'the first refusal did not kill the candidate')
+
+  for (let index = 0; index < 8; index += 1) {
+    await tick(ports)
+    ports.clock.advance(10_000)
+  }
 
   const state = ports.store.getState('c1', 'phase')
   assert.equal(state.phase, 'REJECTED')
@@ -219,6 +229,7 @@ test('an adversarial review that rejects stops the candidate before anything is 
   const rejection = ports.store.eventsFor('c1').at(-1)
   assert.equal(rejection.event_type, 'candidate_rejected')
   assert.equal(rejection.payload.status, undefined, 'a legitimately failed gate is not a malformed artifact')
+  assert.equal(rejection.payload.attempts, 3, 'and the run can say how many tries the gate got')
   ports.store.close()
 })
 
@@ -228,7 +239,7 @@ test('a review that accepts over a failed static check is recorded as a conflict
   const recorded = recordedModel(store, {
     verify: { verdict: 'accept', rationale: 'I see nothing wrong with it' },
   })
-  const judge = createJudge({
+  const judge = judgeFor({
     model: recorded.model,
     staticChecks: () => [
       { name: 'worktree_clean', result: 'fail' },
@@ -242,7 +253,7 @@ test('a review that accepts over a failed static check is recorded as a conflict
   assert.equal(store.getState('c1', 'phase').phase, 'REJECTED')
   const rejection = store.eventsFor('c1').at(-1)
   assert.equal(rejection.payload.status, 'conflict', 'two facts that must agree do not')
-  assert.match(rejection.payload.blocking_message, /passed is true while 1 check\(s\) failed/)
+  assert.match(rejection.payload.blocking_message, /accepted while 1 check\(s\) failed \(worktree_clean\)/)
   assert.equal(ports.platform.size, 0)
   store.close()
 })
@@ -266,12 +277,13 @@ test('the verdict the gate judged is on disk under the reference the fact plane 
   ports.store.close()
 })
 
-test('dump names the field a refused artifact was missing, so a reader can fix it', async () => {
+test('dump names the field a refused artifact got wrong, so a reader can fix it', async () => {
   const store = Store.open(mkdtempSync(join(tmpdir(), 'reprise-workspace-dump-')))
   const clock = new FakeClock()
   const recorded = recordedModel(store, { verify: { verdict: 'accept', rationale: 'looks fine' } })
-  // A verdict with no checks is not a verdict, and the contract says so.
-  const judge = createJudge({ model: recorded.model, staticChecks: () => [] })
+  // A check whose result is neither pass nor fail makes the record malformed, and the contract says
+  // so. (An empty injected list is no longer enough: gate two always contributes its own three.)
+  const judge = judgeFor({ model: recorded.model, staticChecks: () => [{ name: 'worktree_clean', result: 'maybe' }] })
   const ports = { store, clock, platform: fakePlatform(), harness: fakeHarness, judge }
   store.setState('c1', 'phase', { phase: 'LAND', round: 1, hypothesis: 'widen the embedding table to 2^22' })
   for (let index = 0; index < 6; index += 1) await tick(ports)
@@ -280,7 +292,7 @@ test('dump names the field a refused artifact was missing, so a reader can fix i
   const output = renderDump(store, 'c1')
   assert.match(output, /REJECTED/)
   assert.match(output, /invalid/, 'the four-state conclusion survives to the dump')
-  assert.match(output, /checks must not be empty/, 'and it names the field, not just "it failed"')
+  assert.match(output, /result must be "pass" or "fail"/, 'and it names the field, not just "it failed"')
   store.close()
 })
 
@@ -296,19 +308,22 @@ test('swapping one markdown skill changes what the gate decides, with no code ch
       request.prompt.includes('REJECT-EVERYTHING')
         ? { verdict: 'reject', rationale: 'the skill told me to reject everything' }
         : { verdict: 'accept', rationale: 'no problems found' }
-    const judge = createJudge({ model, skillsDir })
+    const judge = judgeFor({ model, skillsDir })
     store.setState('c1', 'phase', { phase: 'LAND', round: 1, hypothesis: 'widen the embedding table to 2^22' })
     const ports = { store, clock, platform: fakePlatform(), harness: fakeHarness, judge }
-    for (let index = 0; index < 5; index += 1) await tick(ports)
+    for (let index = 0; index < 12; index += 1) {
+      await tick(ports)
+      clock.advance(10_000)
+    }
     const phase = store.getState('c1', 'phase').phase
     store.close()
     return phase
   }
 
-  assert.notEqual(await run(DEFAULT_SKILLS_DIR), 'REJECTED', 'the shipped skill lets a clean candidate through')
+  assert.notEqual(await run(FEED_PROMPTS_DIR), 'REJECTED', 'the shipped skill lets a clean candidate through')
 
   const edited = mkdtempSync(join(tmpdir(), 'reprise-skill-swap-pack-'))
-  cpSync(DEFAULT_SKILLS_DIR, edited, { recursive: true })
+  cpSync(FEED_PROMPTS_DIR, edited, { recursive: true })
   const path = join(edited, 'verify', 'SKILL.md')
   writeFileSync(path, `${readFileSync(path, 'utf8')}\n\nREJECT-EVERYTHING in this round.\n`)
 

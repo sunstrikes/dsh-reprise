@@ -1,6 +1,6 @@
 # `@dsh-reprise/ui` — read-only dashboard
 
-A viewer of one workspace. It computes nothing of its own: the four views are the projections in
+A viewer of one workspace. It computes nothing of its own: the views are the projections in
 `packages/core/lib/projection.js`, which `dump` renders too, so the page and the CLI cannot tell
 different stories.
 
@@ -17,12 +17,25 @@ Two rules hold the package together:
 
 | path | answer |
 | --- | --- |
-| `GET /api/reprise/overview` | phase, rounds, candidates, spend (settled / in flight / limit), best, frontier, stop decision |
+| `GET /api/reprise/overview` | phase, rounds, candidates, spend (settled / in flight / limit), best, frontier, stop decision, and the cluster block: cards per job, cards in use, our ledger's floor, what is queued |
 | `GET /api/reprise/rounds` | each round: complete, empty, improving, best, its candidates |
-| `GET /api/reprise/candidate?candidate=<id>` | timeline, every gate verdict, the failure text, frontier position, bindings, job, artifacts |
-| `GET /api/reprise/conclusion` | the best candidate, its number, what it is compared against, the stop decision |
+| `GET /api/reprise/candidate?candidate=<id>` | timeline, every gate verdict, **the gate chain step by step (passed / failed / missing)**, the failure text, frontier position, bindings, job, artifacts |
+| `GET /api/reprise/conclusion` | the best candidate, its number, what it is compared against, **the measured/published comparison**, the stop decision |
+| `GET /api/reprise/calls?site=<call-site>` | every judgement a model was asked for: call site, subject, status, error class |
+| `GET /api/reprise/call?ref=<model_call:site:subject[:ref]>` | one judgement, opened: the prompt it read, the facts, the raw response, the answer object |
 | `GET /api/reprise/page` | the page itself (plain ESM module next to it; no build step) |
 | `GET /api/reprise/dashboard.js` | the page's module |
+
+Two answers on the overview are deliberately `null` rather than `0`: `cards.inUse`, and the orphan /
+foreign job lists. The page is session-free and has no platform port, so it has not read the
+cluster's listing — `cluster.read: false` says so, `cluster.cards.floor` says how many cards our own
+ledger supports, and the dump prints the same two facts. A dashboard that cannot ask must not answer
+"0 cards", because that is the answer somebody acts on.
+
+The gate chain's `missing` is a third answer beside passed and failed: a candidate that stopped before
+VERIFY was never judged, and rendering that as "failed" would blame it for a check nobody performed.
+The evidence is the attempt records the judge wrote (`verify_verdict:<id>:a<N>`) plus the
+`gate_result` and rejection events; `dump --candidate` prints the same chain.
 
 A bad query is a `400` with `{ "error": { "message": … } }`. An unknown candidate is a `200` with
 `data: null` and `missing: true` — the same "nothing was recorded" answer `dump` gives.
@@ -80,4 +93,7 @@ Everything here is tested against a `connection` double shaped exactly like the 
    `./dashboard.js` resolves under the same `/api/reprise/` prefix;
 3. `--dsw-alias-*` tokens are reachable from that page, or the fallback palette is what the user sees;
 4. two browser windows on the same workspace poll with different cursors without disturbing each
-   other, and the page stays readable with every conversation closed.
+   other, and the page stays readable with every conversation closed;
+5. clicking a row in the audit panel fetches `GET /api/reprise/call?ref=…` and draws the prompt and
+   response (the source-level assertions in `test/client.test.js` cover that the page consumes the
+   fields; only a browser can show it painting).

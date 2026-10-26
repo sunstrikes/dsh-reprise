@@ -10,10 +10,20 @@
  * Two decisions are visible everywhere in this file:
  *
  * **Numbers belong to the kernel.** Metrics come from the monitor, the comparison comes from the
- * metric contract, and the verdict (`improved` / `regressed` / `inconclusive`) is arithmetic done
- * here. The model is asked for prose and for one enum. If it returns a score anyway, nothing reads
- * it: there is no code path from a model-supplied number into an artifact field, the frontier or
- * the stop rule. That is stronger than "the model is asked not to score".
+ * metric contract — resolved once in `metric-contract.js`, so "which metric counts" and "how large a
+ * difference counts" are answered in one place for this gate, the ranking and the stop rules — and
+ * the verdict (`improved` / `regressed` / `inconclusive`) is arithmetic done here. The model is asked
+ * for prose and for one enum. If it returns a score anyway, nothing reads it: there is no code path
+ * from a model-supplied number into an artifact field, the frontier or the stop rule. That is
+ * stronger than "the model is asked not to score".
+ *
+ * **One question, one answer, or one closed failure.** Every entry below asks through the model
+ * port with a structured question (`buildQuestion`) and receives a structured answer; the prose a
+ * model wraps it in is the adapter's problem (`@dsh-reprise/exec/model`), not this file's. When no
+ * answer arrives — a missing binary, a non-zero exit, a timeout, an unparseable reply — the entry
+ * rejects with `ModelUnavailable`, whose one class is `model_unavailable`. Every judgement point
+ * therefore fails the same way, and none of them turns an outage into "the review said reject" or
+ * "the analysis found nothing".
  *
  * **The judge records opinions; the contract decides.** VERIFY is a hybrid phase: the L1 static
  * checks are deterministic facts computed by the kernel, and the adversarial review is a model that
@@ -26,8 +36,11 @@
  */
 
 import { isNonEmptyString, isPlainObject } from '@dsh-reprise/contract'
+import { CAUSES, ModelUnavailable, asModelUnavailable, buildQuestion } from '@dsh-reprise/exec/model'
 
-import { DEFAULT_SKILLS_DIR, loadSkill, loadSkills, renderPrompt } from './skills.js'
+import { staticReport } from './gate.js'
+import { JUDGE_DIRECTION, NoMetricContractError, metricRule, resolveMetricContract } from './metric-contract.js'
+import { loadSkill, loadSkills, renderPrompt } from './skills.js'
 
 // Registers `round_reflect` and `land_hypothesis` with the contract as a side effect of importing.
 import './artifact-kinds.js'
@@ -43,47 +56,11 @@ export const ANSWER_SHAPES = Object.freeze({
     '{"summary": "<what this round taught, in a few sentences>", "lessons": [{"statement": "<a generalisable lesson>", "evidence": "<the candidate or observation it came from>"}], "next_round_focus": ["<a concrete thing the next round should look at>"]}',
 })
 
-/** The default metric contract. Domain differences are data; this is only a shape-free fallback. */
-export const DEFAULT_METRIC = Object.freeze({ name: 'auc', direction: 'higher' })
-
 const VERDICTS = Object.freeze(['improved', 'regressed', 'inconclusive'])
 
 // ---------------------------------------------------------------- helpers
 
 const describe = (error) => (error instanceof Error ? error.message : String(error))
-
-/**
- * Read the model's answer as a JSON object, tolerating the prose models put around it.
- *
- * A fenced block and a "last JSON object in the text" pass are both here because both shapes are
- * what a real harness produces. What is *not* tolerated is a number where an object was asked for:
- * that returns `undefined`, and the call site fails closed.
- *
- * @param {unknown} raw
- * @returns {Record<string, unknown> | undefined}
- */
-export function parseAnswer(raw) {
-  if (isPlainObject(raw)) return raw
-  if (typeof raw !== 'string') return undefined
-  const text = raw.trim()
-  if (text === '') return undefined
-
-  const attempts = [text]
-  for (const match of text.matchAll(/```(?:json)?[ \t]*\r?\n([\s\S]*?)```/g)) attempts.push(match[1].trim())
-  const open = text.indexOf('{')
-  const close = text.lastIndexOf('}')
-  if (open >= 0 && close > open) attempts.push(text.slice(open, close + 1))
-
-  for (const attempt of attempts) {
-    try {
-      const parsed = JSON.parse(attempt)
-      if (isPlainObject(parsed)) return parsed
-    } catch {
-      // Try the next shape; a model that wrapped its JSON in prose is normal, not an error.
-    }
-  }
-  return undefined
-}
 
 const asString = (value) => (isNonEmptyString(value) ? value.trim() : undefined)
 
@@ -124,58 +101,80 @@ export function defaultStaticChecks({ state, parent } = {}) {
 const finite = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : undefined)
 
 /**
- * Which reported number is the primary metric. The metric contract names it; if it does not name
- * one, the first numeric key in sorted order is used so the choice is at least reproducible.
+ * The number the contract's metric reports, or nothing.
+ *
+ * There is deliberately no fallback: picking "the first numeric key in sorted order" when the named
+ * metric is absent is the kernel choosing a metric, and it makes a run that measured nothing look like
+ * a run that improved on something. A missing number is `inconclusive` (`compareMetric`), which a
+ * candidate can be rejected by and a stop rule can read as "no evidence".
  *
  * @returns {{ metric: string, value: number } | undefined}
  */
 export function pickMetric(metrics, name) {
-  if (!isPlainObject(metrics)) return undefined
+  if (!isPlainObject(metrics) || typeof name !== 'string') return undefined
   const named = finite(metrics[name])
-  if (named !== undefined) return { metric: name, value: named }
-  const fallback = Object.keys(metrics)
-    .filter((key) => finite(metrics[key]) !== undefined)
-    .sort()[0]
-  return fallback === undefined ? undefined : { metric: fallback, value: metrics[fallback] }
+  return named === undefined ? undefined : { metric: name, value: named }
 }
 
 /**
- * Compare against the frozen baseline. No tolerance band: how much of a difference counts is a
- * metric-contract question, and inventing a threshold here would be the kernel deciding a domain
- * question. No comparable baseline means `inconclusive`, never a guess.
+ * Compare against the frozen baseline.
+ *
+ * `minimumDelta` is the contract's minimum effective delta for this metric (0 when it declares none):
+ * a move smaller than it is not a difference, so the answer is `inconclusive` — "the data cannot tell
+ * these two apart" — rather than an improvement the next round extrapolates from. A move of exactly
+ * the tolerance counts, because a "minimum effective" delta is the least difference that is effective.
+ *
+ * The threshold is a parameter and never a constant here: how much of a difference counts is a
+ * metric-contract question, and a number compiled into this file would be the kernel deciding it.
+ * No comparable baseline means `inconclusive`, never a guess.
  *
  * @param {{ value: number } | undefined} observed
  * @param {number | undefined} baseline
  * @param {'higher' | 'lower'} direction
+ * @param {number} [minimumDelta] the contract's tolerance for this metric
  */
-export function compareMetric(observed, baseline, direction = 'higher') {
+export function compareMetric(observed, baseline, direction = 'higher', minimumDelta = 0) {
   if (observed === undefined || baseline === undefined) return 'inconclusive'
-  if (observed.value === baseline) return 'inconclusive'
-  const better = direction === 'lower' ? observed.value < baseline : observed.value > baseline
+  const difference = observed.value - baseline
+  if (difference === 0) return 'inconclusive'
+  const tolerance = typeof minimumDelta === 'number' && Number.isFinite(minimumDelta) && minimumDelta > 0 ? minimumDelta : 0
+  if (Math.abs(difference) < tolerance) return 'inconclusive'
+  const better = direction === 'lower' ? difference < 0 : difference > 0
   return better ? 'improved' : 'regressed'
 }
 
 // ------------------------------------------------------------------ judge
 
 /**
+ * Everything domain-specific arrives as an argument from the pack (`domain.js`): the prompts
+ * directory, the metric contract and the adjustable surface. There is deliberately no default for
+ * any of them — a judge that fell back to a metric name or a prompt of its own would be the kernel
+ * answering a domain question, and the answer would look exactly like a configured one.
+ *
  * @param {{
- *   model: (request: { call_site: string, prompt: string, facts: object, answer_schema: string }) => Promise<unknown>,
- *   skillsDir?: string,
- *   metric?: { name?: string, direction?: 'higher' | 'lower', contract_ref?: string },
+ *   model: (question: object) => Promise<object>,
+ *   skillsDir: string,
+ *   metricContract: object,
+ *   surface?: { files?: string[], keys?: string[], symbols?: string[] },
  *   baseline?: number | { value: number } | (() => number | { value: number } | undefined | Promise<number | { value: number } | undefined>),
  *   staticChecks?: (input: object) => { name: string, result: 'pass' | 'fail' }[],
  *   artifacts?: { write: (name: string, value: unknown) => unknown },
  *   packet?: (request: { call_site: string, facts: object }) => { lines?: string[], digest?: string } | undefined,
+ *   readFile?: (path: string) => string,
+ *   parsers?: Record<string, (content: string, context: { path: string }) => void>,
  * }} options
  */
 export function createJudge({
   model,
-  skillsDir = DEFAULT_SKILLS_DIR,
-  metric = {},
+  skillsDir,
+  metricContract,
+  surface,
   baseline,
   staticChecks = defaultStaticChecks,
   artifacts,
   packet,
+  readFile,
+  parsers,
 } = {}) {
   if (typeof model !== 'function') {
     throw new TypeError(
@@ -183,21 +182,59 @@ export function createJudge({
     )
   }
   if (typeof staticChecks !== 'function') throw new TypeError('staticChecks must be a function returning check results')
+  if (!isNonEmptyString(skillsDir)) {
+    throw new TypeError(
+      'a judge needs skillsDir — the five prompts are the domain pack\'s, and the kernel ships none (see domain.js)',
+    )
+  }
+  // Fail at construction, not mid-round: a missing skill produces a prompt with no instructions, and a
+  // model without instructions still answers — the same is true of a judge with no metric contract,
+  // which would answer about a metric it invented. The refusal names the same status the ranking and
+  // the stop rules report (`missing` / `conflict`), so a workspace that cannot decide says one thing.
+  const contract = resolveMetricContract(metricContract)
+  if (!contract.ok) throw new NoMetricContractError(contract)
+  const primary = metricRule(contract, contract.primary)
+  if (primary === undefined) {
+    // Unreachable while `resolveMetricContract` keeps its own invariant (an `ok` contract ranks its
+    // primary); kept so a future resolution change fails with a name instead of a TypeError.
+    throw new NoMetricContractError({
+      status: 'missing',
+      message: `the primary ${JSON.stringify(contract.primary)} is not among the ranked objectives`,
+    })
+  }
 
-  // Fail at construction, not mid-round: a missing skill produces a prompt with no instructions,
-  // and a model without instructions still answers.
   loadSkills(skillsDir)
 
-  const metricContract = Object.freeze({
-    name: isNonEmptyString(metric.name) ? metric.name : DEFAULT_METRIC.name,
-    direction: metric.direction === 'lower' ? 'lower' : 'higher',
-    contractRef: isNonEmptyString(metric.contract_ref) ? metric.contract_ref : isNonEmptyString(metric.name) ? metric.name : DEFAULT_METRIC.name,
+  // The judge's own vocabulary for a direction (`higher` / `lower`), derived once from the resolution.
+  const metricContractFacts = Object.freeze({
+    name: contract.primary,
+    direction: JUDGE_DIRECTION[primary.direction],
+    contract_ref: contract.ref,
+    minimum_effective_delta: primary.minimum_effective_delta,
+    window: primary.window,
+    guardrails: contract.guardrails.map((guardrail) => guardrail.name),
   })
 
-  const persist = (kind, candidateId, artifact) => {
+  // The adjustable surface, as the model sees it: which files, knobs and symbols a candidate may
+  // touch. Absent means the domain declared none, and the prompt then says nothing rather than
+  // inventing a whitelist; gate two is where an out-of-bounds change is refused (ticket 24).
+  const allowedSurface =
+    isPlainObject(surface)
+      ? {
+          files: Array.isArray(surface.files) ? surface.files : [],
+          keys: Array.isArray(surface.keys) ? surface.keys : [],
+          symbols: Array.isArray(surface.symbols) ? surface.symbols : [],
+        }
+      : undefined
+  const surfaceFacts = allowedSurface === undefined ? {} : { allowed_surface: allowedSurface }
+
+  const persist = (kind, candidateId, artifact, ref = undefined) => {
     if (typeof artifacts?.write !== 'function') return artifact
     // The reference the fact plane records (`verify_verdict:<id>`) resolves to this name.
     artifacts.write(`${kind}:${candidateId}`, artifact)
+    // A gate attempt keeps its own reference as well: attempt 2 must not overwrite the record of
+    // attempt 1, or "one failed attempt is not permanent" would have nothing to recompute against.
+    if (ref !== undefined) artifacts.write(`${kind}:${candidateId}:${ref}`, artifact)
     return artifact
   }
 
@@ -205,11 +242,17 @@ export function createJudge({
    * One request to the model, rendered from the skill on disk right now — so editing markdown
    * changes the very next prompt without a rebuild.
    *
-   * A model port that throws is not allowed to kill the tick: the workspace may be hours into a run
-   * and an upstream 503 must not take the loop down. Each call site fails closed instead, and says
-   * why in its artifact.
+   * The question is built by the same function every caller uses (`buildQuestion`), which is what
+   * gives each call a content-addressed id and lets the adapter file the prompt and the answer side
+   * by side. `subject` and `ref` are the kernel's identifiers — the candidate a judgement is about,
+   * and the place in an attempt sequence — because an audit reader has to be able to file the record
+   * next to the artifact it explains.
+   *
+   * Everything that is not a structured answer becomes `ModelUnavailable` and travels out of the
+   * entry: an outage must not be recorded as an opinion (the review "rejecting", the analysis
+   * "finding nothing"), because then a candidate dies of a broken provider.
    */
-  const ask = async (callSite, facts) => {
+  const ask = async (callSite, facts, ref = null) => {
     const skill = loadSkill(skillsDir, callSite)
     const answerSchema = ANSWER_SHAPES[callSite]
 
@@ -222,17 +265,39 @@ export function createJudge({
       injection = { lines: [`(the injection packet could not be built: ${describe(error)})`] }
     }
     const prompt = renderPrompt(skill, { facts, answer: answerSchema, packet: injection?.lines ?? [] })
-    let raw
+    const question = buildQuestion({
+      call_site: callSite,
+      subject: subjectOf(facts),
+      ref,
+      prompt,
+      facts,
+      answer_schema: answerSchema,
+    })
+
+    let answer
     try {
-      raw = await model({ call_site: callSite, prompt, facts, answer_schema: answerSchema })
+      answer = await model(question)
     } catch (error) {
-      return { answer: undefined, prompt, problem: `the model port failed: ${describe(error)}` }
+      throw asModelUnavailable(error, { question })
     }
-    const answer = parseAnswer(raw)
-    if (answer === undefined) {
-      return { answer: undefined, prompt, problem: 'the model did not return a JSON object' }
+    if (!isPlainObject(answer)) {
+      // A port that hands back anything other than an object has not answered. This is the same
+      // closed class as an unreadable CLI reply: the call site cannot tell them apart, and it must
+      // not have to.
+      throw new ModelUnavailable({
+        cause: CAUSES.unparseableAnswer,
+        message: 'the model port returned no structured answer',
+        question,
+      })
     }
     return { answer, prompt }
+  }
+
+  /** What a judgement is about, as the audit record names it: a candidate, or a round. */
+  const subjectOf = (facts) => {
+    if (isNonEmptyString(facts?.candidate_id)) return facts.candidate_id
+    if (Number.isSafeInteger(facts?.round)) return `round-${facts.round}`
+    return null
   }
 
   const baselineValue = async () => {
@@ -244,10 +309,7 @@ export function createJudge({
   }
 
   /** The adversarial review, normalised into the one enum the gate consumes. */
-  const reviewOf = (answer, problem) => {
-    if (problem !== undefined) {
-      return { verdict: 'reject', rationale: `the adversarial review could not be obtained: ${problem}`, concerns: [] }
-    }
+  const reviewOf = (answer) => {
     const raw = answer.verdict
     const verdict = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
     const rationale = asString(answer.rationale)
@@ -270,31 +332,84 @@ export function createJudge({
 
   return {
     /**
-     * VERIFY: L1 checks (kernel) + adversarial review (model), recorded side by side.
-     *
-     * `passed` is the review's answer, not a merge of the two opinions. The contract is the referee:
-     * a pass that contradicts a failed check comes back as `conflict`, and the candidate stops with
-     * both facts preserved.
+     * The contract this judge decides with — the same resolved object the ranking and the stop rules
+     * read, exposed so a caller (or a dump) can print what "improved" meant without a second lookup.
      */
-    async verify({ candidateId, state, parent, now, files } = {}) {
-      const checks = staticChecks({ candidateId, state, parent, files })
+    contract,
+
+    /**
+     * VERIFY: the kernel's static report + the model's adversarial review, recorded side by side.
+     *
+     * The two pieces of evidence have different owners and neither is merged into the other:
+     *
+     *   - `checks` is the report `gate.js` computed from the candidate's worktree — syntax, the
+     *     adjustable-surface whitelist and residual conflict markers. A model cannot add, drop or
+     *     reword one: anything it sends named `checks` is ignored below.
+     *   - `reviewer` is the one thing the model is asked for. `passed` is the gate's *claim* about the
+     *     two, `reviewer.verdict === 'accept'` **and** no check failed.
+     *
+     * The contract is then the referee. When the review accepts over a check that failed, the claim
+     * cannot follow from the evidence, `validateArtifact` returns `conflict`, and the loop stops the
+     * candidate with both facts preserved. A unanimous "no" is not a conflict: that candidate simply
+     * failed its gate.
+     *
+     * `attempt` is the gate record's place in the sequence. It is the kernel's number, not the
+     * model's, and it is what lets attempt 2 be recorded without erasing attempt 1.
+     */
+    async verify({ candidateId, state, parent, now, files, worktreeDir, attempt } = {}) {
+      const attemptNumber = Number.isSafeInteger(attempt) && attempt > 0 ? attempt : 1
+      const changed = Array.isArray(files) ? files : []
+
+      const report = staticReport({
+        candidateId,
+        files: changed,
+        worktreeDir,
+        surface: allowedSurface,
+        readFile,
+        parsers,
+      })
+      // The deeper checks a phase worker (or a test) contributes stay additive: they arrive through
+      // the same list, so the contract's rule — evidence that disagrees with the review is a conflict
+      // — covers them without a second mechanism.
+      const checks = [...staticChecks({ candidateId, state, parent, files: changed }), ...report.checks]
+      const checksOk = checks.length > 0 && checks.every((check) => check.result === 'pass')
+
       const facts = {
         candidate_id: candidateId,
         round: state?.round ?? null,
         hypothesis: state?.hypothesis ?? null,
         parent_binding: parent === undefined ? null : { parent_id: parent.parent_id ?? null, parent_commit: parent.parent_commit ?? null },
-        files: Array.isArray(files) ? files : [],
+        files: changed,
+        ...surfaceFacts,
+        attempt: attemptNumber,
+        static_report: {
+          ready_to_submit: report.ready_to_submit,
+          checks: report.checks,
+          unchecked: report.unchecked,
+        },
         l1_checks: checks,
       }
-      const { answer, problem } = await ask('verify', facts)
-      const reviewer = reviewOf(answer, problem)
-      return persist('verify_verdict', candidateId, {
-        candidate_id: candidateId,
-        passed: reviewer.verdict === 'accept',
-        checks,
-        reviewer,
-        decided_at_ms: now,
-      })
+      const { answer } = await ask('verify', facts, `a${attemptNumber}`)
+      const reviewer = reviewOf(answer)
+      return persist(
+        'verify_verdict',
+        candidateId,
+        {
+          candidate_id: candidateId,
+          attempt: attemptNumber,
+          passed: reviewer.verdict === 'accept' && checksOk,
+          checks,
+          reviewer,
+          decided_at_ms: now,
+          // What the checks ran over, so this record can be recomputed rather than trusted.
+          evidence: {
+            whitelist: report.whitelist,
+            files: report.files,
+            unchecked: report.unchecked,
+          },
+        },
+        `a${attemptNumber}`,
+      )
     },
 
     /**
@@ -310,15 +425,17 @@ export function createJudge({
       // submit-poll time, only on collect, or both — and an analysis that silently reasoned from an
       // empty object would produce a confident report about nothing.
       const metrics = [collected?.metrics, state?.metrics, job?.metrics].find(isPlainObject) ?? {}
-      const observed = pickMetric(metrics, metricContract.name)
+      const observed = pickMetric(metrics, contract.primary)
       const frozenBaseline = await baselineValue()
-      const verdict = compareMetric(observed, frozenBaseline, metricContract.direction)
+      // The tolerance is the contract's, for this metric: a move it does not consider a difference is
+      // `inconclusive`, so a candidate cannot be admitted on noise.
+      const verdict = compareMetric(observed, frozenBaseline, metricContractFacts.direction, primary.minimum_effective_delta)
 
       const facts = {
         candidate_id: candidateId,
         round: state?.round ?? null,
         hypothesis: state?.hypothesis ?? null,
-        metric_contract: { name: metricContract.name, direction: metricContract.direction, contract_ref: metricContract.contractRef },
+        metric_contract: { ...metricContractFacts },
         observed: observed ?? null,
         baseline: frozenBaseline ?? null,
         verdict,
@@ -328,7 +445,7 @@ export function createJudge({
       // Kept as the model wrote it, not coerced: an absent root cause is `missing` (nothing was
       // produced) and an empty one is `invalid` (something was produced that is not a finding).
       // Collapsing both into `undefined` here would undo the distinction the contract exists for.
-      const rootCause = typeof answer?.root_cause === 'string' ? answer.root_cause.trim() : undefined
+      const rootCause = typeof answer.root_cause === 'string' ? answer.root_cause.trim() : undefined
 
       return persist('analyze_report', candidateId, {
         candidate_id: candidateId,
@@ -350,7 +467,7 @@ export function createJudge({
      */
     async plan({ round, facts } = {}) {
       const { answer } = await ask('round_plan', { ...facts, round })
-      const raw = Array.isArray(answer?.hypotheses) ? answer.hypotheses : []
+      const raw = Array.isArray(answer.hypotheses) ? answer.hypotheses : []
       const hypotheses = raw.map((hypothesis, index) => {
         if (!isPlainObject(hypothesis)) return hypothesis
         return {
@@ -362,7 +479,7 @@ export function createJudge({
       return {
         round,
         hypotheses,
-        metric_contract_ref: metricContract.contractRef,
+        metric_contract_ref: metricContractFacts.contract_ref,
       }
     },
 
@@ -373,7 +490,7 @@ export function createJudge({
      */
     async reflect({ round, facts, now } = {}) {
       const { answer } = await ask('round_reflect', { ...facts, round })
-      const lessons = Array.isArray(answer?.lessons)
+      const lessons = Array.isArray(answer.lessons)
         ? answer.lessons.map((lesson) =>
             isPlainObject(lesson)
               ? { statement: typeof lesson.statement === 'string' ? lesson.statement.trim() : undefined, evidence: asString(lesson.evidence) }
@@ -383,9 +500,9 @@ export function createJudge({
 
       return {
         round,
-        summary: typeof answer?.summary === 'string' ? answer.summary.trim() : undefined,
+        summary: typeof answer.summary === 'string' ? answer.summary.trim() : undefined,
         lessons,
-        next_round_focus: asStringList(answer?.next_round_focus),
+        next_round_focus: asStringList(answer.next_round_focus),
         at_ms: now,
       }
     },
@@ -405,7 +522,7 @@ export function createJudge({
         hypothesis_id: hypothesis?.id ?? null,
         statement,
         expected_files: Array.isArray(hypothesis?.expected_files) ? hypothesis.expected_files : [],
-        metric_contract_ref: metricContract.contractRef,
+        metric_contract_ref: metricContractFacts.contract_ref,
         frozen_at_ms: now,
       }
       const prompt = renderPrompt(skill, {
@@ -413,7 +530,8 @@ export function createJudge({
           candidate_id: candidateId,
           round,
           hypothesis: { id: hypothesis?.id ?? null, statement: statement ?? null, expected_files: hypothesis?.expected_files ?? [] },
-          metric_contract: { name: metricContract.name, direction: metricContract.direction, contract_ref: metricContract.contractRef },
+          metric_contract: { ...metricContractFacts },
+          ...surfaceFacts,
         },
         answer: ANSWER_SHAPES.land,
       })

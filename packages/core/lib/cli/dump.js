@@ -19,14 +19,21 @@
  */
 
 import { readFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 
+import { anchorHistory } from '../anchor.js'
+import { BASELINE_SUBJECT } from '../baseline.js'
+import { readRoundsState } from '../rounds.js'
 import { Store } from '../store.js'
 import {
   candidateDetail,
+  conclusion,
+  modelCall,
+  modelCalls,
   overview,
   summariseEvent,
 } from '../projection.js'
-import { frontier, rebuildFrontier } from '../frontier.js'
+import { ranking, rebuildRanking } from '../ranking.js'
 
 const pad = (value, width) => String(value).padEnd(width)
 
@@ -63,7 +70,7 @@ function frontierLines(store, candidateId, { config } = {}) {
 
   const workspace = overview(store, { config })
   if (workspace.metricContract.ok !== true) {
-    lines.push(`  not computed — ${workspace.metricContract.error}`)
+    lines.push(`  not computed (${workspace.metricContract.status ?? 'no contract'}) — ${workspace.metricContract.error}`)
     return lines
   }
 
@@ -72,6 +79,10 @@ function frontierLines(store, candidateId, { config } = {}) {
 
   const entries = Object.entries(position.vector).map(([name, value]) => `${name}=${value}`)
   lines.push(`  ${pad('vector', 11)}${entries.length === 0 ? '(no objective metric recorded)' : entries.join(' ')}`)
+
+  if (detail.parent !== null && detail.parent !== undefined) {
+    lines.push(`  ${pad('parent', 11)}${detail.parent} — the candidate this one was branched from`)
+  }
 
   if (position.position === 'frontier') {
     const isBest = position.best?.candidate_id === candidateId
@@ -123,6 +134,214 @@ function workspaceStopLines(store, { config } = {}) {
   })
   if (rules.length > 0) lines.push(`  ${pad('rules', 11)}${rules.join('; ')}`)
   return lines
+}
+
+/**
+ * The gate chain, one step per line: passed / failed / **missing**.
+ *
+ * `missing` gets its own word and its own sentence, because the candidate panel exists to answer
+ * "was the candidate refused, or was it never judged?" — and a page that printed "failed" for a gate
+ * nobody reached would answer the wrong question with a confident word.
+ */
+function gateChainLines(detail) {
+  const chain = detail.gateChain
+  if (chain === undefined) return []
+  const lines = ['', 'gate chain']
+  const width = Math.max(...chain.chain.map((step) => step.name.length), 4)
+  for (const step of chain.chain) {
+    const reason = step.detail === '' ? '' : `   ${step.detail}`
+    lines.push(`  ${pad(step.name, width)}  ${pad(step.status, 7)}${reason}`)
+  }
+  if (chain.attempts.length > 0) {
+    lines.push('', 'gate attempts')
+    for (const attempt of chain.attempts) {
+      const verdict = attempt.review?.verdict === undefined ? '' : `  review=${attempt.review.verdict}`
+      const failed = attempt.failed_checks.length === 0 ? '' : `  failed=${attempt.failed_checks.join(',')}`
+      lines.push(`  ${pad(attempt.attempt, 3)}${pad(attempt.passed === true ? 'passed' : 'failed', 8)}${verdict}${failed}`)
+    }
+  }
+  return lines
+}
+
+/**
+ * The denominator, and which job produced it.
+ *
+ * `dump` answers "why did the run end" from the fact plane alone, and "the run had nothing to compare
+ * against" is one of the answers — so the frozen baseline belongs on the page, with its provenance.
+ * `source` is the distinction that matters: `executor` means a job measured it (and `kind=baseline`
+ * on its ledger row is how a reader tells that job from a candidate's), `configured` means the run
+ * was *told* the number, and an unfrozen workspace says it never got one.
+ */
+function baselineLines(store) {
+  const baseline = readRoundsState(store)?.baseline
+  const job = store.jobFor(BASELINE_SUBJECT)
+  if (baseline === undefined && job === undefined) return []
+
+  const lines = ['', 'baseline']
+  if (baseline === undefined) {
+    lines.push(`  ${pad('state', 11)}not frozen — no denominator was produced`)
+  } else {
+    lines.push(`  ${pad('metric', 11)}${baseline.metric}=${baseline.value}`)
+    if (baseline.unit !== undefined) {
+      lines.push(
+        `  ${pad('samples', 11)}${baseline.windows} window(s) of unit ${baseline.unit}  (${baseline.window_series?.artifact ?? 'no artifact'})`,
+      )
+    }
+    if (baseline.source === 'executor') {
+      lines.push(`  ${pad('source', 11)}executor — measured by job ${baseline.job_id} (kind=baseline)`)
+    } else if (baseline.source === 'configured') {
+      lines.push(`  ${pad('source', 11)}configured — the run was told this number; no job measured it`)
+    } else {
+      lines.push(`  ${pad('source', 11)}${baseline.source ?? 'unknown'}`)
+    }
+    if (baseline.frozen_at_ms !== undefined) lines.push(`  ${pad('frozen', 11)}${iso(baseline.frozen_at_ms)}`)
+  }
+  if (job !== undefined) {
+    lines.push(
+      `  ${pad('job', 11)}${job.job_id}  kind=${job.kind}  state=${job.state}${job.error_class ? `  error_class=${job.error_class}` : ''}`,
+    )
+  }
+  return lines
+}
+
+/**
+ * The code base the run stands on, and the decision that put it there.
+ *
+ * Two questions this answers that nothing else on the page does: *which tree would the next candidate
+ * branch from*, and — for a `human`-mode run — *what is waiting for a person, and what command
+ * answers it*. A proposal nobody can find is a run that quietly stopped improving while looking busy,
+ * so the command is printed verbatim rather than described.
+ *
+ * Absent when the run never rolled and nothing is waiting: "nothing changed" needs no section.
+ */
+function codeBaseLines(store) {
+  const history = anchorHistory(store, dirname(store.path))
+  const { current, events, proposals } = history
+  const failed = [...events].reverse().find((event) => event.event_type === 'anchor_roll_failed')
+  if (current === undefined && proposals.length === 0 && failed === undefined) return []
+
+  const lines = ['', 'code base']
+  if (current === undefined) {
+    lines.push(`  ${pad('anchor', 11)}none — candidates branch from the runner's own base ref`)
+  } else {
+    lines.push(`  ${pad('anchor', 11)}${current.candidate_id}  commit ${current.commit}`)
+    lines.push(
+      `  ${pad('decided', 11)}${
+        current.intent_id === null ? `${current.source} rule — no person was asked` : `human intent ${current.intent_id}`
+      }`,
+    )
+    const rolled = [...events].reverse().find((event) => event.event_type === 'anchor_rolled')
+    if (rolled !== undefined) {
+      lines.push(`  ${pad('rule', 11)}${rolled.evidence?.reason ?? 'unknown'}  (${iso(rolled.at_ms)})`)
+    }
+  }
+  for (const proposal of proposals) {
+    lines.push(
+      `  ${pad('proposal', 11)}${proposal.candidate_id}  commit ${proposal.commit}` +
+        `${Number.isFinite(proposal.proposed_at_ms) ? `  proposed ${iso(proposal.proposed_at_ms)}` : ''}`,
+    )
+    lines.push(`  ${pad('reason', 11)}${proposal.evidence?.reason ?? 'unknown'}`)
+    lines.push(
+      `  ${pad('answer', 11)}dsh-reprise intents anchor --candidate-id ${proposal.candidate_id} --commit ${proposal.commit}`,
+    )
+  }
+  if (failed !== undefined) {
+    lines.push(`  ${pad('failed', 11)}${failed.candidate_id}: ${failed.message}  (${iso(failed.at_ms)})`)
+  }
+  return lines
+}
+
+/**
+ * The workspace page: what the run holds on the cluster, what is waiting, and the conclusion line.
+ *
+ * This is the renderer for the overview and the conclusion panels. Both are printed from the same
+ * projection functions the routes call — `overview()` and `conclusion()` — so a number on the page
+ * and a number in this text come from one derivation.
+ */
+export function renderWorkspaceDump(store, { config } = {}) {
+  const page = overview(store, { config })
+  const final = conclusion(store, { config })
+  const cluster = page.cluster
+  const lines = []
+
+  lines.push(`workspace  ${store.path}`)
+  lines.push(
+    `state      ${
+      page.stop.stopped
+        ? `stopped (${page.stop.rule}: ${page.stop.message})`
+        : `running (${page.rounds.completed} round(s) complete; empty streak ${page.rounds.emptyStreak}, no-improvement streak ${page.rounds.noImprovementStreak})`
+    }`,
+  )
+
+  // A card count the page cannot know is printed as unknown, never as 0: "0 cards" is an answer
+  // somebody acts on, and a dashboard that never asked the cluster has no business giving it.
+  lines.push(
+    `cards      per job ${cluster.cards.perJob ?? 'unknown'}; ` +
+      `in use ${cluster.cards.inUse === null ? 'unknown' : cluster.cards.inUse}; ` +
+      `our ledger floor ${cluster.cards.floor ?? 'unknown'} (${cluster.jobs.open.length} open job)`,
+  )
+  lines.push(`queue      ${cluster.queue.count} waiting`)
+  for (const entry of cluster.queue.waiting) lines.push(`  ${pad(entry.candidate_id, 12)}${entry.reason ?? 'not yet dispatched'}`)
+  if (!cluster.read) lines.push(`listing    not read — ${cluster.reason}`)
+  lines.push(...codeBaseLines(store))
+
+  if (final.best !== undefined) {
+    lines.push(`best       ${final.best.candidate_id} ${final.best.metric}=${final.best.value} (round ${final.best.round})`)
+  }
+  const comparison = final.comparison
+  if (comparison.measured !== null) {
+    lines.push(`measured   ${comparison.measured.value}   (${comparison.measured.candidate_id})`)
+    lines.push(
+      comparison.group === null
+        ? 'against    — no comparison group yet: no baseline was measured and no earlier round finished'
+        : `against    ${comparison.group.kind} ${comparison.group.value}   change ${signed(comparison.change)}`,
+    )
+    lines.push(
+      comparison.published === null
+        ? `published  — ${comparison.publishedAbsent}`
+        : `published  ${comparison.published.dataset ?? 'unknown dataset'} ${comparison.published.method} ` +
+            `${comparison.published.metric}=${comparison.published.value}   difference ${signed(comparison.publishedChange)}` +
+            `${comparison.published.source?.file === undefined ? '' : `   (${comparison.published.source.file})`}`,
+    )
+  }
+  return lines.join('\n')
+}
+
+/** `+0.0101` / `-0.0096` / `0` — a signed change, never a bare number the reader has to orient. */
+function signed(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
+  return value > 0 ? `+${value}` : String(value)
+}
+
+/** The audit list: one line per judgement, whatever its outcome. */
+export function renderCallsDump(store, { callSite, config } = {}) {
+  const page = modelCalls(store, { callSite })
+  const lines = [`workspace  ${store.path}`, `calls      ${page.count}`]
+  if (page.reason !== null) lines.push(`           ${page.reason}`)
+  for (const call of page.calls) {
+    const where = [call.call_site ?? '?', call.subject ?? '-'].join('  ')
+    const trouble = call.error_class === null ? '' : `  ${call.error_class}`
+    lines.push(`  ${pad(call.ref, 44)}  ${pad(where, 24)}  ${call.status ?? '?'}${trouble}`)
+  }
+  return lines.join('\n')
+}
+
+/** One judgement, opened: the prompt and the answer, verbatim, between their own headers. */
+export function renderCallDump(store, ref) {
+  const call = modelCall(store, ref)
+  if (call === undefined) return `workspace  ${store.path}\n\nNo model call recorded under "${ref}".`
+  const lines = [
+    `workspace  ${store.path}`,
+    `call       ${call.ref}`,
+    `site       ${call.call_site ?? '(unknown)'}`,
+    `subject    ${call.subject ?? '(none)'}`,
+    `status     ${call.status}${call.error_class === null ? '' : ` (${call.error_class})`}`,
+    `question   ${call.question_id}`,
+  ]
+  if (call.message !== null) lines.push(`message    ${call.message}`)
+  lines.push('', 'prompt', call.prompt, '', 'response', call.response)
+  if (call.answer !== null) lines.push('', 'answer', JSON.stringify(call.answer, null, 2))
+  return lines.join('\n')
 }
 
 /**
@@ -200,8 +419,10 @@ export function renderDump(store, candidateId, { config } = {}) {
     if (rejection.artifact !== undefined) lines.push(`  ${pad('from', 11)}${rejection.artifact}`)
   }
 
+  lines.push(...gateChainLines(detail))
   lines.push(...frontierLines(store, candidateId, { config }))
   lines.push(...workspaceStopLines(store, { config }))
+  lines.push(...baselineLines(store))
 
   const kinds = Object.keys(detail.bindings).sort()
   if (kinds.length > 0) {
@@ -215,7 +436,7 @@ export function renderDump(store, candidateId, { config } = {}) {
     lines.push('')
     lines.push('job')
     lines.push(
-      `  ${job.job_id}  state=${job.state}  attempts=${job.attempts}${job.error_class ? `  error_class=${job.error_class}` : ''}`,
+      `  ${job.job_id}  kind=${job.kind ?? 'candidate'}  state=${job.state}  attempts=${job.attempts}${job.error_class ? `  error_class=${job.error_class}` : ''}`,
     )
   }
 
@@ -241,8 +462,8 @@ function signatureOf(view) {
  * old workspace and see whether old facts still read the same way.
  */
 export function renderVerification(store, { config } = {}) {
-  const incremental = frontier(store, config, { persist: false })
-  const rebuilt = rebuildFrontier(store, config)
+  const incremental = ranking(store, config, { persist: false })
+  const rebuilt = rebuildRanking(store, config)
   const match = JSON.stringify(incremental) === JSON.stringify(rebuilt)
 
   const lines = ['', 'verification (full rebuild)']
@@ -284,13 +505,19 @@ export function runDump(argv) {
   const workspace = get('--workspace') ?? process.cwd()
   const rebuild = argv.includes('--rebuild')
   const configPath = get('--config')
+  const workspacePage = argv.includes('--overview')
+  const calls = argv.includes('--calls')
+  const callRef = get('--call')
+  const callSite = get('--site')
 
-  if (candidateId === undefined && !rebuild) {
+  if (candidateId === undefined && !rebuild && !workspacePage && !calls && callRef === undefined) {
     return {
       code: 2,
       output:
         'usage: dump --candidate <id> [--workspace <dir>] [--config <file>] [--rebuild]\n' +
-        '       dump --workspace <dir> --rebuild [--config <file>]',
+        '       dump --workspace <dir> --overview | --rebuild [--config <file>]\n' +
+        '       dump --workspace <dir> --calls [--site <call-site>]\n' +
+        '       dump --workspace <dir> --call <model_call:site:subject[:ref]>',
     }
   }
 
@@ -304,7 +531,10 @@ export function runDump(argv) {
     }
 
     const sections = []
+    if (workspacePage) sections.push(renderWorkspaceDump(store, { config }))
     if (candidateId !== undefined) sections.push(renderDump(store, candidateId, { config }))
+    if (calls) sections.push(renderCallsDump(store, { callSite, config }))
+    if (callRef !== undefined) sections.push(renderCallDump(store, callRef))
     let mismatch = false
     if (rebuild) {
       const verification = renderVerification(store, { config })

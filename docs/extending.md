@@ -1,7 +1,81 @@
 # Extending
 
-Two extension points, one page each. Both are designed so that adding something does not require
-reading the phase machine, and both are held by a test rather than by a convention.
+Four extension points, one page each. All are designed so that adding something does not require
+reading the phase machine, and each is held by a test rather than by a convention.
+
+---
+
+# Add a domain pack (one directory)
+
+A **domain pack** is everything the kernel is not allowed to know about a model: what "better" means,
+where a hypothesis may move, how a candidate is measured, and what the model is told at each of the
+five call sites. None of it is code. A pack is a directory with a manifest that names five parts:
+
+```json
+// domain.json
+{
+  "schema_version": 1,
+  "name": "my-domain",
+  "metric_contract": "metric-contract.json",
+  "priors": "priors.json",
+  "surface": "surface.json",
+  "prompts": "prompts",
+  "executor": "executor.json"
+}
+```
+
+| Part | What it must contain | Read by |
+|---|---|---|
+| `metric_contract` | `name`, `primary`, `direction` (`higher`/`lower`, or `up`/`down`), `objectives` ({metric: `up`/`down`}); optional `guardrail` ({`metric`: a ranked metric other than the primary}), `minimum_effective_delta` (a positive number, or `{default, <metric>: number}`), `window_mode` (`mean`/`last`, or `{default, <metric>: mode}`), `role` (prose) | one resolution, `packages/core/lib/metric-contract.js`, read by the ranking's `best`, the stop rules and the gate; `rounds.metric` is derived from it |
+| `priors` | `search_space`, `priors[]`, `hypothesis_classes[]` (each with an `id`) | the round planner's facts; the injection packet's search space |
+| `surface` | `files[]` (the path whitelist a candidate's diff is checked against), optional `keys[]` and `symbols[]` | the LAND/VERIFY facts as `allowed_surface`; gate two (ticket 24) |
+| `prompts` | `prompts/{land,verify,cand-analyze,round-plan,round-reflect}/SKILL.md`, non-empty | every model call site, re-read per call |
+| `executor` | what one job runs (`kind: local` + `command`) and where its output goes | `createPlatform`, and the frozen `executor` fact at INIT |
+
+Rules the loader (`packages/core/lib/domain.js`) enforces, all of them loud:
+
+1. **Nothing is inferred from filenames** — the manifest names each part, so the error can say which
+   field pointed at which missing file.
+2. **Nothing loads half-empty** — a missing or empty prompt, a missing `search_space`, or a contract
+   whose `direction` contradicts its `objectives.<primary>` is refused at boot with the file and key
+   named. The quiet version of that failure is a model prompted with nothing, which answers anyway.
+3. **A pack is self-contained** — every part must resolve inside the pack directory, so copying the
+   directory (into another repository, or an example) preserves its meaning.
+4. **How much of a difference counts is the contract's answer, not the kernel's.** `judge.compareMetric`
+   takes the minimum effective delta of the metric it compares (0 when the contract states none, which
+   is a strict comparison), and the stop rules use the same number, so one contract decides "improved"
+   for both. A pack that wants a tolerance declares `minimum_effective_delta`; the loader refuses one
+   that is zero, negative, or keyed by a metric the `objectives` do not rank, and a `guardrail` that
+   restates the primary. A tolerance nobody ranks is a comment; a tolerance of zero says every
+   difference counts.
+5. **How a windowed series collapses to one number is the contract's answer too.** `window_mode` is
+   `mean` (the mean of the finite values, over the windows that measured the metric — the default) or
+   `last` (the last window's value), per metric. `readMetric` in the same module applies it to the
+   `window_series` shape [`docs/windowed-samples.md`](windowed-samples.md) describes, and answers "not
+   measured", with a reason, rather than substituting an earlier window when the last one carries no
+   finite number.
+
+### What the metric contract deliberately does not decide (deferred)
+
+**Whether a metric is measurable in the data a given run actually has.** The contract says `hr@10` is
+primary and ranks it; it does not promise that this run's logs produce it. The predecessor carried a
+"which keys are measurable in this profile" table and a `task × metric` whitelist for exactly that
+question, and neither is carried here yet: a resolved contract is a statement about what *would* count,
+not about what *was* produced. `readMetric` returning no value is the closest this comes — a series that
+does not carry the metric yields "not measured" instead of a number — and the qualification itself is
+left for a later ticket rather than approximated.
+
+Point a run at it with `domain: /path/to/the/directory`. Nothing in `packages/` changes; if a second
+pack needs a kernel edit to work, the seam is leaking. `packages/core/test/fixtures/config-only-domain`
+is a full pack that is only configuration, and `packages/core/test/domain.test.js` loads it to hold
+that line.
+
+`examples/generative-recommenders` is a second worked pack, and the harder case: its domain is someone
+else's repository, so `surface.files` names paths inside *that* checkout and every whitelisted gin key
+and source symbol carries a verified `file` + evidence string
+(`packages/core/test/generative-recommenders-pack.test.js` re-checks them against a clone). Its README
+also carries the list of decisions a human has to review — the priors and the whitelist are a domain
+expert's call, and no test can make it.
 
 ---
 
@@ -15,19 +89,28 @@ port is JSON in / JSON out and never calls back into the kernel.
 
 ```js
 platform.submit({ submissionId, candidateId, gpuHours }) → { job_id, state?, harness?, deadline_ms?, duplicate? }
-platform.poll(jobId)                                    → { state, metrics?, error_class?, error_detail?, timing? }
-platform.collect(jobId)                                 → { state, metrics?, error_class?, artifacts[] }
+platform.poll(jobId)                                    → { job_id, state, metrics?, error_class?, error_detail?, timing? }
+platform.collect(jobId | pollResult)                    → { state, metrics?, error_class?, artifacts[] }
 platform.find(candidateId)                              → { job_id, state, harness?, submitted_at_ms?, deadline_ms? } | undefined
 platform.cancel(jobId)                                  → { accepted, state_after }
 ```
 
 `submit` / `poll` / `collect` are the job's life. `find` is what makes a restart continue instead of
-resubmitting; `cancel` is what makes a timeout stop the spend. `assertPlatform(impl)` refuses an
+resubmitting; `cancel` is what makes a timeout stop the spend. `collect` takes the job id **or** the poll result that carries one (`resolveJobId()`), because that
+result is what a caller is holding when it wants the artifacts; anything else is a `TypeError`, never
+a `lost`. `assertPlatform(impl)` refuses an
 implementation missing any of the five — call it at construction, so a typo is a startup log line and
 not a candidate stuck at `SUBMIT`.
 
 `submit().deadline_ms` is a **duration**; `find().deadline_ms` is **absolute**. That asymmetry is
 load-bearing and documented in `packages/exec/README.md`.
+
+`submit()` has one optional input beyond the port's minimum, and it exists because an execution
+surface may not share a filesystem with you: `plan()` returns `{entrypoint, worktreeDir, baseRef}` and
+the adapter packs `worktreeDir`, uploads it, and points `runtime_env.working_dir` at the package
+(`packages/exec/lib/archive.js`). A plan with no `worktreeDir` ships nothing — that is the shape for a
+surface whose nodes already hold the code. See "The candidate's code travels with the job" in
+`packages/exec/README.md` for the request sequence, the exclusion list, and the two inventory checks.
 
 ## The vocabulary is closed
 
@@ -60,6 +143,15 @@ as "still running" and hang a candidate for a night.
 9. **Wall-clock and idle limits are enforced by the poller** (the port does not decide timeouts), and a
    timed-out job is actually cancelled.
 10. **A healthy job inside its limits is left alone.**
+
+## Where the numbers come from, window by window
+
+An executor that reports a *series* rather than one number returns it as the `window_series` artifact
+— one row per window, with the window's bounds and its metrics table. How the run wrote those numbers
+(a tensorboard event file, a marker line in the driver log) is the adapter's business, in
+`packages/exec/lib/window-samples.js`; the shape and its validator are the contract's. The rule for
+pairing a candidate's windows with its baseline's — the intersection, and why no intersection is a
+`missing` and not an `invalid` — is in [windowed-samples.md](windowed-samples.md).
 
 ## What you write
 
@@ -95,17 +187,79 @@ rewriting the records of jobs that already ran.
 ## Wiring it into a run
 
 One branch, in one place: `packages/core/lib/ports.js` → `createPlatform()`. Add `kind: "my-executor"`
-to `executor.kind` in the configuration and pass whatever it needs (`base_url`, a directory, its own
-options) from the same config object. Nothing else in the kernel changes; the phase machine only ever
+to `executor.kind` — in the run configuration, or in the domain pack's `executor` entry when it is the
+domain's default — and pass whatever it needs (`base_url`, a directory, its own options) from the same
+object. Nothing else in the kernel changes; the phase machine only ever
 sees the port.
 
 ## What we have not verified
 
 There is no real cluster in this repository. Ray is tested by replaying recorded response shapes through
-an injected `fetch`, and the one thing to check first on a real deployment is the metrics mount: if the
+an injected transport (`node:http`, because the dashboard's CSRF guard refuses Node's global `fetch`
+for writes), and the one thing to check first on a real deployment is the metrics mount: if the
 shared directory is not shared, every job fails as `data` rather than reporting a fabricated number.
 That is the safe failure, and it is also the most confusing one to debug, so check it before anything
-else.
+else. On a cluster with **no** shared mount at all, do not configure a metrics directory — a packaged
+job reports through `REPRISE_METRICS {json}` on the driver log, which is the measured return channel.
+
+---
+
+# Reach a model (one page)
+
+The loop consults a model at exactly five call sites — LAND's briefing, VERIFY's adversarial review,
+CAND_ANALYZE, ROUND_PLAN, ROUND_REFLECT — and every one of them goes through
+`packages/exec/lib/model.js`. There is no second way in: a phase does not own a parser, and nothing in
+the kernel spawns a process.
+
+## The wire
+
+One question in, one answer out.
+
+```js
+// what the adapter runs (model.command, or model.kind: 'dsh' | 'claude')
+{ protocol: 'dsh-reprise/model-question@1',
+  call_site: 'verify', subject: 'r1-h2', ref: 'a2',
+  prompt: '<the rendered skill + facts + answer shape>',
+  facts: { /* frozen evidence, JSON */ },
+  answer_schema: '{"verdict": "accept" | "reject", ...}',
+  question_id: '<sha256 of the content above>' }
+```
+
+A `kind: 'command'` wrapper receives that object on stdin and must print **one JSON object** on stdout.
+`kind: 'dsh'` and `kind: 'claude'` invoke the shipped CLIs (`dsh --profile headless --json -`,
+`claude -p --output-format stream-json --verbose`) with the *prompt* as their task; the adapter reads the answer
+out of the final stream event, tolerating a fenced block or prose around it.
+
+`question_id` is a digest of the question's content — not a clock, not a counter — which is what makes
+"the same question asked twice" the same question.
+
+## The four ways to get no answer, and the one class they become
+
+`binary_missing`, `exit_non_zero`, `timeout`, `unparseable_answer` — plus `crash`,
+`stream_overflow`, `resource_exhausted` and `port_error` — are all `model_unavailable` with a `cause`
+for the operator. That is the whole contract a caller needs: `isModelUnavailable(error)` is true, no
+artifact was written, no candidate was rejected, and `packages/core/lib/model-failure.js` records one
+`model_unavailable` row in the ops log (`store.ops()`) and retries the phase on a backoff. A phase never
+waits for a model without a deadline (`model.timeout_ms`, default ten minutes).
+
+If you need a sixth engine, add a `kind` to `KINDS` in `packages/exec/lib/model.js` — an argv and a
+stdin renderer — and a case to `packages/exec/test/model.test.js`. Nothing in the kernel changes.
+
+## Where the call is kept
+
+`<workspace>/artifacts/model_call/<call site>/<subject>[/<ref>].json`:
+
+```json
+{ "schema_version": 1, "protocol": "dsh-reprise/model-question@1",
+  "question_id": "…", "call_site": "verify", "subject": "r1-h2", "ref": "a2",
+  "prompt": "…", "facts": { }, "answer_schema": "…",
+  "status": "answered" | "unavailable", "answer": { }, "response": "the model's own words",
+  "error_class": null, "cause": null, "message": null }
+```
+
+No timestamp and no sequence number: the record's identity is the question, so a repeat rewrites the
+same bytes instead of appending a second history. The audit panel (ticket 29) reads these files with
+the workspace directory and nothing else.
 
 ---
 

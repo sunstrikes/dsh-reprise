@@ -22,7 +22,7 @@ import test from 'node:test'
 import { overviewHandler } from '../lib/routes.js'
 import { openWorkspace, runCandidate, seedConfig } from '../../core/test/support/fake-ports.js'
 
-const config = (extra = {}) => ({ metrics: { primary: undefined, objectives: { auc: 'up' } }, ...extra })
+const config = (extra = {}) => ({ metrics: { primary: 'auc', objectives: { auc: 'up' } }, ...extra })
 
 async function portsFor(extra = {}) {
   const ports = openWorkspace({ config: config({ stop: { max_rounds: 0 }, ...extra }) })
@@ -37,8 +37,8 @@ test('a full read returns every fact and a cursor that names the last one; repea
   await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
   const dir = dirOf(ports)
 
-  const first = overviewHandler(dir, {})
-  const second = overviewHandler(dir, {})
+  const first = await overviewHandler(dir, {})
+  const second = await overviewHandler(dir, {})
 
   const facts = ports.store.eventSubjects().reduce((total, subject) => total + ports.store.eventsFor(subject).length, 0)
   assert.equal(first.after, null, 'no cursor was asked for, and the answer says so')
@@ -61,11 +61,11 @@ test('a candidate created after the cursor still arrives: the cursor is workspac
   const dir = dirOf(ports)
 
   // What a browser holds after its first read, before round 2 exists.
-  const { cursor: watermark } = overviewHandler(dir, {})
+  const { cursor: watermark } = await overviewHandler(dir, {})
 
   await runCandidate(ports, { candidateId: 'r2-c1', round: 2, metrics: { auc: 0.75 } })
 
-  const delta = overviewHandler(dir, { after: watermark })
+  const delta = await overviewHandler(dir, { after: watermark })
   const roundTwoFacts = ports.store.eventsFor('r2-c1').length
 
   assert.ok(roundTwoFacts >= 3, 'the fixture really did write a candidate worth watching')
@@ -88,12 +88,12 @@ test('the increment carries the view as well, identical to a full read: a cursor
   const ports = await portsFor({ budget: { gpu_hours_limit: 4 } })
   await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
   const dir = dirOf(ports)
-  const { cursor } = overviewHandler(dir, {})
+  const { cursor } = await overviewHandler(dir, {})
 
   await runCandidate(ports, { candidateId: 'r2-c1', round: 2, metrics: { auc: 0.7401 } })
 
-  const incremental = overviewHandler(dir, { after: cursor })
-  const full = overviewHandler(dir, {})
+  const incremental = await overviewHandler(dir, { after: cursor })
+  const full = await overviewHandler(dir, {})
 
   assert.deepEqual(incremental.data, full.data, 'the derived page is always computed from all facts')
   assert.equal(incremental.data.best.candidate_id, 'r2-c1', 'and it already includes the facts the increment delivered')
@@ -105,8 +105,8 @@ test('a cursor already at the head returns an empty increment and says nothing i
   await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
   const dir = dirOf(ports)
 
-  const head = overviewHandler(dir, {})
-  const idle = overviewHandler(dir, { after: head.cursor })
+  const head = await overviewHandler(dir, {})
+  const idle = await overviewHandler(dir, { after: head.cursor })
 
   assert.deepEqual(idle.incremental.events, [], 'a poll with nothing new costs nothing')
   assert.equal(idle.more, false)
@@ -119,14 +119,14 @@ test('two windows polling the same workspace with different cursors do not distu
   const ports = await portsFor()
   await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
   const dir = dirOf(ports)
-  const early = overviewHandler(dir, {}).cursor
+  const early = (await overviewHandler(dir, {})).cursor
 
   await runCandidate(ports, { candidateId: 'r2-c1', round: 2, metrics: { auc: 0.75 } })
 
   // Interleaved on purpose: a cursor stored server-side would leak one window's position to the other.
-  const windowA = overviewHandler(dir, { after: early })
-  const windowB = overviewHandler(dir, {})
-  const windowAAgain = overviewHandler(dir, { after: early })
+  const windowA = await overviewHandler(dir, { after: early })
+  const windowB = await overviewHandler(dir, {})
+  const windowAAgain = await overviewHandler(dir, { after: early })
 
   assert.deepEqual(windowAAgain, windowA, 'the second window\'s full read did not move the first window\'s cursor')
   assert.equal(windowB.incremental.events.length > windowA.incremental.events.length, true, 'the full read still saw everything')
@@ -140,7 +140,7 @@ test('a malformed cursor is refused instead of silently answered with a full ref
   const dir = dirOf(ports)
 
   for (const after of ['nonsense', '5', '5:r1-c1', ':r1-c1:5', '5::5', 'x:r1-c1:5']) {
-    assert.throws(() => overviewHandler(dir, { after }), /cursor/i, `after=${JSON.stringify(after)} must be refused`)
+    await assert.rejects(overviewHandler(dir, { after }), /cursor/i, `after=${JSON.stringify(after)} must be refused`)
   }
   ports.store.close()
 })

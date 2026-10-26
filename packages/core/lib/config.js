@@ -1,10 +1,11 @@
 /**
  * The plugin configuration, validated once at boot instead of discovered mid-run.
  *
- * Everything domain-specific is here as data (user stories 27/28): the metric contract and its
- * direction, the round budget, the spend cap, the executor, the candidate implementer and the model
- * port. The kernel reads none of it as policy — it reads it as numbers and names — which is why a
- * user changes a metric direction without touching code.
+ * A run is **(run configuration) × (domain pack)**. What this run decides — the workspace it owns,
+ * its budget, how many rounds, which implementer and which model port — is here. What the *domain*
+ * knows — the metric contract, the priors, the adjustable surface, the five prompts and the executor
+ * entry — is in the pack, and `domain` names it. The kernel reads neither as policy: it reads them as
+ * numbers and names, which is why a user changes a metric direction without touching code.
  *
  * Two rules shape the validation:
  *
@@ -21,14 +22,19 @@
 
 import { resolve as resolvePath } from 'node:path'
 
-import { configWarnings, EXECUTOR_KINDS } from './warnings.js'
+import { isPlainObject } from '@dsh-reprise/contract'
+import { MODEL_KINDS } from '@dsh-reprise/exec/model'
+
+import { DomainPackError, executorProblems, loadDomainPack } from './domain.js'
+import { gpuExclusivityProblems } from './jobs.js'
+import { bindingOf, resolveMetricContract } from './metric-contract.js'
+import { configWarnings, modelPortDeclared } from './warnings.js'
 
 /** Five seconds: the cadence ticket 01 measured in the real host (78 beats / 415 s, drift ≤ 3 ms). */
 export const DEFAULT_INTERVAL_MS = 5_000
 
 const CANDIDATE_KINDS = Object.freeze(['command', 'claude', 'dsh'])
 
-const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isText = (value) => typeof value === 'string' && value.trim() !== ''
 const isCommand = (value) => Array.isArray(value) && value.length > 0 && value.every(isText)
 
@@ -36,16 +42,17 @@ const isCommand = (value) => Array.isArray(value) && value.length > 0 && value.e
  * Validate and normalise one plugin/CLI configuration.
  *
  * @param {unknown} raw the object the host's bundle patch, the `run` CLI, or a test hands over
- * @param {{cwd?: string}} [options] `workspace` is resolved against this, not against wherever the
- *   host process happens to be
+ * @param {{cwd?: string, loadDomain?: (dir: string) => object}} [options] `workspace` and `domain`
+ *   are resolved against `cwd`, not against wherever the host process happens to be. `loadDomain` is
+ *   the seam a test uses to hand over a pack without a directory of files on disk.
  * @returns {{ok: true, config: object, problems: string[], warnings: object[]}
  *         | {ok: false, problem: string, problems: string[], warnings: object[]}}
  */
-export function resolveConfig(raw = {}, { cwd = process.cwd() } = {}) {
+export function resolveConfig(raw = {}, { cwd = process.cwd(), loadDomain = loadDomainPack } = {}) {
   const problems = []
   const fail = () => ({ ok: false, problem: problems[0], problems, warnings: [] })
 
-  if (!isObject(raw)) {
+  if (!isPlainObject(raw)) {
     problems.push('the plugin configuration must be an object')
     return fail()
   }
@@ -54,26 +61,54 @@ export function resolveConfig(raw = {}, { cwd = process.cwd() } = {}) {
     problems.push('workspace must be the path of the directory this run owns, e.g. workspace: .reprise/run-1')
   }
 
-  const executor = raw.executor ?? { kind: 'local' }
-  if (!isObject(executor)) problems.push('executor must be an object with a kind')
-  else {
-    if (!EXECUTOR_KINDS.includes(executor.kind ?? 'local')) {
-      problems.push(`executor.kind must be one of ${EXECUTOR_KINDS.join(', ')} (got ${JSON.stringify(executor.kind)})`)
+  // The pack is loaded here, at boot, because every way it can be wrong is a way the run cannot
+  // work: no metric contract means nothing to compare, no prompts means a model answering nothing,
+  // no executor entry means no job. `loadDomain` is the test seam; production reads the directory.
+  let pack
+  if (!isText(raw.domain)) {
+    problems.push(
+      'domain must be the directory of one domain pack (a directory with a domain.json): the metric contract, ' +
+        'priors, adjustable surface, five prompts and executor entry are read from there, not from the kernel',
+    )
+  } else {
+    try {
+      pack = loadDomain(resolvePath(cwd, raw.domain))
+    } catch (error) {
+      if (!(error instanceof DomainPackError)) throw error
+      problems.push(...error.problems)
     }
-    if ((executor.kind ?? 'local') === 'local' && !isCommand(executor.command)) {
-      problems.push(
-        'executor.command must be a non-empty argv array — the local executor runs one process per job, ' +
-          'e.g. command: ["node", "train.mjs"]',
-      )
-    }
-    if (executor.kind === 'ray' && !isText(executor.base_url)) {
-      problems.push('executor.base_url must be the Ray dashboard URL when executor.kind is ray')
-    }
+  }
+
+  // The domain ships the entry that measures it; a run may override it (a laptop job versus the
+  // same training script on a cluster), and either way the shape is checked by one validator.
+  const executor = raw.executor ?? pack?.executor
+  if (executor === undefined) {
+    problems.push('executor must be an object with a kind — neither the run nor its domain pack declared one')
+  } else {
+    problems.push(...executorProblems(executor))
+    // The cluster does not reserve the cards, so "which of the two ways do we own them" is a
+    // configuration decision that has to be made on purpose. Both at once is a contradiction and is
+    // refused here; neither is legal-but-dangerous and is warned about by name in `warnings.js`.
+    if (isPlainObject(executor)) problems.push(...gpuExclusivityProblems(executor))
+  }
+
+  // The metric contract: the run's own restatement, or the pack's. One resolver reads it — the same
+  // one the ranking, the stop rules and the gate call — so a contract that is absent or contradicts
+  // itself is refused here, at boot, rather than being reinterpreted differently by three readers later.
+  const metricContract = raw.metrics ?? pack?.metricContract
+  let metricResolution
+  if (metricContract === undefined) {
+    problems.push(
+      'metrics: no metric contract — the run declares none and its domain pack supplies none, so nothing says which metric decides "better"',
+    )
+  } else {
+    metricResolution = resolveMetricContract(metricContract)
+    for (const problem of metricResolution.problems) problems.push(`metrics: ${problem.message}`)
   }
 
   const candidate = raw.candidate
   if (candidate !== undefined) {
-    if (!isObject(candidate)) problems.push('candidate must be an object with a kind')
+    if (!isPlainObject(candidate)) problems.push('candidate must be an object with a kind')
     else {
       const kind = candidate.kind ?? 'command'
       if (!CANDIDATE_KINDS.includes(kind)) {
@@ -86,17 +121,29 @@ export function resolveConfig(raw = {}, { cwd = process.cwd() } = {}) {
     const runner = raw.runner
     // LAND briefs an implementer inside the worktree the runner created. A candidate with no runner
     // is a run that dies at the first landing with a TypeError, which is why it is refused here.
-    if (!isObject(runner) || !isText(runner.repo) || !isText(runner.dir)) {
+    if (!isPlainObject(runner) || !isText(runner.repo) || !isText(runner.dir)) {
       problems.push('runner.repo and runner.dir are required when a candidate implementer is configured')
     }
   }
 
+  // The judgement phases reach a model through one command adapter. `kind` names a shipped CLI
+  // (`dsh --profile headless`, `claude -p`); `command` names a wrapper of your own. One of them must
+  // be there, because "no model port" is a run that stalls at the first round rather than a run that
+  // degrades.
   const model = raw.model
-  if (model !== undefined && (!isObject(model) || !isCommand(model.command))) {
-    problems.push('model.command must be a non-empty argv array — it is how the judgement phases reach a model')
+  if (model !== undefined) {
+    if (!isPlainObject(model)) problems.push('model must be an object with a kind or a command')
+    else if (model.kind === undefined && !isCommand(model.command)) {
+      problems.push('model must name a kind (dsh, claude or command) or a non-empty model.command argv')
+    } else if (model.kind !== undefined && !MODEL_KINDS.includes(model.kind)) {
+      problems.push(`model.kind must be one of ${MODEL_KINDS.join(', ')} (got ${JSON.stringify(model.kind)})`)
+    } else if ((model.kind ?? 'command') === 'command' && !isCommand(model.command)) {
+      problems.push('model.command must be a non-empty argv array when model.kind is command')
+    }
   }
+  const hasModel = isPlainObject(model) && (modelPortDeclared(model) === true)
 
-  if (raw.rounds !== undefined && raw.rounds !== false && (model === undefined || !isCommand(model.command))) {
+  if (raw.rounds !== undefined && raw.rounds !== false && !hasModel) {
     // ROUND_PLAN and ROUND_REFLECT are model entries; without a port the run stalls at the first
     // round and only the log says why. Refusing at boot is the same information, earlier.
     problems.push(
@@ -114,9 +161,24 @@ export function resolveConfig(raw = {}, { cwd = process.cwd() } = {}) {
 
   const config = {
     ...raw,
+    // The whole contract, not the two fields the readers used to need: the tolerance, the guardrail
+    // and the window reading are part of "which metric decides", and a run that dropped them would
+    // leave the ranking and the gate reading a contract nobody wrote.
+    metrics: { ...metricContract },
     executor: { kind: 'local', ...executor },
     interval_ms: intervalMs,
     workspaceDir: resolvePath(cwd, raw.workspace),
+    domainPack: pack,
   }
+
+  // The round workflow's binding is *derived* from the same resolution rather than declared beside it:
+  // `rounds.metric` is the shape rounds.js freezes at INIT, and a second account of which metric leads
+  // would let the gate and the round planner optimise different numbers. An explicit `rounds.metric`
+  // still wins here — and `warnings.js` reports it when it disagrees with the contract.
+  if (isPlainObject(config.rounds) && config.rounds.metric === undefined) {
+    const binding = bindingOf(metricResolution)
+    if (binding !== undefined) config.rounds = { ...config.rounds, metric: binding }
+  }
+
   return { ok: true, config, problems: [], warnings: configWarnings(config) }
 }

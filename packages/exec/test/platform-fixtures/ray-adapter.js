@@ -37,7 +37,7 @@ export async function rayHarness({ duplicateResponse } = {}) {
 
   const platform = createRayPlatform({
     baseUrl: 'http://ray.fake:8265',
-    fetch: fake.fetch,
+    request: fake.request,
     plan: ({ candidateId, submissionId }) => {
       // Submitting is what registers the job with the fake, exactly as the real submit body is what
       // the cluster reads.

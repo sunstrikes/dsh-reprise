@@ -15,30 +15,30 @@ import test from 'node:test'
 
 import {
   CALL_SITES,
-  DEFAULT_SKILLS_DIR,
   SkillMissingError,
   loadSkill,
   loadSkills,
   renderPrompt,
   skillPath,
 } from '../lib/skills.js'
+import { FEED_PROMPTS_DIR } from './support/domain.js'
 
 /** A throwaway copy of the shipped pack, so a test may edit markdown without touching the repo. */
 function copiedPack() {
   const dir = mkdtempSync(join(tmpdir(), 'reprise-skills-'))
-  cpSync(DEFAULT_SKILLS_DIR, dir, { recursive: true })
+  cpSync(FEED_PROMPTS_DIR, dir, { recursive: true })
   return dir
 }
 
 test('every model call site has its own markdown skill, and none is empty', () => {
-  const skills = loadSkills(DEFAULT_SKILLS_DIR)
+  const skills = loadSkills(FEED_PROMPTS_DIR)
   assert.deepEqual([...skills.keys()], [...CALL_SITES], 'one skill per call site, in a stable order')
   for (const callSite of CALL_SITES) {
     const skill = skills.get(callSite)
     assert.equal(skill.call_site, callSite)
     assert.ok(skill.body.length > 200, `${callSite}: a skill too short to instruct anything is a placeholder`)
     assert.ok(skill.description.length > 20, `${callSite}: the routing description must say when to use it`)
-    assert.equal(skill.path, skillPath(DEFAULT_SKILLS_DIR, callSite), 'the record points at the file it came from')
+    assert.equal(skill.path, skillPath(FEED_PROMPTS_DIR, callSite), 'the record points at the file it came from')
   }
 })
 
@@ -56,7 +56,7 @@ test('editing a skill file changes the prompt without touching code or repackagi
 })
 
 test('the prompt carries the skill, then the frozen facts, then the required answer shape', () => {
-  const skill = loadSkill(DEFAULT_SKILLS_DIR, 'verify')
+  const skill = loadSkill(FEED_PROMPTS_DIR, 'verify')
   const prompt = renderPrompt(skill, {
     facts: { candidate_id: 'c1', checks: [{ name: 'static_imports', result: 'pass' }] },
     answer: '{"verdict": "accept" | "reject"}',
@@ -98,7 +98,7 @@ test('a missing skill fails loudly instead of prompting the model with nothing',
 })
 
 test('an unknown call site is refused rather than silently mapped to a file', () => {
-  assert.throws(() => skillPath(DEFAULT_SKILLS_DIR, 'judge_everything'), /unknown call site/)
+  assert.throws(() => skillPath(FEED_PROMPTS_DIR, 'judge_everything'), /unknown call site/)
 })
 test('the injection packet reaches the prompt, and an empty one says so', () => {
   const skill = { body: 'Judge this.' }

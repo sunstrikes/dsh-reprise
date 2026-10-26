@@ -1,0 +1,4 @@
+{
+  "kind": "local",
+  "command": ["node", "-e", "0"]
+}

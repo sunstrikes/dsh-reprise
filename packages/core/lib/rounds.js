@@ -7,9 +7,9 @@
  *
  * Two of the four phases consult a model — ROUND_PLAN and ROUND_REFLECT — and both must hand back
  * an artifact the contract accepts before the phase moves. The other two call it *zero* times:
- * freezing a baseline the run already produced is arithmetic, and deciding the round budget is spent
- * is a comparison against a number in the configuration. A run that is waiting three days for
- * training jobs must not wake a model four thousand times to be told so.
+ * BASELINE dispatches a job and freezes what it measured (`baseline.js`), and deciding the round
+ * budget is spent is a comparison against a number in the configuration. A run that is waiting three
+ * days for training jobs must not wake a model four thousand times to be told so.
  *
  * Where the state lives: one workspace KV row (`rounds`), not the `workspace` row. The `workspace`
  * row is where pausing and the start time live, and two features writing the same JSON object is how
@@ -23,10 +23,16 @@ import { dirname, join } from 'node:path'
 import { isBlocking, isNonEmptyString, isTerminal, validateArtifact } from '@dsh-reprise/contract'
 
 import { fileArtifacts, memoryArtifacts } from './artifacts.js'
+import { ANCHOR_MODES, anchorStep, readAnchor } from './anchor.js'
+import { stepBaseline } from './baseline.js'
+import { frontierOf, parentSnapshot, parentsOf } from './frontier.js'
+import { ranking } from './ranking.js'
+import { MODEL_UNAVAILABLE, isModelUnavailable, modelFailureOf, recordModelUnavailable } from './model-failure.js'
 // The cycle with loop.js (loop → rounds → loop) is safe by construction: `createCandidate` is a
 // hoisted function declaration, and it is only called while a tick is already running.
 import { createCandidate } from './loop.js'
 import { pause } from './budget.js'
+import { recordStop } from './stop.js'
 // Registers `round_reflect` / `land_hypothesis` even when the judge is a test double.
 import './artifact-kinds.js'
 
@@ -42,6 +48,12 @@ export const ROUND_DEFAULTS = Object.freeze({
   candidates_per_round: 2,
   /** A refused artifact is retried on a backoff, then stopped for a human — never retried forever. */
   retry: Object.freeze({ base_ms: 60_000, max_ms: 3_600_000, max_attempts: 3 }),
+  /**
+   * Who may move the code base. `automatic` applies the double-domination rule between rounds;
+   * `human` files a proposal and waits for an `anchor` intent, because moving the tree every
+   * candidate branches from is a policy a run may not be trusted with (ticket 23).
+   */
+  anchor: Object.freeze({ mode: 'automatic' }),
 })
 
 /** @param {any} store */
@@ -72,6 +84,10 @@ export function roundSettings(config) {
     max_rounds: raw.max_rounds ?? ROUND_DEFAULTS.max_rounds,
     candidates_per_round: raw.candidates_per_round ?? ROUND_DEFAULTS.candidates_per_round,
     retry: Object.freeze({ ...ROUND_DEFAULTS.retry, ...retry }),
+    // A config may spell it `rounds.anchor: "human"` or `rounds.anchor: { mode: "human" }`; both
+    // mean the same thing and both are validated, so a typo pauses the run instead of quietly
+    // behaving like the default.
+    anchor_mode: typeof raw.anchor === 'string' ? raw.anchor : raw.anchor?.mode ?? ROUND_DEFAULTS.anchor.mode,
     baseline: raw.baseline,
   }
   return { settings, problem: settingsProblem(settings) }
@@ -85,6 +101,9 @@ function settingsProblem(settings) {
   if (!Number.isSafeInteger(settings.max_rounds) || settings.max_rounds <= 0) return 'rounds.max_rounds must be a positive integer'
   if (!Number.isSafeInteger(settings.candidates_per_round) || settings.candidates_per_round <= 0) {
     return 'rounds.candidates_per_round must be a positive integer'
+  }
+  if (!ANCHOR_MODES.includes(settings.anchor_mode)) {
+    return `rounds.anchor must be one of ${ANCHOR_MODES.join(', ')} — got ${JSON.stringify(settings.anchor_mode)}`
   }
   return undefined
 }
@@ -110,13 +129,21 @@ const candidateIdsOfRound = (store, round) =>
  * Deliberately no recommendation, no previous plan and no model output of its own beyond the last
  * reflection — a model re-reading its own past prose converges on it.
  */
-function roundFacts(store, state, settings) {
+function roundFacts(store, state, settings, frontierFacts) {
   return {
     round: state.round ?? 0,
     max_rounds: settings.max_rounds,
     candidates_per_round: settings.candidates_per_round,
     metric_contract: { ...settings.metric },
     baseline: state.baseline === undefined ? null : { metric: state.baseline.metric, value: state.baseline.value },
+    // The non-dominated set and the parents chosen from it are computed in code and handed over
+    // whole: a model that is asked "who should this round build on" answers with prose, and every
+    // number in prose is a number nobody can trace to a fact. `null` means nobody computed it, which
+    // is what a reflection over a legacy workspace sees.
+    frontier: frontierFacts ?? null,
+    // Where the trees come from: the code base anchor (ticket 23), or null for "the runner's own
+    // base ref". The planner does not choose it — it is a fact it plans *on*.
+    code_base: readAnchor(store) ?? null,
     candidates: candidateOutcomes(store),
     previous_reflection: state.last_reflection ?? null,
   }
@@ -235,21 +262,85 @@ function advanceFromInit({ store, now, settings }, state) {
 }
 
 /**
- * BASELINE: freeze the evidence every candidate will be compared against.
+ * BASELINE: produce and freeze the evidence every candidate will be compared against.
  *
- * It arrives through a port (the baseline run finished somewhere else) or from configuration; either
- * way it is copied into the workspace state once, and ROUND_PLAN only ever reads it from there. If it
- * has not arrived, the workspace waits — it does not guess a baseline, and it does not ask a model
- * what the baseline probably was.
+ * Four sources, in the order they are tried, and the order *is* the decision:
+ *
+ *   1. **A frozen baseline already in the workspace.** Read back, never re-measured: a second boot
+ *      must not replace the denominator that earlier rounds were compared against.
+ *   2. **A number the configuration states.** Frozen as what it is — `source: 'configured'` — so a
+ *      reader can tell a typed-in denominator from a measured one.
+ *   3. **The executor** (`baseline.js`): submit a job, wait, collect its windowed samples. This is
+ *      how a run normally gets a denominator, and it is the same `submit → poll → collect` path a
+ *      candidate takes.
+ *   4. **The evidence file an older workspace carries** (`baseline.json`, through the port). Kept
+ *      for a workspace whose baseline was measured before the loop could do it, and for a run with
+ *      no executor port at all.
+ *
+ * If none of them answers, the workspace waits. It does not guess a baseline, and it does not ask a
+ * model what the baseline probably was.
  */
-async function freezeBaseline({ store, now, settings, baseline: port }, state) {
+async function freezeBaseline(context, state) {
+  const { store, now, settings, baseline: port, platform } = context
+
+  if (state.baseline !== undefined) {
+    // Already a fact. Re-entering BASELINE (a rebuilt state row, a resumed old workspace) must not
+    // turn into a second measurement.
+    writeState(store, { ...state, phase: 'ROUND_PLAN', attempts: 0, next_action_at: 0 })
+    return { action: `baseline already frozen (${state.baseline.metric}=${state.baseline.value}) -> round_plan`, phase: 'ROUND_PLAN', round: state.round }
+  }
+
+  if (settings.baseline !== undefined) {
+    const evidence = evidenceFrom(settings.baseline, settings.metric.name)
+    if (evidence !== undefined) return freeze(context, state, { ...evidence, source: 'configured' })
+  }
+
+  if (platform !== undefined && typeof platform.submit === 'function') {
+    const result = await stepBaseline(context, state)
+    if (result.status === 'frozen') return freeze(context, state, result.baseline)
+    if (result.status === 'stopped') {
+      // A workspace-level conclusion, recorded where every other stop is: the event explains it, the
+      // state absorbs it, and the next tick reports it as already concluded instead of re-running a
+      // baseline that cannot run.
+      const recorded = recordStop({ store, clock: context.clock, log: context.log }, result.decision)
+      return { action: result.action, phase: 'BASELINE', round: state.round, stopped: recorded }
+    }
+    if (result.next_action_at !== undefined) {
+      writeState(store, { ...state, attempts: (state.attempts ?? 0) + 1, next_action_at: result.next_action_at })
+    }
+    return { action: result.action, phase: 'BASELINE', round: state.round }
+  }
+
+  // No executor and no configured number: the evidence file is the last source there is.
   const evidence = await baselineEvidence(settings, port)
   if (evidence === undefined) return { action: 'waiting_for_baseline', phase: 'BASELINE', round: state.round }
+  return freeze(context, state, evidence)
+}
 
-  const frozen = { metric: evidence.metric, value: evidence.value, frozen_at_ms: now }
+/** Write the frozen baseline and move to ROUND_PLAN. One place, so the record has one shape. */
+function freeze({ store, now }, state, evidence) {
+  const frozen = {
+    metric: evidence.metric,
+    value: evidence.value,
+    unit: evidence.unit,
+    windows: evidence.windows,
+    window_series: evidence.window_series,
+    job_id: evidence.job_id,
+    source: evidence.source,
+    frozen_at_ms: now,
+  }
   writeState(store, { ...state, phase: 'ROUND_PLAN', round: 0, baseline: frozen, attempts: 0, next_action_at: 0 })
   store.logOp('baseline_frozen', frozen, now)
   return { action: 'baseline frozen -> round_plan', phase: 'ROUND_PLAN', round: 0 }
+}
+
+/** A configured or file-borne baseline: a number and the metric it is a number *of*. */
+function evidenceFrom(raw, metricName) {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? { metric: metricName, value: raw } : undefined
+  if (raw === null || raw === undefined) return undefined
+  const value = raw.value
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+  return { metric: isNonEmptyString(raw.metric) ? raw.metric : metricName, value }
 }
 
 async function baselineEvidence(settings, port) {
@@ -258,11 +349,8 @@ async function baselineEvidence(settings, port) {
     const read = await port.read()
     if (read !== undefined && read !== null) raw = read
   }
-  if (typeof raw === 'number') return Number.isFinite(raw) ? { metric: settings.metric.name, value: raw } : undefined
-  if (raw === null || raw === undefined) return undefined
-  const value = raw.value
-  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
-  return { metric: isNonEmptyString(raw.metric) ? raw.metric : settings.metric.name, value }
+  const evidence = evidenceFrom(raw, settings.metric.name)
+  return evidence === undefined ? undefined : { ...evidence, source: 'evidence' }
 }
 
 /**
@@ -303,6 +391,77 @@ async function roundPlanStep(context, state) {
   return { action: `round ${round} closed`, phase: 'ROUND_PLAN', round }
 }
 
+/**
+ * The contract parent selection compares under.
+ *
+ * The run's metric contract when it declared one; otherwise the round workflow's own metric, which is
+ * what that workflow optimises. An absent contract is not "rank nothing quietly": the ranking reports
+ * `missing` and the roster falls back to the baseline, which is a decision a reader can see.
+ */
+function parentMetricConfig(config, metric) {
+  if (config?.metrics !== undefined) return { metrics: config.metrics }
+  // No contract and no frozen round metric: the ranking says `missing` and the roster is the
+  // baseline. Naming a default metric here would be the kernel inventing what "better" means.
+  if (typeof metric?.name !== 'string' || metric.name === '') return { metrics: undefined }
+  return { metrics: { primary: metric.name, objectives: { [metric.name]: metric.direction === 'lower' ? 'down' : 'up' } } }
+}
+
+/** The frontier-relevant fork point: the highest event sequence any candidate had reached. */
+function eventPrefixOf(store) {
+  let last = 0
+  for (const subject of store.eventSubjects()) last = Math.max(last, store.maxSeq(subject))
+  return { last_local_seq: last }
+}
+
+/**
+ * The parents this round starts from, and the snapshot that says so.
+ *
+ * Computed from facts alone: the ranking over every candidate, the non-dominated set over that, the
+ * per-axis top-k rotation over that. The baseline is in the set by construction, so a workspace with
+ * nothing comparable yet plans its first round from the baseline — the behaviour every existing
+ * workspace already had, now as a decision instead of an omission.
+ *
+ * **The rotation offset is the round's, not a constant.** `parentsOf` interleaves the per-axis lists
+ * so every axis leads before any axis gets a second slot, and `offset` decides which axis leads. A
+ * fixed 0 would mean the contract's first axis led every round of the run: the second objective would
+ * be ranked, represented and never *leading*, which is the predecessor's one-axis search wearing a
+ * multi-objective contract. So the offset moves on by one each round — `(round - 1) % axes`, so round
+ * 1 leads with the primary axis and the round after it leads with the next one. The round is the input
+ * rather than a counter because a re-plan of the same round must rotate the same way: the snapshot's
+ * `rotation.offset` has to be re-derivable from the facts, and a tick counter is not a fact.
+ */
+function parentRoster({ store }, state, round, settings, view) {
+  const set = frontierOf(view, { baseline: state.baseline })
+  const axes = set.contract?.ok === true ? set.contract.objectives.length : 0
+  const offset = axes === 0 ? 0 : (round - 1) % axes
+  const parents = parentsOf(set, { k: settings.candidates_per_round, offset })
+  const snapshot = parentSnapshot({ round, events_prefix: eventPrefixOf(store), set, parents, offset })
+  return {
+    set,
+    parents,
+    offset,
+    snapshot,
+    // What the planner is told: the set with its vectors, and the roster. Whole, unranked, untrimmed.
+    facts: {
+      members: set.members.map((member) => ({
+        candidate_id: member.candidate_id,
+        round: member.round ?? null,
+        vector: { ...member.vector },
+        baseline: member.baseline === true,
+      })),
+      parents: [...parents],
+      empty: set.empty,
+    },
+  }
+}
+
+/** A frozen roster, reshaped for a prompt: the reflection sees the parents its round actually used. */
+function frozenRoster(state) {
+  const frozen = state.plan?.parent_snapshot?.content
+  if (frozen === undefined) return undefined
+  return { members: frozen.frontier, parents: frozen.parents, empty: frozen.empty }
+}
+
 async function planNextRound(context, state) {
   const { store, clock, now, settings, judge } = context
   const round = (state.round ?? 0) + 1
@@ -312,11 +471,31 @@ async function planNextRound(context, state) {
     return { action: 'finalize', phase: 'FINALIZE', round: state.round ?? 0 }
   }
 
+  // The ranking is computed once per plan, because two decisions read it: the code base anchor
+  // (below) and the parent roster. Two derivations of the same numbers are two chances to disagree.
+  const view = ranking(store, parentMetricConfig(context.config, state.metric), { persist: true })
+
+  // The code base, before the roster: which *tree* the round's candidates branch from is settled
+  // here, between rounds, and it is a strictly separate question from who their parent is. The
+  // denominator this comparison reads is the frozen baseline and it is never written here — a roll
+  // moves the tree, not the ruler (ticket 23).
+  const roll = anchorStep(context, state, view, settings)
+
+  // Who this round starts from is decided from the facts, before any model is asked. The plan then
+  // proposes hypotheses *on* those parents; it does not get to pick its own base refs.
+  const roster = parentRoster(context, state, round, settings, view)
+
   let artifact
   try {
-    artifact = await judge.plan({ round, facts: roundFacts(store, state, settings) })
+    artifact = await judge.plan({ round, facts: roundFacts(store, state, settings, roster.facts) })
   } catch (error) {
-    return refuse(context, state, { step: 'round_plan', status: 'invalid', message: `the round plan could not be produced: ${messageOf(error)}` })
+    // No model answered: not a refused artifact. Refusing here would spend the round's retry budget
+    // and then ask a human to fix a provider, and the plan would look like a bad hypothesis.
+    if (isModelUnavailable(error)) return modelOut(context, state, 'round_plan', error)
+    // Nothing was produced, so there is no artifact to call malformed: refused with the cause and no
+    // four-state status (CODING_STANDARDS §2). `status: 'invalid'` here would send the next reader
+    // looking for a plan that breaks its schema, and the truth is that there is no plan at all.
+    return refuse(context, state, { step: 'round_plan', message: `the round plan could not be produced: ${messageOf(error)}` })
   }
 
   const verdict = validateArtifact('candidate_plan', artifact)
@@ -326,9 +505,10 @@ async function planNextRound(context, state) {
   // a plan that ignores that is refused rather than quietly truncated, because a dropped hypothesis
   // is an idea nobody can see was dropped.
   if (artifact.hypotheses.length > settings.candidates_per_round) {
+    // The artifact is well-formed — it is the *budget* that cannot afford it. Not `invalid`: nothing
+    // about the plan breaks the contract, so the refusal carries no four-state status.
     return refuse(context, state, {
       step: 'round_plan',
-      status: 'invalid',
       message: `the plan names ${artifact.hypotheses.length} hypotheses but this round affords ${settings.candidates_per_round} (candidates_per_round)`,
     })
   }
@@ -341,9 +521,10 @@ async function planNextRound(context, state) {
     try {
       landing = await judge.land({ candidateId, round, hypothesis, now })
     } catch (error) {
+      // The freeze failed (a read-only artifact store, a missing skill file) — a failed write, not a
+      // malformed artifact, so no four-state status.
       return refuse(context, state, {
         step: 'land',
-        status: 'invalid',
         message: `the hypothesis could not be frozen for ${candidateId}: ${messageOf(error)}`,
       })
     }
@@ -357,8 +538,15 @@ async function planNextRound(context, state) {
   // Facts first: the plan is on disk before a candidate exists, so a crash cannot leave candidates
   // whose round has no recorded plan. Re-planning after such a crash re-creates the same candidate
   // ids, and `createCandidate` treats that as `exists`.
+  // Freeze who this round starts from. Content-addressed, so a crash and a re-plan land on the same
+  // address, and any change in the facts lands on a different one — see `parentSnapshot`.
+  const frozenParents = context.artifacts.write(`round-${round}/parents`, {
+    address: roster.snapshot.address,
+    content: roster.snapshot.content,
+  })
+
   const stored = context.artifacts.write(`round-${round}/candidate_plan`, artifact)
-  for (const landing of landings) {
+  for (const [index, landing] of landings.entries()) {
     const frozen = context.artifacts.write(`round-${round}/land-${landing.candidateId}`, landing.artifact)
     const created = createCandidate({ store, clock }, { candidateId: landing.candidateId, round, hypothesis: landing.artifact.statement })
     // `createCandidate` records the hypothesis in the event but not in the phase state, and every
@@ -366,7 +554,11 @@ async function planNextRound(context, state) {
     // candidate had one at all). Written from here so this ticket's edit to loop.js stays the phase
     // wiring only; a one-line fix in loop.js would make this redundant.
     const phase = store.getState(landing.candidateId, 'phase') ?? {}
-    store.setState(landing.candidateId, 'phase', { ...phase, hypothesis: landing.artifact.statement })
+    // Candidate i starts from parent i of the roster, wrapping when the round affords more candidates
+    // than the frontier holds. Written where LAND reads it (`state.parent_id`), so the parent is a
+    // fact of the candidate rather than something the plan text claimed.
+    const parentId = roster.parents[index % roster.parents.length]
+    store.setState(landing.candidateId, 'phase', { ...phase, hypothesis: landing.artifact.statement, parent_id: parentId })
     store.setState(landing.candidateId, 'land', {
       artifact: landing.artifact,
       prompt: landing.prompt,
@@ -379,14 +571,36 @@ async function planNextRound(context, state) {
   writeState(store, {
     ...state,
     round,
-    plan: { round, path: stored.path, sha256: stored.sha256, at_ms: now },
+    plan: {
+      round,
+      path: stored.path,
+      sha256: stored.sha256,
+      at_ms: now,
+      // The address is the identity of the decision; the path is where the bytes live. Both are kept
+      // so "this round started from whom" is answerable from the fact plane alone.
+      parent_snapshot: { address: roster.snapshot.address, path: frozenParents.path, sha256: frozenParents.sha256 },
+    },
     reflection: undefined,
     attempts: 0,
     next_action_at: 0,
   })
   store.logOp(
     'round_plan_accepted',
-    { round, hypotheses: artifact.hypotheses.length, candidates: landings.map((landing) => landing.candidateId), artifact: stored.path },
+    {
+      round,
+      hypotheses: artifact.hypotheses.length,
+      candidates: landings.map((landing) => landing.candidateId),
+      artifact: stored.path,
+      parents: roster.parents,
+      // Which axis led this round's roster, beside whom it produced: a reader asking "why did the
+      // secondary objective lead round 3" gets the rotation, not a hunt through the snapshot file.
+      rotation_offset: roster.offset,
+      parent_snapshot: roster.snapshot.address,
+      // Recorded beside the parents because a reader asking "where did this round's candidates
+      // start from" needs both answers: the parent is whom they build on, the code base is the tree.
+      code_base: readAnchor(store) ?? null,
+      code_base_decision: roll.decision.reason,
+    },
     now,
   )
   return { action: `planned round ${round}`, phase: 'ROUND_PLAN', round }
@@ -398,9 +612,10 @@ async function reflectRound(context, state) {
 
   let artifact
   try {
-    artifact = await judge.reflect({ round, facts: roundFacts(store, state, settings), now })
+    artifact = await judge.reflect({ round, facts: roundFacts(store, state, settings, frozenRoster(state)), now })
   } catch (error) {
-    return refuse(context, state, { step: 'round_reflect', status: 'invalid', message: `the reflection could not be produced: ${messageOf(error)}` })
+    if (isModelUnavailable(error)) return modelOut(context, state, 'round_reflect', error)
+    return refuse(context, state, { step: 'round_reflect', message: `the reflection could not be produced: ${messageOf(error)}` })
   }
 
   const verdict = validateArtifact('round_reflect', artifact)
@@ -431,36 +646,86 @@ function finalizeStep({ store, now }, state) {
 }
 
 /**
- * A refused artifact: record it, back off, and after the retry budget is spent, stop for a human.
+ * No model answered at a workspace phase: record one operator fact, back off, change no artifact.
+ *
+ * The workspace keeps its `attempts` (refused artifacts) untouched on purpose — an outage is not a
+ * malformed answer, and spending the retry budget on one would end with a pause that tells a human to
+ * go fix a provider they cannot reach from here.
+ */
+function modelOut(context, state, step, failure) {
+  const { store, now, log } = context
+  const outcome = recordModelUnavailable({
+    store,
+    now,
+    step,
+    subject: `round-${Math.max(1, state.plan?.round ?? (state.round ?? 0) + 1)}`,
+    failure: modelFailureOf(failure),
+    attempts: state.model_attempts ?? 0,
+  })
+  writeState(store, { ...state, model_attempts: outcome.attempts, next_action_at: outcome.next_action_at })
+  log?.(`workspace: no model answered at ${step} (${outcome.cause ?? 'unknown cause'}) — retrying in ${outcome.next_action_at - now} ms`)
+  return {
+    action: MODEL_UNAVAILABLE,
+    phase: state.phase,
+    round: state.round,
+    cause: outcome.cause,
+    message: outcome.message,
+    attempts: outcome.attempts,
+    next_action_at: outcome.next_action_at,
+  }
+}
+
+/**
+ * A refusal: record it, back off, and after the retry budget is spent, stop for a human.
  *
  * Backoff rather than a pause on the first refusal, because a model returning a malformed artifact
  * once is a hiccup; a model returning one repeatedly is a broken prompt, and a broken prompt needs a
  * person — not a loop that quietly retries until the budget is gone.
+ *
+ * `status` is **optional, and usually absent** (CODING_STANDARDS §2, CONTEXT §7). It belongs on a
+ * refusal in exactly one case: an artifact that exists and does not satisfy the contract, where the
+ * verdict's own four-state name says which way it failed. A plan too big for the round, a model that
+ * produced nothing, a freeze that could not be written — all are refusals whose news is bad and
+ * nothing is malformed, so they carry the step and the message and no state at all. Writing
+ * `invalid` for those would send a reader hunting for a schema fault that never existed.
+ *
+ * @param {{step: string, status?: 'ok'|'missing'|'invalid'|'conflict', message: string}} refusal
  */
 function refuse(context, state, { step, status, message }) {
   const { store, now, settings, log } = context
   const attempts = (state.attempts ?? 0) + 1
   const delay = Math.min(settings.retry.base_ms * 2 ** (attempts - 1), settings.retry.max_ms)
+  // One object, built once: `status: undefined` would vanish into the JSON payload and the state
+  // record anyway, but a reader (and a test) should be able to see that it was never written.
+  const detail = {
+    phase: state.phase,
+    step,
+    ...(status === undefined ? {} : { status }),
+    message,
+    attempts,
+  }
 
-  store.logOp('round_artifact_refused', { phase: state.phase, step, status, message, attempts }, now)
+  store.logOp('round_artifact_refused', detail, now)
   writeState(store, {
     ...state,
     attempts,
     next_action_at: now + delay,
-    last_refusal: { phase: state.phase, step, status, message, at_ms: now },
+    last_refusal: { step, ...(status === undefined ? {} : { status }), message, at_ms: now, phase: state.phase },
   })
-  log?.(`workspace: ${step} refused (${status}) — ${message}`)
+  log?.(`workspace: ${step} refused${status === undefined ? '' : ` (${status})`} — ${message}`)
 
   if (attempts >= settings.retry.max_attempts) {
-    pause(store, context.clock, {
-      reason: 'round_artifact_refused',
-      automatic: false,
-      phase: state.phase,
-      step,
-      status,
-      message,
-      attempts,
-    })
+    pause(store, context.clock, { reason: 'round_artifact_refused', automatic: false, ...detail })
   }
-  return { action: `refused:${status}`, phase: state.phase, round: state.round, message, attempts, next_action_at: now + delay }
+  // Named by the state when there is one, by the step when there is not: `refused:round_plan` says
+  // where it happened, which is the only thing a refusal without a state can honestly say.
+  return {
+    action: `refused:${status ?? step}`,
+    phase: state.phase,
+    round: state.round,
+    ...(status === undefined ? {} : { status }),
+    message,
+    attempts,
+    next_action_at: now + delay,
+  }
 }

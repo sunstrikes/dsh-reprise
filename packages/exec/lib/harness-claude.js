@@ -23,7 +23,12 @@ import {
 export const ENGINE = 'claude'
 
 /** The flags that make this the streaming `-p` harness, and no other. */
-export const CLAUDE_FLAGS = Object.freeze(['-p', '--output-format', 'stream-json'])
+// `--verbose` is not decoration: this CLI refuses `--print` with `--output-format stream-json`
+// without it ("Error: When using --print, --output-format=stream-json requires --verbose"), so a
+// candidate implemented by this adapter fails every landing until the flag is there. Measured on the
+// live cluster's claude-code through its gateway (2026-10-25), where it cost a full exploration run
+// at ROUND_PLAN before the model port learned the same lesson.
+export const CLAUDE_FLAGS = Object.freeze(['-p', '--output-format', 'stream-json', '--verbose'])
 
 /**
  * `prefixArgs` exists only so a test can put a fake CLI in front of the real flags; production

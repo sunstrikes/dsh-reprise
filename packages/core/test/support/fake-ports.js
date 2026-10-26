@@ -31,13 +31,24 @@ export class FakeClock {
   }
 }
 
-/** A stand-in external platform with its own state, so it survives our process dying. */
+/**
+ * A stand-in external platform with its own state, so it survives our process dying.
+ *
+ * `submits` is the call log, and it exists for one assertion that has no side channel: "the baseline
+ * was produced by the executor" is a claim about a call that was made, and no file read can prove it.
+ * A job may carry a `window_series` document, because that is what a real adapter hands back once it
+ * has read the run's samples.
+ */
 export function fakePlatform() {
   const jobs = new Map()
+  const submits = []
   let counter = 0
   return {
     jobs,
-    submit({ submissionId, candidateId }) {
+    submits,
+    submit(request) {
+      const { submissionId, candidateId } = request
+      submits.push(request)
       for (const job of jobs.values()) {
         if (job.submission_id === submissionId) {
           return { job_id: job.job_id, duplicate: true, harness: 'fake', state: job.state }
@@ -54,10 +65,16 @@ export function fakePlatform() {
     poll(jobId) {
       const job = jobs.get(jobId)
       if (job === undefined) return { state: 'lost' }
-      return { state: job.state, metrics: job.metrics, error_class: job.error_class }
+      return { state: job.state, metrics: job.metrics, window_series: job.window_series, error_class: job.error_class }
     },
-    finish(jobId, metrics) {
-      Object.assign(jobs.get(jobId), { state: 'succeeded', metrics })
+    collect(jobId) {
+      const job = jobs.get(jobId)
+      if (job === undefined) return { state: 'lost', artifacts: [] }
+      return { state: job.state, metrics: job.metrics, window_series: job.window_series, error_class: job.error_class, artifacts: [] }
+    },
+    /** Let a job finish, as a real one would: its metric table, and its windowed samples if any. */
+    finish(jobId, metrics, { series } = {}) {
+      Object.assign(jobs.get(jobId), { state: 'succeeded', metrics, ...(series === undefined ? {} : { window_series: series }) })
     },
     fail(jobId, errorClass) {
       Object.assign(jobs.get(jobId), { state: 'failed', error_class: errorClass })
@@ -165,11 +182,13 @@ export function forgetRecordedConfig(store, keys) {
 }
 
 /**
- * Drive one candidate to a terminal phase, letting the platform finish its job with `metrics`.
+ * Drive one candidate to a terminal phase, letting the platform finish its job with `metrics` and, if
+ * given, a `series` — the `window_series` document a real adapter hands back once it has read the
+ * run's samples, which is what the stop rules judge.
  * Returns the terminal phase; throws when a stop rule or pause cut the run short, because a test
  * that silently gets a half-finished candidate would prove nothing.
  */
-export async function runCandidate(ports, { candidateId, round = 1, metrics = { auc: 0.7123 }, judge } = {}) {
+export async function runCandidate(ports, { candidateId, round = 1, metrics = { auc: 0.7123 }, judge, series } = {}) {
   const withJudge = judge === undefined ? ports : { ...ports, judge }
   createCandidate(withJudge, { candidateId, round, hypothesis: `hypothesis of ${candidateId}` })
 
@@ -180,7 +199,7 @@ export async function runCandidate(ports, { candidateId, round = 1, metrics = { 
       throw new Error(`${candidateId}: the workspace stopped (${result.stopped.rule}) mid-candidate`)
     }
     for (const job of withJudge.platform.jobs.values()) {
-      if (job.candidate_id === candidateId && job.state === 'running') withJudge.platform.finish(job.job_id, metrics)
+      if (job.candidate_id === candidateId && job.state === 'running') withJudge.platform.finish(job.job_id, metrics, { series })
     }
     const phase = withJudge.store.getState(candidateId, 'phase')?.phase
     if (phase === 'DONE' || phase === 'REJECTED') return phase

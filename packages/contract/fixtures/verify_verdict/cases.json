@@ -1,12 +1,70 @@
 [
   {
-    "note": "a clean pass: static checks green and the adversarial review accepts",
+    "note": "a clean pass: every static check is green, the adversarial review accepts, and the record carries the evidence it was computed from so it can be recomputed later",
     "expect": "ok",
     "artifact": {
       "candidate_id": "c1",
+      "attempt": 1,
       "passed": true,
-      "checks": [{ "name": "static_imports", "result": "pass" }],
-      "reviewer": { "verdict": "accept", "rationale": "no behaviour change outside the target module" },
+      "checks": [
+        {
+          "name": "syntax",
+          "result": "pass"
+        },
+        {
+          "name": "allowed_surface",
+          "result": "pass"
+        },
+        {
+          "name": "conflict_markers",
+          "result": "pass"
+        }
+      ],
+      "reviewer": {
+        "verdict": "accept",
+        "rationale": "no behaviour change outside the target module"
+      },
+      "decided_at_ms": 1761091200000,
+      "evidence": {
+        "whitelist": [
+          "model/structure.json"
+        ],
+        "files": [
+          {
+            "path": "model/structure.json",
+            "digest": "9f2c1d3e4b5a60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
+            "bytes": 412
+          }
+        ],
+        "unchecked": []
+      }
+    }
+  },
+  {
+    "note": "the review accepted while a static check failed: the two pieces of evidence disagree, so the gate has no verdict to record — a conflict, not a pass and not a malformed artifact",
+    "expect": "conflict",
+    "artifact": {
+      "candidate_id": "c1",
+      "attempt": 1,
+      "passed": false,
+      "checks": [
+        {
+          "name": "allowed_surface",
+          "result": "fail"
+        },
+        {
+          "name": "syntax",
+          "result": "pass"
+        },
+        {
+          "name": "conflict_markers",
+          "result": "pass"
+        }
+      ],
+      "reviewer": {
+        "verdict": "accept",
+        "rationale": "I see nothing wrong with it"
+      },
       "decided_at_ms": 1761091200000
     }
   },
@@ -15,9 +73,78 @@
     "expect": "conflict",
     "artifact": {
       "candidate_id": "c1",
+      "attempt": 1,
       "passed": true,
-      "checks": [{ "name": "static_imports", "result": "pass" }],
-      "reviewer": { "verdict": "reject", "rationale": "silently changes the loss scale" },
+      "checks": [
+        {
+          "name": "allowed_surface",
+          "result": "pass"
+        }
+      ],
+      "reviewer": {
+        "verdict": "reject",
+        "rationale": "silently changes the loss scale"
+      },
+      "decided_at_ms": 1761091200000
+    }
+  },
+  {
+    "note": "the minimal opposing case to the conflict above: the same rejecting review, but the checks all passed and the gate recorded the failure — that is a candidate whose verify did not pass, and no four-state status applies to it",
+    "expect": "ok",
+    "artifact": {
+      "candidate_id": "c1",
+      "attempt": 1,
+      "passed": false,
+      "checks": [
+        {
+          "name": "allowed_surface",
+          "result": "pass"
+        }
+      ],
+      "reviewer": {
+        "verdict": "reject",
+        "rationale": "silently changes the loss scale"
+      },
+      "decided_at_ms": 1761091200000
+    }
+  },
+  {
+    "note": "both pieces of evidence say pass and the record still claims a failure: the record contradicts what it was computed from, which is exactly what a recomputation catches",
+    "expect": "conflict",
+    "artifact": {
+      "candidate_id": "c1",
+      "attempt": 2,
+      "passed": false,
+      "checks": [
+        {
+          "name": "allowed_surface",
+          "result": "pass"
+        }
+      ],
+      "reviewer": {
+        "verdict": "accept",
+        "rationale": "minimal diff"
+      },
+      "decided_at_ms": 1761091200000
+    }
+  },
+  {
+    "note": "the minimal opposing case to that conflict: the same evidence with the claim that follows from it",
+    "expect": "ok",
+    "artifact": {
+      "candidate_id": "c1",
+      "attempt": 2,
+      "passed": true,
+      "checks": [
+        {
+          "name": "allowed_surface",
+          "result": "pass"
+        }
+      ],
+      "reviewer": {
+        "verdict": "accept",
+        "rationale": "minimal diff"
+      },
       "decided_at_ms": 1761091200000
     }
   },
@@ -27,8 +154,41 @@
     "artifact": {
       "candidate_id": "c1",
       "passed": "true",
-      "checks": [{ "name": "static_imports", "result": "pass" }],
+      "checks": [
+        {
+          "name": "static_imports",
+          "result": "pass"
+        }
+      ],
       "decided_at_ms": 1761091200000
+    }
+  },
+  {
+    "note": "evidence that names no digest cannot be recomputed, so it is a malformed record rather than a record with weak evidence",
+    "expect": "invalid",
+    "artifact": {
+      "candidate_id": "c1",
+      "attempt": 1,
+      "passed": true,
+      "checks": [
+        {
+          "name": "allowed_surface",
+          "result": "pass"
+        }
+      ],
+      "reviewer": {
+        "verdict": "accept",
+        "rationale": "minimal diff"
+      },
+      "decided_at_ms": 1761091200000,
+      "evidence": {
+        "files": [
+          {
+            "path": "model/structure.json",
+            "bytes": 412
+          }
+        ]
+      }
     }
   },
   {
@@ -36,7 +196,67 @@
     "expect": "missing",
     "artifact": {
       "candidate_id": "c1",
-      "checks": [{ "name": "static_imports", "result": "pass" }],
+      "checks": [
+        {
+          "name": "static_imports",
+          "result": "pass"
+        }
+      ],
+      "decided_at_ms": 1761091200000
+    }
+  },
+  {
+    "note": "an attempt number that is not a number: the record is named after it, so the sequence would either collide or lose this attempt",
+    "expect": "invalid",
+    "artifact": {
+      "candidate_id": "c1",
+      "attempt": "two",
+      "passed": true,
+      "checks": [
+        {
+          "name": "allowed_surface",
+          "result": "pass"
+        }
+      ],
+      "reviewer": {
+        "verdict": "accept",
+        "rationale": "minimal diff"
+      },
+      "decided_at_ms": 1761091200000
+    }
+  },
+  {
+    "note": "an attempt number that is not positive: there is no attempt zero, and naming a record after one would overwrite the first try",
+    "expect": "invalid",
+    "artifact": {
+      "candidate_id": "c1",
+      "attempt": 0,
+      "passed": true,
+      "checks": [
+        {
+          "name": "allowed_surface",
+          "result": "pass"
+        }
+      ],
+      "reviewer": {
+        "verdict": "accept",
+        "rationale": "minimal diff"
+      },
+      "decided_at_ms": 1761091200000
+    }
+  },
+  {
+    "note": "a verdict that checked nothing at all: an opinion, whatever it claims to have passed",
+    "expect": "invalid",
+    "artifact": {
+      "candidate_id": "c1",
+      "attempt": 1,
+      "passed": true,
+      "checks": [],
+      "reviewer": {
+        "verdict": "accept",
+        "rationale": "looks fine"
+      },
       "decided_at_ms": 1761091200000
     }
   }

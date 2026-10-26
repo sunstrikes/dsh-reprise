@@ -51,5 +51,14 @@ export {
 
 export { BINDING_KINDS, validateCandidate, validateChain } from './identity.js'
 
+export {
+  WINDOW_SERIES_KIND,
+  WINDOW_SERIES_VERSION,
+  checkWindowSeries,
+  pairWindows,
+  windowKey,
+} from './windows.js'
+
 // Registers the built-in kinds as a side effect of importing the package.
 import './kinds.js'
+import './windows.js'

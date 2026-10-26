@@ -50,7 +50,7 @@ function facts(store) {
 
 /** A workspace with a done candidate, a rejected one, and a concluded stop decision. */
 async function workspaceWithEverything() {
-  const ports = openWorkspace({ config: { metrics: { primary: undefined, objectives: { auc: 'up' } }, stop: { max_rounds: 1 } } })
+  const ports = openWorkspace({ config: { metrics: { primary: 'auc', objectives: { auc: 'up' } }, stop: { max_rounds: 1 } } })
   seedConfig(ports.store, ports.config)
   await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
   await runCandidate(ports, {
@@ -103,6 +103,11 @@ test('a full tour of every route leaves every fact byte-identical', async () => 
       ['GET', '/api/reprise/candidate?candidate=r1-c2'],
       ['GET', '/api/reprise/candidate?candidate=nobody'],
       ['GET', '/api/reprise/conclusion'],
+      // The audit (ticket 29): the list, the same list narrowed to one call site, and one record
+      // opened. A view that read a model call must not be able to write one either.
+      ['GET', '/api/reprise/calls'],
+      ['GET', '/api/reprise/calls?site=verify'],
+      ['GET', '/api/reprise/call?ref=model_call:verify:r1-c1:a1'],
       ['GET', '/api/reprise/page'],
       ['GET', '/api/reprise/dashboard.js'],
       ['POST', '/api/reprise/overview'],
@@ -132,6 +137,7 @@ test('the four views answer through the registered routes with no session and no
       '/api/reprise/rounds',
       '/api/reprise/candidate?candidate=r1-c1',
       '/api/reprise/conclusion',
+      '/api/reprise/calls',
     ]
     for (const url of routes) {
       const { status, json, contentType } = await connection.dispatch('GET', url)
@@ -140,6 +146,13 @@ test('the four views answer through the registered routes with no session and no
       assert.equal(json.view, url.split('/').at(-1).split('?')[0], 'the envelope names the view it answered')
       assert.ok(json.data !== null, `${url} returned a page`)
     }
+
+    // The audit's detail view answers with a page too; for a reference this workspace never filed,
+    // the page says "no such record" rather than handing back an empty call.
+    const opened = await connection.dispatch('GET', '/api/reprise/call?ref=model_call:verify:r1-c1:a1')
+    assert.equal(opened.status, 200)
+    assert.equal(opened.json.view, 'call')
+    assert.equal(opened.json.missing, true)
   } finally {
     dispose()
   }

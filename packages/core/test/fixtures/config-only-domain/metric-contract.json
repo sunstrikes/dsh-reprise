@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "name": "config-only-score",
+  "primary": "score",
+  "direction": "higher",
+  "objectives": { "score": "up" },
+  "role": { "score": "primary — the only number the gate compares" },
+  "notes": ["A deliberately unremarkable contract: this pack exists to prove that a second domain is data, not code."]
+}

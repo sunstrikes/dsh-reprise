@@ -1,0 +1,21 @@
+# A trimmed transcript of `main.py --gin_config_file=configs/amzn-books/hstu-sampled-softmax-n512-final.gin`,
+# which is the config that truncates its epoch evals (`full_eval_every_n = 5`,
+# `partial_eval_num_iters = 64`). Small numbers on purpose: this file is a fixture for
+# `run-metrics.py`, not a published result — the published ML-1M numbers are in the repository's
+# README, and `packages/core/test/generative-recommenders-pack.test.js` reads this file to pin which
+# epoch the metric contract's window selects.
+#
+# Epoch 0 was truncated, epoch 1 was full, epoch 2 was truncated. The answer is epoch 1 (HR@10 0.3000,
+# NDCG@10 0.1600), even though epoch 2's line is the last one in the file.
+Creating train/eval datasets: 1000 train rows, 400 eval rows
+rank 0: writing logs to ./exps/amzn-books-l50/HSTU_...-b128-lr0.001-wu0-wd0-tf32-2026-10-24
+rank: 0, batch-stat (train): step 0 (epoch 0 in 0.42s): 6.931412
+rank 0:  batch-stat (eval): iter 0 (epoch 0): NDCG@10 0.1010, HR@10 0.2000, HR@50 0.4000, MRR 0.1100 
+Truncating epoch 0 eval to 32 iters to save cost..
+rank 0: eval @ epoch 0 in 3.10s: NDCG@10 0.1200, NDCG@50 0.1500, HR@10 0.2200, HR@50 0.4400, MRR 0.1300
+rank: 0, batch-stat (train): step 1 (epoch 1 in 0.38s): 6.412909
+rank 0: eval @ epoch 1 in 4.20s: NDCG@10 0.1600, NDCG@50 0.2000, HR@10 0.3000, HR@50 0.5600, MRR 0.1700
+rank: 0, batch-stat (train): step 2 (epoch 2 in 0.35s): 6.201774
+Truncating epoch 2 eval to 32 iters to save cost..
+rank 0: eval @ epoch 2 in 1.00s: NDCG@10 0.0100, NDCG@50 0.0100, HR@10 0.0100, HR@50 0.0100, MRR 0.0100
+rank 0: saving checkpoint to ./ckpts/amzn-books-l50/HSTU_...-ep2

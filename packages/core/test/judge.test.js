@@ -14,15 +14,18 @@
  *    disagreement a human needs to see.
  */
 import assert from 'node:assert/strict'
-import { cpSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
 import { validateArtifact } from '@dsh-reprise/contract'
 
-import { createJudge, defaultStaticChecks } from '../lib/judge.js'
-import { DEFAULT_SKILLS_DIR } from '../lib/skills.js'
+import { MODEL_UNAVAILABLE, isModelUnavailable } from '@dsh-reprise/exec/model'
+
+import { memoryArtifacts } from '../lib/artifacts.js'
+import { defaultStaticChecks } from '../lib/judge.js'
+import { FEED_PROMPTS_DIR, judgeFor } from './support/domain.js'
 
 const AT = 1_761_091_200_000
 
@@ -56,7 +59,7 @@ test('an accepting adversarial review yields a contract-valid verdict, with the 
   const model = scripted({
     verify: { verdict: 'accept', rationale: 'minimal diff, no evaluation changes', concerns: [] },
   })
-  const judge = createJudge({ model: model.model })
+  const judge = judgeFor({ model: model.model })
 
   const artifact = await judge.verify(VERIFY_INPUT)
 
@@ -69,12 +72,72 @@ test('an accepting adversarial review yields a contract-valid verdict, with the 
   assert.ok(artifact.checks.length >= 2, 'a verdict with no checks is an opinion')
   assert.deepEqual(
     artifact.checks.map((check) => check.name),
-    defaultStaticChecks(VERIFY_INPUT).map((check) => check.name),
-    'the L1 checks are the kernel\'s, not the model\'s',
+    [...defaultStaticChecks(VERIFY_INPUT).map((check) => check.name), 'syntax', 'allowed_surface', 'conflict_markers'],
+    'the checks are the kernel\'s — its own metadata facts plus gate two\'s static report — not the model\'s',
   )
   assert.deepEqual(model.sites(), ['verify'], 'one model call, at one call site')
   assert.match(model.calls[0].prompt, /VERIFY — adversarial review/, 'the prompt is the markdown skill')
   assert.equal(model.calls[0].facts.candidate_id, 'c1')
+})
+
+test('the report travels to the review as evidence, and the record keeps the bytes it checked', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'reprise-judge-worktree-'))
+  mkdirSync(join(dir, 'model'), { recursive: true })
+  writeFileSync(join(dir, 'model/structure.json'), '{"hidden_units": 64}\n', 'utf8')
+
+  const model = scripted({ verify: { verdict: 'accept', rationale: 'knob only' } })
+  const judge = judgeFor({ model: model.model, surface: { files: ['model/structure.json'] } })
+  const artifact = await judge.verify({
+    ...VERIFY_INPUT,
+    files: ['model/structure.json'],
+    worktreeDir: dir,
+    attempt: 2,
+  })
+
+  assert.equal(artifact.attempt, 2, 'the gate record carries its place in the attempt sequence')
+  assert.deepEqual(
+    model.calls[0].facts.static_report.checks.map((check) => `${check.name}:${check.result}`),
+    ['syntax:pass', 'allowed_surface:pass', 'conflict_markers:pass'],
+    'the adversarial review reasons from the kernel\'s report, it does not produce it',
+  )
+  assert.deepEqual(artifact.evidence.whitelist, ['model/structure.json'])
+  assert.equal(artifact.evidence.files.length, 1)
+  assert.match(artifact.evidence.files[0].digest, /^[0-9a-f]{64}$/, 'evidence that cannot be re-read cannot be recomputed')
+  assert.deepEqual(validateArtifact('verify_verdict', artifact), { status: 'ok', message: '' })
+})
+
+test('a change outside the adjustable surface is a failed check, so the gate cannot pass it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'reprise-judge-surface-'))
+  mkdirSync(join(dir, 'model'), { recursive: true })
+  writeFileSync(join(dir, 'model/structure.json'), '{"hidden_units": 64}\n', 'utf8')
+  writeFileSync(join(dir, 'model/evaluate.py'), 'print("moved the split")\n', 'utf8')
+
+  const model = scripted({ verify: { verdict: 'accept', rationale: 'looks fine to me' } })
+  const judge = judgeFor({ model: model.model, surface: { files: ['model/structure.json'] } })
+  const artifact = await judge.verify({
+    ...VERIFY_INPUT,
+    files: ['model/evaluate.py', 'model/structure.json'],
+    worktreeDir: dir,
+  })
+
+  assert.equal(artifact.checks.find((check) => check.name === 'allowed_surface').result, 'fail')
+  assert.equal(artifact.passed, false)
+  const verdict = validateArtifact('verify_verdict', artifact)
+  assert.equal(verdict.status, 'conflict', 'the review accepted over a fact that failed — neither wins')
+  assert.match(verdict.message, /accepted while 1 check\(s\) failed/)
+})
+
+test('attempt 2 is recorded under its own reference, so attempt 1 can still be recomputed', async () => {
+  const artifacts = memoryArtifacts()
+  const model = scripted({ verify: { verdict: 'accept', rationale: 'knob only' } })
+  const judge = judgeFor({ model: model.model, artifacts })
+
+  await judge.verify({ ...VERIFY_INPUT, attempt: 1 })
+  await judge.verify({ ...VERIFY_INPUT, attempt: 2 })
+
+  assert.equal(artifacts.read('verify_verdict:c1:a1').attempt, 1, 'the first attempt is not overwritten by the second')
+  assert.equal(artifacts.read('verify_verdict:c1:a2').attempt, 2)
+  assert.equal(artifacts.read('verify_verdict:c1').attempt, 2, 'and the plain reference still names the latest record')
 })
 
 test('the model cannot contribute the checks — only the review', async () => {
@@ -85,7 +148,7 @@ test('the model cannot contribute the checks — only the review', async () => {
       checks: [{ name: 'invented_by_the_model', result: 'pass' }],
     },
   })
-  const artifact = await createJudge({ model: model.model }).verify(VERIFY_INPUT)
+  const artifact = await judgeFor({ model: model.model }).verify(VERIFY_INPUT)
 
   assert.ok(
     artifact.checks.every((check) => check.name !== 'invented_by_the_model'),
@@ -97,7 +160,7 @@ test('an adversarial review that rejects stops the candidate without calling the
   const model = scripted({
     verify: { verdict: 'reject', rationale: 'it also changes the evaluation split' },
   })
-  const artifact = await createJudge({ model: model.model }).verify(VERIFY_INPUT)
+  const artifact = await judgeFor({ model: model.model }).verify(VERIFY_INPUT)
 
   assert.deepEqual(validateArtifact('verify_verdict', artifact), { status: 'ok', message: '' })
   assert.equal(artifact.passed, false, 'a rejected review is not a pass')
@@ -107,7 +170,7 @@ test('an adversarial review that rejects stops the candidate without calling the
 
 test('a review that accepts while a static check failed is a conflict, not a pass', async () => {
   const model = scripted({ verify: { verdict: 'accept', rationale: 'I see nothing wrong' } })
-  const judge = createJudge({
+  const judge = judgeFor({
     model: model.model,
     staticChecks: () => [
       { name: 'worktree_clean', result: 'fail' },
@@ -126,7 +189,7 @@ test('a model answer full of numbers is not a verdict, and none of its numbers s
   const model = scripted({
     verify: { score: 0.987, rank: 1, confidence: 0.99, verdict: 'probably fine' },
   })
-  const artifact = await createJudge({ model: model.model }).verify(VERIFY_INPUT)
+  const artifact = await judgeFor({ model: model.model }).verify(VERIFY_INPUT)
 
   assert.equal(artifact.passed, false, 'an unusable review is a rejection, not an abstention')
   assert.equal(artifact.reviewer.verdict, 'reject')
@@ -137,24 +200,32 @@ test('a model answer full of numbers is not a verdict, and none of its numbers s
   }
 })
 
-test('a model port failure fails closed instead of crashing the tick', async () => {
+test('a model port that throws is "no model answered", and no opinion is recorded', async () => {
+  const artifacts = memoryArtifacts()
   const model = scripted({ verify: new Error('upstream 503') })
-  const artifact = await createJudge({ model: model.model }).verify(VERIFY_INPUT)
 
-  assert.equal(artifact.passed, false)
-  assert.equal(artifact.reviewer.verdict, 'reject')
-  assert.match(artifact.reviewer.rationale, /could not be obtained.*503/)
-  assert.deepEqual(validateArtifact('verify_verdict', artifact), { status: 'ok', message: '' })
+  await assert.rejects(
+    () => judgeFor({ model: model.model, artifacts }).verify(VERIFY_INPUT),
+    (error) => {
+      assert.ok(isModelUnavailable(error), 'the whole point: an outage is not one call site\'s private problem')
+      assert.equal(error.error_class, MODEL_UNAVAILABLE)
+      assert.match(error.message, /upstream 503/, 'the reason travels with the class, for the operator')
+      return true
+    },
+  )
+  assert.equal(artifacts.read('verify_verdict:c1'), undefined, 'an outage must not become "the review rejected it"')
 })
 
-test('an answer wrapped in prose and a fenced block is still read as the answer', async () => {
-  const model = scripted({
-    verify: 'Looking at this diff, I would accept it.\n\n```json\n{"verdict": "accept", "rationale": "no evaluation changes"}\n```\n',
-  })
-  const artifact = await createJudge({ model: model.model }).verify(VERIFY_INPUT)
+test('a port that hands back prose has not answered, and the failure is the same closed class', async () => {
+  // Reading the answer out of a CLI's prose is the adapter's job (`@dsh-reprise/exec/model`,
+  // `readAnswer`). By the time a judgement gets here it either has an object or it has nothing —
+  // and "nothing" is one class, not a fifth way to fail.
+  const model = scripted({ verify: 'Looking at this diff, I would accept it.' })
 
-  assert.equal(artifact.reviewer.verdict, 'accept', 'a model that wraps its JSON in prose is normal, not an error')
-  assert.equal(artifact.passed, true)
+  await assert.rejects(
+    () => judgeFor({ model: model.model }).verify(VERIFY_INPUT),
+    (error) => isModelUnavailable(error) && error.cause === 'unparseable_answer',
+  )
 })
 
 // ------------------------------------------------------------- CAND_ANALYZE
@@ -168,9 +239,9 @@ const ANALYZE_INPUT = {
 }
 
 const judgeWithBaseline = (model, extra = {}) =>
-  createJudge({
+  judgeFor({
     model: model.model,
-    metric: { name: 'auc', direction: 'higher' },
+    metricContract: { primary: 'auc', direction: 'higher', objectives: { auc: 'up' } },
     baseline: 0.7012,
     ...extra,
   })
@@ -221,13 +292,15 @@ test('a report with no measured metric is missing evidence, so the phase cannot 
   assert.match(verdict.message, /observed/)
 })
 
-test('a model port that never answered the analysis leaves the report incomplete, so the phase cannot advance', async () => {
+test('a model port that never answered the analysis reports the outage, not an empty finding', async () => {
+  const artifacts = memoryArtifacts()
   const model = scripted({ cand_analyze: new Error('rate limited') })
-  const artifact = await judgeWithBaseline(model).analyze(ANALYZE_INPUT)
 
-  const verdict = validateArtifact('analyze_report', artifact)
-  assert.equal(verdict.status, 'missing', 'no root cause was ever produced — that is missing, not malformed')
-  assert.match(verdict.message, /root_cause/)
+  await assert.rejects(
+    () => judgeWithBaseline(model, { artifacts }).analyze(ANALYZE_INPUT),
+    (error) => isModelUnavailable(error) && /rate limited/.test(error.message),
+  )
+  assert.equal(artifacts.read('analyze_report:c1'), undefined, 'no root cause was produced, and nothing claims one')
 })
 
 test('an empty root cause is a malformed report rather than a finding', async () => {
@@ -254,9 +327,11 @@ test('the metrics the monitor recorded on the phase state are the evidence when 
 
 test('the metric contract decides which reported number counts, not the model', async () => {
   const model = scripted({ cand_analyze: { root_cause: 'noise' } })
-  const judge = createJudge({
+  const judge = judgeFor({
     model: model.model,
-    metric: { name: 'ndcg@10', direction: 'higher' },
+    // A contract that ranks two metrics and names the other one primary: the resolution decides which
+    // reported number counts, and no reader falls back to "the first numeric key".
+    metricContract: { primary: 'ndcg@10', direction: 'higher', objectives: { auc: 'up', 'ndcg@10': 'up' } },
     baseline: 0.3,
   })
   const artifact = await judge.analyze({
@@ -270,7 +345,7 @@ test('the metric contract decides which reported number counts, not the model', 
 
 test('a baseline that is not frozen yet yields inconclusive rather than a guess', async () => {
   const model = scripted({ cand_analyze: { root_cause: 'unclear' } })
-  const artifact = await createJudge({ model: model.model, metric: { name: 'auc' } }).analyze(ANALYZE_INPUT)
+  const artifact = await judgeFor({ model: model.model, metric: { name: 'auc' } }).analyze(ANALYZE_INPUT)
 
   assert.equal(artifact.verdict, 'inconclusive')
   assert.deepEqual(validateArtifact('analyze_report', artifact), { status: 'ok', message: '' })
@@ -278,9 +353,9 @@ test('a baseline that is not frozen yet yields inconclusive rather than a guess'
 
 test('editing a skill changes the next prompt from the same judge, with no rebuild', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'reprise-judge-skills-'))
-  cpSync(DEFAULT_SKILLS_DIR, dir, { recursive: true })
+  cpSync(FEED_PROMPTS_DIR, dir, { recursive: true })
   const model = scripted({ verify: { verdict: 'accept', rationale: 'ok' } })
-  const judge = createJudge({ model: model.model, skillsDir: dir })
+  const judge = judgeFor({ model: model.model, skillsDir: dir })
 
   await judge.verify(VERIFY_INPUT)
   const path = join(dir, 'verify', 'SKILL.md')
@@ -312,7 +387,10 @@ test('a round plan is contract-valid, and its identity fields come from code rat
       ],
     },
   })
-  const judge = createJudge({ model: model.model, metric: { name: 'auc', contract_ref: 'metric-contract.json' } })
+  const judge = judgeFor({
+    model: model.model,
+    metricContract: { name: 'metric-contract.json', primary: 'auc', direction: 'higher', objectives: { auc: 'up' } },
+  })
   const artifact = await judge.plan({ round: 2, facts: PLAN_FACTS })
 
   assert.deepEqual(validateArtifact('candidate_plan', artifact), { status: 'ok', message: '' })
@@ -333,7 +411,7 @@ test('two hypotheses with the same id are a conflict, not a plan', async () => {
       ],
     },
   })
-  const artifact = await createJudge({ model: model.model }).plan({ round: 1, facts: PLAN_FACTS })
+  const artifact = await judgeFor({ model: model.model }).plan({ round: 1, facts: PLAN_FACTS })
 
   const verdict = validateArtifact('candidate_plan', artifact)
   assert.equal(verdict.status, 'conflict')
@@ -344,7 +422,7 @@ test('a hypothesis with no statement is invalid, and the message names the field
   const model = scripted({
     round_plan: { hypotheses: [{ id: 'h1', expected_files: ['a.py'] }] },
   })
-  const artifact = await createJudge({ model: model.model }).plan({ round: 1, facts: PLAN_FACTS })
+  const artifact = await judgeFor({ model: model.model }).plan({ round: 1, facts: PLAN_FACTS })
 
   const verdict = validateArtifact('candidate_plan', artifact)
   assert.equal(verdict.status, 'invalid')
@@ -353,7 +431,7 @@ test('a hypothesis with no statement is invalid, and the message names the field
 
 test('a plan that names no hypothesis is refused rather than silently becoming an empty round', async () => {
   const model = scripted({ round_plan: { hypotheses: [] } })
-  const artifact = await createJudge({ model: model.model }).plan({ round: 1, facts: PLAN_FACTS })
+  const artifact = await judgeFor({ model: model.model }).plan({ round: 1, facts: PLAN_FACTS })
 
   const verdict = validateArtifact('candidate_plan', artifact)
   assert.equal(verdict.status, 'invalid')
@@ -371,7 +449,7 @@ test('a reflection is structured, and a model-authored stop flag or score is dis
       rank: 1,
     },
   })
-  const artifact = await createJudge({ model: model.model }).reflect({ round: 1, facts: PLAN_FACTS, now: AT })
+  const artifact = await judgeFor({ model: model.model }).reflect({ round: 1, facts: PLAN_FACTS, now: AT })
 
   assert.deepEqual(validateArtifact('round_reflect', artifact), { status: 'ok', message: '' })
   assert.equal(artifact.round, 1)
@@ -385,7 +463,7 @@ test('a reflection is structured, and a model-authored stop flag or score is dis
 
 test('a reflection with no summary does not advance anything', async () => {
   const model = scripted({ round_reflect: { lessons: [], next_round_focus: ['try something else'] } })
-  const artifact = await createJudge({ model: model.model }).reflect({ round: 1, facts: PLAN_FACTS, now: AT })
+  const artifact = await judgeFor({ model: model.model }).reflect({ round: 1, facts: PLAN_FACTS, now: AT })
 
   const verdict = validateArtifact('round_reflect', artifact)
   assert.equal(verdict.status, 'missing')
@@ -396,7 +474,7 @@ test('a reflection whose lessons are all empty strings is malformed, not merely 
   const model = scripted({
     round_reflect: { summary: 'nothing learned', lessons: [{ statement: '' }], next_round_focus: ['try again'] },
   })
-  const artifact = await createJudge({ model: model.model }).reflect({ round: 1, facts: PLAN_FACTS, now: AT })
+  const artifact = await judgeFor({ model: model.model }).reflect({ round: 1, facts: PLAN_FACTS, now: AT })
 
   const verdict = validateArtifact('round_reflect', artifact)
   assert.equal(verdict.status, 'invalid')
@@ -407,7 +485,10 @@ test('a reflection whose lessons are all empty strings is malformed, not merely 
 
 test('the LAND entry freezes the hypothesis it will implement and briefs the implementer from the skill', async () => {
   const model = scripted({})
-  const judge = createJudge({ model: model.model, metric: { name: 'auc', contract_ref: 'metric-contract.json' } })
+  const judge = judgeFor({
+    model: model.model,
+    metricContract: { name: 'metric-contract.json', primary: 'auc', direction: 'higher', objectives: { auc: 'up' } },
+  })
   const { artifact, prompt } = await judge.land({
     candidateId: 'r1-h1',
     round: 1,
@@ -427,7 +508,7 @@ test('the LAND entry freezes the hypothesis it will implement and briefs the imp
 
 test('a hypothesis that names no file never becomes a candidate', async () => {
   const model = scripted({})
-  const { artifact } = await createJudge({ model: model.model }).land({
+  const { artifact } = await judgeFor({ model: model.model }).land({
     candidateId: 'r1-h1',
     round: 1,
     hypothesis: { id: 'h1', statement: 'make the model better', expected_files: [] },

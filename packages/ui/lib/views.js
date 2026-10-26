@@ -18,7 +18,15 @@
 
 import { dirname } from 'node:path'
 
-import { candidateDetail, conclusion, overview, rounds, summariseEvent } from '../../core/lib/projection.js'
+import {
+  candidateDetail,
+  conclusion,
+  modelCall,
+  modelCalls,
+  overview,
+  rounds,
+  summariseEvent,
+} from '../../core/lib/projection.js'
 
 /**
  * A refusal from the view layer, and the status it deserves.
@@ -163,9 +171,18 @@ function notesFor(store) {
   return notes
 }
 
-/** The overview page: where the run is, what it is spending, what it found, and why it ended. */
-export function overviewView(store, query = {}) {
-  return envelope(store, 'overview', { data: overview(store, { config: configFrom(store) }), notes: notesFor(store) }, query)
+/**
+ * The overview page: where the run is, what it is spending, what it found, and why it ended.
+ *
+ * `listing` is the cluster's answer, when the caller has one (the route reads it through
+ * `jobs.js`'s `readListing` before calling in). The page has only the workspace directory and cannot
+ * ask the cluster itself, so an absent listing is not an error — it is the `cards.inUse: null`
+ * answer, and the projection says why. Passing it through rather than dropping it is what makes
+ * "how many cards are in use" a number the page can print at all.
+ */
+export function overviewView(store, query = {}, { listing } = {}) {
+  const data = overview(store, { config: configFrom(store), listing })
+  return envelope(store, 'overview', { data, notes: notesFor(store) }, query)
 }
 
 /** The rounds page: who ran in each round, how each finished, whether the round moved the best. */
@@ -191,4 +208,27 @@ export function candidateView(store, query = {}) {
 /** The conclusion page: what this run established, on which number, and against what. */
 export function conclusionView(store, query = {}) {
   return envelope(store, 'conclusion', { data: conclusion(store, { config: configFrom(store) }) }, query)
+}
+
+/**
+ * The audit page: every judgement the run asked a model for, one row each, `?site=` to narrow it.
+ *
+ * The list deliberately carries no prompt bodies — opening a call is a second request, so the page
+ * can show a hundred calls without carrying a hundred prompts, and the reader chooses which original
+ * text to read.
+ */
+export function callsView(store, query = {}) {
+  return envelope(store, 'calls', { data: modelCalls(store, { callSite: query.site }) }, query)
+}
+
+/** One judgement, opened: the prompt it was given and the words that came back, verbatim. */
+export function callView(store, query = {}) {
+  const ref = query.ref
+  if (typeof ref !== 'string' || ref === '') {
+    throw new ViewError(400, 'the audit view needs ?ref=<model_call:call-site:subject[:ref]>')
+  }
+  const call = modelCall(store, ref)
+  // `missing` rather than a 404: a workspace whose record was pruned still has a page, and the
+  // difference between "not a record" and "no such record" is what the two fields state.
+  return envelope(store, 'call', { ref, data: call ?? null, missing: call === undefined }, query)
 }

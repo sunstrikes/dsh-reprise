@@ -33,6 +33,7 @@
  */
 
 import { DEFAULT_BUDGET } from './budget.js'
+import { gpuExclusivityOf } from './jobs.js'
 
 /** Executors that can rent GPU hours. Anything else is a laptop-class run. */
 export const REMOTE_EXECUTORS = Object.freeze(['ray'])
@@ -69,6 +70,32 @@ export function noGpuHoursLimit(config) {
       `the "${kind}" executor bills real GPU hours and this run has no GPU-hours limit ` +
       '(budget.gpu_hours_limit is 0, which means unlimited). Set budget.gpu_hours_limit to cap the spend, ' +
       'or keep it uncapped deliberately — either way the page says which one it is.',
+  }
+}
+
+/**
+ * The cluster does not reserve the cards (measured, ticket 14: two 8-card jobs ran at once on the
+ * same node), so a run on a GPU-billing executor that has not said which of the two ways it owns
+ * them will quietly share them with itself. Legal, dangerous, and named.
+ *
+ * A laptop run has no cards to share, so it earns nothing here — the check is conditional on the
+ * executor for the same reason `no_gpu_hours_limit` is.
+ */
+export function gpuExclusivityUndeclared(config) {
+  const kind = executorKind(config)
+  if (!REMOTE_EXECUTORS.includes(kind)) return undefined
+  if (gpuExclusivityOf(config) !== undefined) return undefined
+
+  return {
+    code: 'gpu_exclusivity_undeclared',
+    severity: 'warning',
+    about: 'dispatch',
+    where: 'dashboard.overview',
+    label: '未声明 GPU 排他',
+    message:
+      `the "${kind}" executor's cluster does not reserve GPUs, and this run declares neither ` +
+      'executor.gpu_exclusivity: single_job (one training job at a time) nor executor.cuda_visible_devices ' +
+      '(each submission writes its own device list): two of our jobs will share the same cards.',
   }
 }
 
@@ -115,10 +142,15 @@ function metricWarnings(config) {
   return warnings
 }
 
+/** A model port is declared when the run names a CLI (`kind`) or an argv to reach one (`command`). */
+export const modelPortDeclared = (model) =>
+  (typeof model?.kind === 'string' && model.kind !== '') ||
+  (Array.isArray(model?.command) && model.command.length > 0)
+
 function modelWarning(config) {
   const rounds = config?.rounds
   if (rounds === undefined || rounds === null || rounds === false || rounds.enabled === false) return []
-  const hasPort = Array.isArray(config?.model?.command) && config.model.command.length > 0
+  const hasPort = modelPortDeclared(config?.model)
   if (hasPort) return []
   return [
     {
@@ -128,7 +160,7 @@ function modelWarning(config) {
       where: 'plugin.log',
       label: '没有模型入口',
       message:
-        'config.rounds is set but no model port is configured (model.command): ROUND_PLAN and ROUND_REFLECT are ' +
+        'config.rounds is set but no model port is configured (model.kind or model.command): ROUND_PLAN and ROUND_REFLECT are ' +
         'model entries, so those phases will be refused and the run will stall at the first round.',
     },
   ]
@@ -145,6 +177,8 @@ export function configWarnings(config) {
   const warnings = []
   const gpu = noGpuHoursLimit(config)
   if (gpu !== undefined) warnings.push(gpu)
+  const exclusivity = gpuExclusivityUndeclared(config)
+  if (exclusivity !== undefined) warnings.push(exclusivity)
   warnings.push(...metricWarnings(config))
   warnings.push(...modelWarning(config))
   return warnings

@@ -14,8 +14,8 @@
  */
 
 import { createHash } from 'node:crypto'
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { dirname, join, sep } from 'node:path'
 
 /**
  * `verify_verdict:c1` is the reference the fact plane records, and on disk it becomes
@@ -30,8 +30,13 @@ const digest = (text) => createHash('sha256').update(text).digest('hex')
  * @typedef {{
  *   write: (name: string, value: unknown) => { path: string, sha256: string, bytes: number },
  *   read: (name: string) => unknown,
+ *   list: (prefix?: string) => string[],
  *   dir?: string,
  * }} ArtifactStore
+ *
+ * `list` is read-only and exists for the display layer: the audit panel has to say which judgements
+ * the run asked for, and those records are files, not rows. It is part of the port (rather than a
+ * `readdir` in the renderer) so a store with no directory behind it can answer the same question.
  */
 
 /**
@@ -59,6 +64,25 @@ export function fileArtifacts(dir) {
         throw error
       }
     },
+    list(prefix = '') {
+      let entries
+      try {
+        entries = readdirSync(dir, { recursive: true })
+      } catch (error) {
+        // A workspace that never wrote an artifact is empty, not broken. Anything else (a permission
+        // problem, a file where the directory should be) belongs to the caller.
+        if (error?.code === 'ENOENT') return []
+        throw error
+      }
+      return entries
+        .filter((entry) => entry.endsWith('.json'))
+        // A crashed write leaves a `.tmp-<pid>` sibling; it is not an artifact and must not be listed
+        // as one, or the audit would show a document that may not parse.
+        .filter((entry) => !entry.includes('.tmp-'))
+        .map((entry) => entry.split(sep).join(':').replace(/\.json$/, ''))
+        .filter((name) => prefix === '' || name === prefix || name.startsWith(`${prefix}:`))
+        .sort()
+    },
   }
 }
 
@@ -76,6 +100,12 @@ export function memoryArtifacts() {
     read(name) {
       const document = documents.get(pathFor(name))
       return document === undefined ? undefined : JSON.parse(document)
+    },
+    list(prefix = '') {
+      return [...documents.keys()]
+        .map((path) => path.slice('memory://'.length).replace(/\.json$/, '').split('/').join(':'))
+        .filter((name) => prefix === '' || name === prefix || name.startsWith(`${prefix}:`))
+        .sort()
     },
     documents,
   }

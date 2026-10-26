@@ -159,7 +159,7 @@ test('--config lets an old workspace be read with the contract the run used', as
   ports.store.close()
 
   const withoutConfig = runDump(['--candidate', 'r1-c1', '--workspace', dir])
-  assert.match(withoutConfig.output, /not computed — no metric contract configured/)
+  assert.match(withoutConfig.output, /not computed \(missing\) — no metric contract/, 'the dump names the state, not only a sentence')
 
   const path = join(mkdtempSync(join(tmpdir(), 'reprise-config-')), 'config.json')
   writeFileSync(path, JSON.stringify(CONTRACT))
@@ -198,4 +198,18 @@ test('a candidate with a partial vector is listed as incomplete rather than miss
   const { output } = runDump(['--candidate', 'r1-c1', '--workspace', dir])
 
   assert.match(output, /position {3}unranked — missing loss/, 'the missing objective is named, so the reader knows what to fix')
+})
+test('dump says which candidate this one was branched from, on the page a person reads', async () => {
+  const ports = openWorkspace({ config: CONTRACT })
+  seedConfig(ports.store, ports.config)
+  await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7301 } })
+  // The round planner writes `parent_id` into the phase state when it creates a candidate from the
+  // frontier. This is that write, without dragging the whole round workflow into a dump test.
+  const phase = ports.store.getState('r1-c1', 'phase')
+  ports.store.setState('r1-c1', 'phase', { ...phase, parent_id: 'baseline' })
+
+  const output = renderDump(ports.store, 'r1-c1', { config: CONTRACT })
+
+  assert.match(output, /parent +baseline — the candidate this one was branched from/, 'the criterion is "an operator can recover who this round started from": that means a rendered line')
+  ports.store.close()
 })

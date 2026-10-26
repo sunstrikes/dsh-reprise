@@ -6,6 +6,12 @@
  * contract accepts; and the phases that do not consult a model call it exactly zero times. The
  * candidate machine is exercised by loop.test.js — here candidates are only *finished* directly, so
  * these tests stay about round bookkeeping.
+ *
+ * It also guards what a *refusal* may say (CODING_STANDARDS §2, CONTEXT §7): the four states answer
+ * "is this fact present and trustworthy", so only an artifact that exists and breaks its schema
+ * carries one. A plan too big for the round, a model port that produced nothing and a freeze that
+ * failed are refusals with a message and no status at all — the round is refused either way, but a
+ * reader sent hunting for a malformed artifact that never existed cannot be un-sent.
  */
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync } from 'node:fs'
@@ -16,7 +22,7 @@ import test from 'node:test'
 import { artifactKinds, validateArtifact } from '@dsh-reprise/contract'
 
 import { createCandidate } from '../lib/loop.js'
-import { createJudge } from '../lib/judge.js'
+import { judgeFor } from './support/domain.js'
 import { readRoundsState, stepWorkspace } from '../lib/rounds.js'
 import { Store } from '../lib/store.js'
 
@@ -78,7 +84,7 @@ function setup({ config = CONFIG, answers = {}, baseline, judge, artifacts } = {
     round_reflect: GOLDEN_REFLECT,
     ...answers,
   })
-  const realJudge = judge ?? createJudge({
+  const realJudge = judge ?? judgeFor({
     model: model.model,
     metric: CONFIG.rounds.metric,
     baseline: config?.rounds?.baseline?.value,
@@ -100,6 +106,12 @@ async function toRoundOne(ports) {
 const finish = (store, candidateId, phase = 'DONE') => {
   const state = store.getState(candidateId, 'phase')
   store.setState(candidateId, 'phase', { ...state, phase })
+}
+
+/** The last refusal the round wrote, as the workspace recorded it — not as the return value shaped it. */
+function lastRefusal(store) {
+  const record = store.ops().find((row) => row.op === 'round_artifact_refused')
+  return record === undefined ? undefined : JSON.parse(record.detail)
 }
 
 test('the round artifact kinds are registered with the contract, and registering twice is harmless', async () => {
@@ -130,7 +142,16 @@ test('INIT and BASELINE are deterministic: no model call, and the baseline is fr
 
   const state = readRoundsState(ports.store)
   assert.equal(state.round, 0, 'no round has been planned yet')
-  assert.deepEqual(state.baseline, { metric: 'auc', value: 0.7012, frozen_at_ms: AT })
+  assert.deepEqual(
+    state.baseline,
+    {
+      metric: 'auc',
+      value: 0.7012,
+      source: 'configured',
+      frozen_at_ms: AT,
+    },
+    'the frozen record says where the denominator came from: a typed-in number is not a measured one',
+  )
   assert.equal(state.plan, undefined)
   ports.store.close()
 })
@@ -320,7 +341,7 @@ test('a hypothesis that names no file never becomes a candidate', async () => {
   ports.store.close()
 })
 
-test('a plan that would create more candidates than the round affords is refused', async () => {
+test('a plan that would create more candidates than the round affords is refused, and the refusal is not a state', async () => {
   const ports = setup({
     answers: {
       round_plan: {
@@ -332,13 +353,17 @@ test('a plan that would create more candidates than the round affords is refused
   await step(ports)
   const refused = await step(ports)
 
-  assert.match(refused.action, /refused:invalid/)
+  // The plan is a well-formed `candidate_plan`; it is *too big for the round*, which is news about
+  // the budget and not about the artifact. Refused, named, and carrying no four-state status.
+  assert.match(refused.action, /refused:round_plan/)
   assert.match(refused.message, /candidates_per_round/)
+  assert.equal(Object.hasOwn(lastRefusal(ports.store), 'status'), false, 'no state: nothing is malformed')
+  assert.equal(readRoundsState(ports.store).last_refusal.status, undefined)
   assert.deepEqual(ports.store.candidateIds(), [])
   ports.store.close()
 })
 
-test('a judge port that throws is a refused artifact, not a crashed loop', async () => {
+test('a judge port that throws is a refused round plan, named by its cause and carrying no status', async () => {
   const ports = setup({
     judge: {
       plan: async () => {
@@ -352,9 +377,31 @@ test('a judge port that throws is a refused artifact, not a crashed loop', async
   await step(ports)
   const refused = await step(ports)
 
-  assert.match(refused.action, /refused:invalid/)
+  // No model answer at all: there is no artifact to call malformed, so there is no state to name.
+  assert.match(refused.action, /refused:round_plan/)
   assert.match(refused.message, /skill file disappeared/)
+  assert.equal(Object.hasOwn(lastRefusal(ports.store), 'status'), false)
   assert.equal(readRoundsState(ports.store).phase, 'ROUND_PLAN')
+  ports.store.close()
+})
+
+test('a hypothesis that could not be frozen is refused with its cause and no four-state status', async () => {
+  const ports = setup({
+    judge: {
+      ...judgeFor({ model: async () => GOLDEN_PLAN(1) }),
+      land: async ({ candidateId }) => {
+        throw new Error(`artifacts directory is read-only (${candidateId})`)
+      },
+    },
+  })
+  await step(ports)
+  await step(ports)
+  const refused = await step(ports)
+
+  assert.match(refused.action, /refused:land/)
+  assert.match(refused.message, /artifacts directory is read-only \(r1-h1\)/)
+  assert.equal(Object.hasOwn(lastRefusal(ports.store), 'status'), false, 'a failed freeze is not a malformed artifact')
+  assert.deepEqual(ports.store.candidateIds(), [], 'a hypothesis that was never frozen is not a candidate')
   ports.store.close()
 })
 
@@ -392,11 +439,34 @@ test('a reflection the contract refuses keeps the round open', async () => {
   finish(ports.store, 'r1-h1')
   finish(ports.store, 'r1-h2')
 
+  // The control for the refusals above: this one *is* an artifact that exists and breaks its schema,
+  // so it keeps its four-state status. Removing `status` everywhere would be as wrong as keeping it.
   const refused = await step(ports)
   assert.match(refused.action, /refused:missing/)
   assert.match(refused.message, /summary/)
+  assert.equal(lastRefusal(ports.store).status, 'missing')
   assert.equal(readRoundsState(ports.store).reflection, undefined)
   assert.equal(readRoundsState(ports.store).phase, 'ROUND_PLAN')
+  ports.store.close()
+})
+
+test('a reflection the model never produced is refused with its cause and no four-state status', async () => {
+  const ports = setup({
+    judge: {
+      ...judgeFor({ model: async (request) => (request.call_site === 'round_plan' ? GOLDEN_PLAN(1) : GOLDEN_REFLECT) }),
+      reflect: async () => {
+        throw new Error('the model returned an empty body')
+      },
+    },
+  })
+  await toRoundOne(ports)
+  finish(ports.store, 'r1-h1')
+  finish(ports.store, 'r1-h2')
+
+  const refused = await step(ports)
+  assert.match(refused.action, /refused:round_reflect/)
+  assert.match(refused.message, /the model returned an empty body/)
+  assert.equal(Object.hasOwn(lastRefusal(ports.store), 'status'), false, 'nothing was produced, so nothing is malformed')
   ports.store.close()
 })
 
@@ -482,7 +552,7 @@ test('the round workflow survives a restart: the phase and the plan come back fr
   const dir = mkdtempSync(join(tmpdir(), 'reprise-rounds-restart-'))
   const clock = new FakeClock()
   const model = scripted({ round_plan: GOLDEN_PLAN(1), round_reflect: GOLDEN_REFLECT })
-  const judge = createJudge({ model: model.model, metric: CONFIG.rounds.metric, baseline: 0.7012 })
+  const judge = judgeFor({ model: model.model, metric: CONFIG.rounds.metric, baseline: 0.7012 })
 
   const first = Store.open(dir)
   const ports = { store: first, clock, judge, config: CONFIG, model }
@@ -517,5 +587,145 @@ test('a candidate created by another path is never mistaken for a round candidat
   assert.equal(ports.store.getState('manual-1', 'phase').phase, 'LAND')
   assert.equal(readRoundsState(ports.store).plan.round, 1)
   assert.ok(state.plan !== undefined)
+  ports.store.close()
+})
+// ------------------------------------------------------------- parents
+
+/**
+ * A finished candidate with the number it finished on: what the frontier needs to see it.
+ *
+ * Both halves matter. `metrics_collected` is the only source of a metric value, and `cand_analyze`
+ * is what makes the derived row say `done` — a candidate the analysis never reached is not a parent,
+ * however good its number looks.
+ */
+const finishWithMetrics = (store, candidateId, metrics, verdict = 'improved') => {
+  store.appendEvent({
+    candidate_id: candidateId,
+    wall_clock_ms: AT,
+    event_type: 'metrics_collected',
+    payload: { metrics },
+  })
+  store.appendEvent({
+    candidate_id: candidateId,
+    wall_clock_ms: AT,
+    event_type: 'cand_analyze',
+    payload: { verdict, observed: { metric: 'auc', value: Object.values(metrics)[0] } },
+  })
+  finish(store, candidateId)
+}
+
+test('a planned round freezes one parent snapshot, and every candidate names the parent it starts from', async () => {
+  const ports = setup()
+  const state = await toRoundOne(ports)
+
+  const frozen = state.plan.parent_snapshot
+  assert.match(frozen.address, /^[0-9a-f]{64}$/, 'the snapshot is identified by a content address, not by its position in a log')
+  const onDisk = JSON.parse(readFileSync(frozen.path, 'utf8'))
+  assert.equal(onDisk.address, frozen.address, 'the bytes on disk name themselves, so a moved file is still identifiable')
+  assert.equal(onDisk.content.round, 1)
+  assert.deepEqual(onDisk.content.parents, ['baseline'], 'round 1 has nothing comparable yet, so it starts from the baseline')
+  assert.equal(onDisk.content.empty, true)
+
+  // Every candidate carries the parent it will be branched from, where LAND reads it.
+  for (const candidateId of ['r1-h1', 'r1-h2']) {
+    assert.equal(ports.store.getState(candidateId, 'phase').parent_id, 'baseline')
+  }
+
+  // And the decision is on the workspace's own log, next to the plan it belongs to.
+  const accepted = ports.store.ops(20).find((op) => op.op === 'round_plan_accepted')
+  const detail = JSON.parse(accepted.detail)
+  assert.deepEqual(detail.parents, ['baseline'])
+  assert.equal(detail.parent_snapshot, frozen.address)
+  ports.store.close()
+})
+
+test('a round after a finished candidate starts from that candidate, not from the baseline again', async () => {
+  const ports = setup()
+  await toRoundOne(ports)
+  // r1-h1 beat the baseline (0.7012) on auc; r1-h2 also beat it but by less. Both finished.
+  finishWithMetrics(ports.store, 'r1-h1', { auc: 0.73 })
+  finishWithMetrics(ports.store, 'r1-h2', { auc: 0.72 })
+
+  await step(ports) // reflect round 1
+  await step(ports) // close round 1
+  const planned = await step(ports) // plan round 2
+  assert.match(planned.action, /planned round 2/)
+
+  const state = readRoundsState(ports.store)
+  const frozen = state.plan.parent_snapshot
+  const onDisk = JSON.parse(readFileSync(frozen.path, 'utf8'))
+  assert.equal(onDisk.content.round, 2)
+  assert.deepEqual(onDisk.content.parents, ['r1-h1'], 'the non-dominated candidate leads the roster; the baseline does not repeat')
+  assert.deepEqual(
+    onDisk.content.frontier.map((member) => member.candidate_id),
+    ['baseline', 'r1-h1'],
+    'the baseline is still in the set — it is the reference point, not a participant in the roster',
+  )
+  assert.equal(ports.store.getState('r2-h1', 'phase').parent_id, 'r1-h1')
+  assert.equal(ports.store.getState('r2-h2', 'phase').parent_id, 'r1-h1', 'one parent, two hypotheses: both build on it')
+  ports.store.close()
+})
+
+test('the same facts planned twice freeze the same address: the snapshot is content-addressed, not minted', async () => {
+  const first = setup()
+  await toRoundOne(first)
+  finishWithMetrics(first.store, 'r1-h1', { auc: 0.73 })
+  finishWithMetrics(first.store, 'r1-h2', { auc: 0.72 })
+  await step(first) // reflect
+  await step(first) // close
+  await step(first) // plan round 2
+  const a = readRoundsState(first.store).plan.parent_snapshot.address
+  first.store.close()
+
+  // A second workspace with the same facts and the same checkpoints reaches the same address: no
+  // clock, no random id, no counter anywhere in it.
+  const second = setup()
+  await toRoundOne(second)
+  finishWithMetrics(second.store, 'r1-h1', { auc: 0.73 })
+  finishWithMetrics(second.store, 'r1-h2', { auc: 0.72 })
+  await step(second)
+  await step(second)
+  await step(second)
+  const b = readRoundsState(second.store).plan.parent_snapshot.address
+  second.store.close()
+
+  assert.equal(a, b)
+})
+
+test('the rotation advances with the round, so two consecutive rounds lead with different axes', async () => {
+  // A two-axis contract, and two candidates that trade one axis for the other: neither dominates, so
+  // which of them leads the roster is decided by *which axis leads*, and nothing else.
+  const TWO_AXES = {
+    ...CONFIG,
+    metrics: { primary: 'auc', objectives: { auc: 'up', logloss: 'down' } },
+    rounds: { ...CONFIG.rounds, max_rounds: 3 },
+  }
+  const ports = setup({ config: TWO_AXES })
+  await toRoundOne(ports)
+  // r1-h1 leads on auc, r1-h2 leads on logloss. One round later the roster should stop leading with
+  // the same axis — that is the whole point of rotating, and it is a fact in the snapshot.
+  finishWithMetrics(ports.store, 'r1-h1', { auc: 0.75, logloss: 0.62 })
+  finishWithMetrics(ports.store, 'r1-h2', { auc: 0.73, logloss: 0.55 })
+
+  await step(ports) // reflect round 1
+  await step(ports) // close round 1
+  await step(ports) // plan round 2
+
+  const second = JSON.parse(readFileSync(readRoundsState(ports.store).plan.parent_snapshot.path, 'utf8')).content
+  assert.deepEqual(second.rotation, { axes: ['auc', 'logloss'], offset: 1 }, 'round 2 leads with the second axis')
+  assert.equal(second.parents[0], 'r1-h2', 'the logloss leader opens the roster, because logloss leads this round')
+  assert.deepEqual([...second.parents].sort(), ['r1-h1', 'r1-h2'], 'both axes are still represented')
+
+  // Round 2's candidates cross again, so the frontier still holds two trade-offs.
+  finishWithMetrics(ports.store, 'r2-h1', { auc: 0.74, logloss: 0.54 })
+  finishWithMetrics(ports.store, 'r2-h2', { auc: 0.71, logloss: 0.58 })
+  await step(ports) // reflect round 2
+  await step(ports) // close round 2
+  await step(ports) // plan round 3
+
+  const third = JSON.parse(readFileSync(readRoundsState(ports.store).plan.parent_snapshot.path, 'utf8')).content
+  assert.deepEqual(third.rotation, { axes: ['auc', 'logloss'], offset: 0 }, 'round 3 is back to the primary axis')
+  assert.equal(third.parents[0], 'r1-h1', 'the auc leader opens the roster on the rounds the first axis leads')
+  assert.notEqual(second.parents[0], third.parents[0], 'two consecutive rounds lead with different axes')
   ports.store.close()
 })

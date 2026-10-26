@@ -44,10 +44,10 @@ function rayWorld({ duplicateResponse } = {}) {
   return { root, metricsDir, fake }
 }
 
-function makePlatform({ fake, metricsDir, fetch: fetchImpl, plan }) {
+function makePlatform({ fake, metricsDir, request, plan }) {
   return createRayPlatform({
     baseUrl: 'http://ray.fake:8265',
-    fetch: fetchImpl ?? fake.fetch,
+    request: request ?? fake.request,
     plan: plan ?? (() => ({ entrypoint: ['python', '-m', 'train'], metadata: {} })),
     metricsDir,
     name: 'ray-test',
@@ -153,11 +153,57 @@ test('a job stopped outside our process is canceled, not a code failure', async 
   assert.equal(done.error_class, 'canceled')
 })
 
-test('a duplicate submission_id is resolved to the existing job on both real Ray shapes', async () => {
+test('a duplicate submission_id is answered by a read, not by a second job', async () => {
+  const { metricsDir, fake } = rayWorld()
+  const platform = makePlatform({ fake, metricsDir })
+  const request = { submissionId: 'cand_twice', candidateId: 'cand_twice', gpuHours: 1 }
+  fake.script('cand_twice', { outcome: 'succeeded', metrics: { val_loss: 0.5 } })
+
+  const first = await submitJob(platform, request)
+  const second = await submitJob(platform, request)
+
+  assert.equal(second.duplicate, true, 'the caller must be told it was a duplicate')
+  assert.equal(second.job_id, first.job_id, 'same submission_id means the same job')
+  assert.equal(fake.jobs.size, 1, 'a duplicate must never create a second job')
+  assert.equal(
+    fake.requests.filter((entry) => entry.method === 'POST' && entry.path === '/api/jobs/').length,
+    1,
+    'a submission id the cluster already owns is resolved without writing: no second POST, no second GPU bill',
+  )
+
+  const done = await pollUntilTerminal(platform, second.job_id)
+  assert.equal(done.state, 'succeeded', 'going straight to polling after a duplicate must work')
+})
+
+test('a duplicate still resolves to a pollable reference when the details document carries no job_id', async () => {
+  // Measured on the live cluster: a details document may answer `job_id: null` and still be
+  // addressed by its submission id. Returning null here would make MONITOR_POLL poll nothing.
+  const { metricsDir, fake } = rayWorld()
+  const platform = makePlatform({ fake, metricsDir })
+  const request = { submissionId: 'cand_nullid', candidateId: 'cand_nullid', gpuHours: 1 }
+  fake.script('cand_nullid', { outcome: 'succeeded', metrics: { val_loss: 0.5 }, nullJobId: true })
+
+  const first = await submitJob(platform, request)
+  const second = await submitJob(platform, request)
+
+  assert.equal(second.duplicate, true)
+  assert.equal(second.job_id, 'cand_nullid', 'the submission id is the reference the dashboard resolves when no job_id is reported')
+  assert.equal((await pollJob(platform, second.job_id)).submission_id, 'cand_nullid', 'and it addresses the same job')
+  assert.equal(fake.jobs.size, 1)
+  assert.equal((await pollUntilTerminal(platform, second.job_id)).state, 'succeeded')
+
+  const found = await findJob(platform, 'cand_nullid')
+  assert.equal(found.job_id, 'cand_nullid', 'recovery answers with a reference it can actually poll')
+})
+
+test('a duplicate the dashboard cannot show yet is still one job, on both real Ray shapes', async () => {
   for (const duplicateResponse of ['ray-400', 'plain-409']) {
     const { metricsDir, fake } = rayWorld({ duplicateResponse })
     const platform = makePlatform({ fake, metricsDir })
-    const request = { submissionId: 'cand_twice', candidateId: 'cand_twice', gpuHours: 1 }
+    const request = { submissionId: 'cand_race', candidateId: 'cand_race', gpuHours: 1 }
+    // The grace window: the job exists, the details route cannot see it yet, so the pre-check misses
+    // and the POST is the one that finds out. Ray answers 400 `already exists` (OSS) or 409 (a proxy).
+    fake.script('cand_race', { outcome: 'succeeded', metrics: { val_loss: 0.5 }, hideFromDetails: 1 })
 
     const first = await submitJob(platform, request)
     const second = await submitJob(platform, request)
@@ -165,26 +211,21 @@ test('a duplicate submission_id is resolved to the existing job on both real Ray
     assert.equal(second.duplicate, true, `${duplicateResponse}: the caller must be told it was a duplicate`)
     assert.equal(second.job_id, first.job_id, `${duplicateResponse}: same submission_id means the same job`)
     assert.equal(fake.jobs.size, 1, `${duplicateResponse}: a duplicate must never create a second job`)
-    assert.equal(
-      fake.requests.filter((entry) => entry.method === 'POST' && entry.path === '/api/jobs/').length,
-      2,
-      'the second submit is one POST that resolves the existing job — not a retry onto another cluster',
-    )
   }
 })
 
 test('an unreachable dashboard is unknown, and the job is picked up again when it answers', async () => {
   const { metricsDir, fake } = rayWorld()
   let failures = 0
-  const flaky = async (input, init) => {
+  const flaky = async (request) => {
     // Only the job-details read fails: a dashboard that is briefly down is not a cluster that forgot.
-    if (failures > 0 && String(input).includes('/api/jobs/raysubmit')) {
+    if (failures > 0 && String(request.url).includes('/api/jobs/raysubmit')) {
       failures -= 1
-      throw new TypeError('fetch failed')
+      throw new TypeError('ray transport: connect ECONNREFUSED')
     }
-    return fake.fetch(input, init)
+    return fake.request(request)
   }
-  const platform = makePlatform({ fake, metricsDir, fetch: flaky })
+  const platform = makePlatform({ fake, metricsDir, request: flaky })
   fake.script('cand_flaky', { outcome: 'succeeded', metrics: { val_loss: 0.3 } })
   const submitted = await submitJob(platform, { submissionId: 'cand_flaky', candidateId: 'cand_flaky', gpuHours: 1 })
 
@@ -234,22 +275,99 @@ test('the submitted body carries the idempotency key, the candidate, and where t
   const body = JSON.parse(post.body)
   assert.equal(body.submission_id, 'cand_body', 'submission_id is the idempotency key; a uuid would make 409s meaningless')
   assert.equal(body.metadata.candidate_id, 'cand_body', 'recovery matches on metadata.candidate_id')
-  assert.equal(body.metadata.gpu_hours, 2.5, 'the ledger and the cluster must agree on what was reserved')
+  assert.equal(
+    body.metadata.gpu_hours,
+    '2.5',
+    'the ledger and the cluster must agree on what was reserved — as text: JobSubmitRequest rejects a float metadata value with a 400',
+  )
   assert.ok(
     String(body.runtime_env.env_vars.REPRISE_METRICS_PATH).startsWith(metricsDir),
     'the job must be told where to write its metrics: Ray has no metrics API to read them from',
   )
 })
 
+test('every metadata value the submission carries is a string, and an unknown gpu_hours is omitted', async () => {
+  const { metricsDir, fake } = rayWorld()
+  const platform = makePlatform({ fake, metricsDir })
+
+  await submitJob(platform, { submissionId: 'cand_meta_a', candidateId: 'cand_meta_a', gpuHours: 0.1 })
+  await submitJob(platform, { submissionId: 'cand_meta_b', candidateId: 'cand_meta_b' })
+
+  const bodies = fake.requests
+    .filter((entry) => entry.method === 'POST' && entry.path === '/api/jobs/')
+    .map((entry) => JSON.parse(entry.body))
+  assert.equal(bodies.length, 2)
+
+  for (const body of bodies) {
+    for (const [key, value] of Object.entries(body.metadata)) {
+      assert.equal(typeof value, 'string', `metadata.${key} is a ${typeof value}; Ray's JobSubmitRequest requires a string and 400s the whole submission otherwise`)
+    }
+  }
+  for (const body of bodies) {
+    for (const [key, value] of Object.entries(body.runtime_env?.env_vars ?? {})) {
+      assert.equal(typeof value, 'string', `env_vars.${key} must be text too: the driver environment is a map of strings`)
+    }
+  }
+  assert.equal(bodies[0].metadata.gpu_hours, '0.1', 'a reservation still reaches the cluster, as text')
+  assert.equal(
+    'gpu_hours' in bodies[1].metadata,
+    false,
+    'an unknown reservation is omitted, not sent as null: null is not a string either, and Ray refuses it',
+  )
+})
+
+test('metadata from the plan is coerced where it can be, and refused where it cannot', async () => {
+  const { metricsDir, fake } = rayWorld()
+  const platform = makePlatform({
+    fake,
+    metricsDir,
+    plan: () => ({ entrypoint: ['python3', '-m', 'train'], metadata: { tier: 3, gpu_class: true, sweep: null } }),
+  })
+
+  await submitJob(platform, { submissionId: 'cand_meta_c', candidateId: 'cand_meta_c', gpuHours: 1 })
+  const body = JSON.parse(fake.requests.find((entry) => entry.method === 'POST' && entry.path === '/api/jobs/').body)
+  assert.equal(body.metadata.tier, '3', 'a number has a faithful text form, so it is sent rather than dropped')
+  assert.equal(body.metadata.gpu_class, 'true')
+  assert.equal('sweep' in body.metadata, false, 'null is omitted, because Ray refuses a null value and a missing key costs nothing')
+
+  const unflattenable = makePlatform({
+    fake,
+    metricsDir,
+    plan: () => ({ entrypoint: ['python3', '-m', 'train'], metadata: { spec: { depth: 3 } } }),
+  })
+  const before = fake.requests.filter((entry) => entry.method === 'POST').length
+  await assert.rejects(
+    () => submitJob(unflattenable, { submissionId: 'cand_meta_d', candidateId: 'cand_meta_d' }),
+    /metadata\.spec is an object.*requires every job metadata value to be a string/,
+    'a value with no faithful text form is a caller bug named at the seam, not a 400 nine seconds later',
+  )
+  assert.equal(fake.requests.filter((entry) => entry.method === 'POST').length, before, 'nothing was submitted')
+})
+
+test('the fake refuses metadata the cluster refuses, so a regression here cannot pass the suite', async () => {
+  const { fake } = rayWorld()
+  for (const value of [0.1, 3, true, null, { nested: 1 }]) {
+    const answer = await fake.request({
+      method: 'POST',
+      url: 'http://ray.fake:8265/api/jobs/',
+      headers: { 'content-type': 'application/json' },
+      body: Buffer.from(JSON.stringify({ submission_id: 'bad-meta', entrypoint: 'true', metadata: { gpu_hours: value } })),
+    })
+    assert.equal(answer.status, 400, `metadata ${JSON.stringify(value)} must be refused: the fake has to be at least as strict as __post_init__`)
+    assert.match(answer.text, /metadata values must be strings/)
+  }
+  assert.equal(fake.jobs.size, 0)
+})
+
 test('a rejected submit throws instead of inventing a job id', async () => {
   const { metricsDir, fake } = rayWorld()
-  const rejecting = async (input, init) => {
-    if (init?.method === 'POST') {
-      return new Response(JSON.stringify({ detail: 'no resources available' }), { status: 500 })
+  const rejecting = async (request) => {
+    if (request.method === 'POST') {
+      return { status: 500, headers: {}, text: JSON.stringify({ detail: 'no resources available' }) }
     }
-    return fake.fetch(input, init)
+    return fake.request(request)
   }
-  const platform = makePlatform({ fake, metricsDir, fetch: rejecting })
+  const platform = makePlatform({ fake, metricsDir, request: rejecting })
 
   await assert.rejects(
     () => submitJob(platform, { submissionId: 'cand_reject', candidateId: 'cand_reject', gpuHours: 1 }),
@@ -276,4 +394,47 @@ test('log signatures are only consulted when the task records say nothing', () =
   assert.equal(classifyRayLogs('Traceback (most recent call last):'), 'code')
   assert.equal(classifyRayLogs('everything is fine'), undefined)
   assert.equal(classifyRayLogs(''), undefined)
+})
+// The driver log is the only channel back from a cluster with no shared filesystem, so the windowed
+// sample series a job summarises itself must survive `collect()` — otherwise every cluster baseline
+// and every candidate series ends as `baseline_no_windows` / no samples while the numbers sit in the
+// log. A job that printed no marker must come back with NO series, never an empty one: "no windows"
+// and "windows that were all dropped" are different failures (ticket 19's adapter, ticket 30's use).
+test('the window series a job printed in its log comes back from collect, and an absence is not an empty series', async () => {
+  const { metricsDir, fake } = rayWorld()
+  const series = {
+    schema_version: 1,
+    unit: 'epoch',
+    windows: [
+      { index: 0, start: 0, end: 1, metrics: { score: 0.5 } },
+      { index: 1, start: 1, end: 2, metrics: { score: 0.6 } },
+    ],
+  }
+  const platform = makePlatform({
+    fake,
+    metricsDir,
+    plan: () => {
+      fake.script('cand_windows', {
+        outcome: 'succeed',
+        metrics: { score: 0.6 },
+        logs: `epoch 1\nREPRISE_WINDOWS ${JSON.stringify(series)}\n`,
+      })
+      fake.script('cand_silent', { outcome: 'succeed', metrics: { score: 0.6 }, logs: 'epoch 1\n' })
+      return { entrypoint: ['python', '-m', 'train'], metadata: {} }
+    },
+  })
+
+  const withSeries = await submitJob(platform, { submissionId: 'cand_windows', candidateId: 'cand_windows' })
+  const done = await pollUntilTerminal(platform, withSeries.job_id)
+  const collected = await platform.collect(done)
+  assert.deepEqual(collected.window_series, series, 'the series the job printed must come back intact')
+
+  const silent = await submitJob(platform, { submissionId: 'cand_silent', candidateId: 'cand_silent' })
+  const silentDone = await pollUntilTerminal(platform, silent.job_id)
+  const silentCollected = await platform.collect(silentDone)
+  assert.equal(
+    'window_series' in silentCollected,
+    false,
+    'a job that printed no series must answer without one — an empty series would read as a measured run with no windows',
+  )
 })
