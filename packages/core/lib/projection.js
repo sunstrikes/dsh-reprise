@@ -141,11 +141,16 @@ function holdReason(candidateId, { store, executor, spend, budget }) {
  * are ours", because two accounts of that would eventually disagree about a job on somebody else's
  * cluster. Two answers are deliberately *not* numbers:
  *
- *  - `cards.inUse` is `null` whenever the listing was not read. The dashboard has no platform port,
- *    so for it the cluster is always unread; printing `0` there is the answer somebody acts on, and
- *    it would be a lie the moment another workspace, or an earlier run of this one, holds the cards.
+ *  - `cards.inUse` is `null` whenever the listing was not read. A caller with no platform port (a
+ *    headless host, `dump`, a test with only a directory) has not read it; printing `0` there is the
+ *    answer somebody acts on, and it would be a lie the moment another workspace, or an earlier run
+ *    of this one, holds the cards.
  *  - `orphans` / `foreign` are `null` for the same reason. An empty array means "we looked and found
  *    none"; `null` means "we did not look".
+ *
+ * "We were never given a listing source" and "the executor could not list" are two different
+ * refusals and `reason` keeps them apart: the first says the page has no listing source, the second
+ * quotes what the executor said.
  *
  * `cards.floor` is the part we do know from our own facts: open ledger rows times cards each.
  */
@@ -178,7 +183,13 @@ export function cluster(store, { config, executor, listing } = {}) {
 
   return {
     read: report.read,
-    reason: report.read ? null : (report.reason ?? 'the cluster listing was not read'),
+    // A missing source is not a refused listing: saying "the executor returned no job listing" about
+    // a page that never asked would blame an executor that was never consulted.
+    reason: report.read
+      ? null
+      : listing === undefined
+        ? 'this page has no cluster-listing source, so the cluster was not asked'
+        : (report.reason ?? 'the cluster listing could not be read'),
     cards: {
       perJob,
       // Only a listing can answer "how many are in use"; our ledger can only say "at least".

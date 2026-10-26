@@ -29,7 +29,8 @@ import { loadDomainPack } from '../../core/lib/domain.js'
 import { buildQuestion, modelCallName, modelCallRecord } from '@dsh-reprise/exec/model'
 import { fileArtifacts } from '../../core/lib/artifacts.js'
 import { openWorkspace, runCandidate, seedMetrics } from '../../core/test/support/fake-ports.js'
-import { callHandler, callsHandler, candidateHandler, conclusionHandler, overviewHandler } from '../lib/routes.js'
+import { callHandler, callsHandler, candidateHandler, conclusionHandler, overviewHandler, registerRoutes } from '../lib/routes.js'
+import { fakeConnection } from './support/fake-connection.js'
 
 const GENERATIVE_PACK_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'examples', 'generative-recommenders')
 
@@ -65,7 +66,7 @@ test('the overview route answers "how many cards, is anything waiting" from the 
   const dir = dirname(ports.store.path)
   ports.store.close()
 
-  const answer = overviewHandler(dir, {})
+  const answer = await overviewHandler(dir, {})
   const cluster = answer.data.cluster
 
   assert.equal(cluster.read, false, 'the page has no platform port, and it says the listing was not read')
@@ -75,6 +76,64 @@ test('the overview route answers "how many cards, is anything waiting" from the 
   assert.equal(cluster.cards.floor, 2, 'what our own ledger supports, stated as a floor')
   assert.deepEqual(cluster.jobs.open, ['c1'])
   assert.equal(cluster.queue.count, 0, 'nothing is waiting for the cards here')
+})
+
+test('the overview route asks the cluster when it is given a platform, and says "cannot read" when it cannot', async () => {
+  const ports = openWorkspace({ config: { ...CONTRACT, executor: EXECUTOR } })
+  seed(ports.store, CONTRACT)
+  createCandidate(ports, { candidateId: 'c1', round: 1, hypothesis: 'widen the embedding table' })
+  await untilDone(ports, () => ports.store.jobFor('c1') !== undefined, 'a submitted job')
+  const job = ports.store.jobFor('c1')
+  const dir = dirname(ports.store.path)
+  ports.store.close()
+
+  // 1. An executor that can list: the page reports the cluster's own numbers, not the ledger's floor.
+  const listing = {
+    ok: true,
+    jobs: [{ job_id: job.job_id, submission_id: job.submission_id, status: 'RUNNING', metadata: {} }],
+  }
+  const readable = await overviewHandler(dir, {}, { platform: { list: async () => listing } })
+  assert.equal(readable.data.cluster.read, true, 'the route read the listing it was given')
+  assert.equal(readable.data.cluster.cards.inUse, 2, 'two cards really are in use, because the cluster said so')
+  assert.equal(readable.data.cluster.queue.upstream, 0, 'and nothing is pending upstream, which only a listing can say')
+  assert.equal(readable.data.cluster.reason, null)
+
+  // 2. A platform that cannot list: "cannot read", in the executor's own words — not "0 cards".
+  const blind = await overviewHandler(dir, {}, { platform: {} })
+  assert.equal(blind.data.cluster.read, false)
+  assert.match(blind.data.cluster.reason, /cannot list/)
+  assert.equal(blind.data.cluster.cards.inUse, null, 'unknown, never 0')
+
+  // 3. No platform at all (a headless host): the same null, with its own reason.
+  const unasked = await overviewHandler(dir, {})
+  assert.equal(unasked.data.cluster.read, false)
+  assert.match(unasked.data.cluster.reason, /no cluster-listing source/)
+  assert.equal(unasked.data.cluster.cards.inUse, null)
+})
+
+test('the mounted overview route carries the platform through, so the page a browser fetches is the one with numbers', async () => {
+  const ports = openWorkspace({ config: { ...CONTRACT, executor: EXECUTOR } })
+  seed(ports.store, CONTRACT)
+  createCandidate(ports, { candidateId: 'c1', round: 1, hypothesis: 'widen the embedding table' })
+  await untilDone(ports, () => ports.store.jobFor('c1') !== undefined, 'a submitted job')
+  const job = ports.store.jobFor('c1')
+  const dir = dirname(ports.store.path)
+  ports.store.close()
+
+  const connection = fakeConnection()
+  const dispose = registerRoutes({
+    connection,
+    workspace: dir,
+    platform: {
+      list: async () => ({ ok: true, jobs: [{ job_id: job.job_id, submission_id: job.submission_id, status: 'RUNNING', metadata: {} }] }),
+    },
+  })
+  const answer = await connection.dispatch('GET', '/api/reprise/overview')
+
+  assert.equal(answer.status, 200)
+  assert.equal(answer.json.data.cluster.read, true, 'the route registered with a platform is the route that asks')
+  assert.equal(answer.json.data.cluster.cards.inUse, 2)
+  dispose()
 })
 
 // --------------------------------------------------------------- 候选详情
