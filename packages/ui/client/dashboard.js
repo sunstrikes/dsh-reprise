@@ -459,6 +459,13 @@ const state = {
   events: [],
   /** How many facts the page has read at all — the number beside the stream's title. */
   factTotal: 0,
+  /**
+   * The generation of the read in flight: a poll and a click can both be outstanding, and they finish
+   * in whatever order the Host answers. The last *response* used to win rather than the last one
+   * *started* — click two squares quickly and the inspector could flip back to the earlier candidate
+   * while the newer square stayed pressed. A read applies only while it is still the newest.
+   */
+  gen: 0,
   selected: null,
   /** When the last *successful* poll completed: the `read at` stamp, and what "last good read" means. */
   readAt: null,
@@ -660,6 +667,9 @@ function renderLadder(roundsAnswer, conclusionAnswer) {
   const metric = ladder?.metric ?? null
   const axis = ladder?.axis ?? null
   const baseline = ladder?.baseline ?? null
+  // Why there is no line, when there is none: a run that froze no baseline and a baseline recording a
+  // different metric are two different facts, and `standingBaseline()` publishes which one it is.
+  const baselineAbsent = ladder?.baselineAbsent ?? null
   const best = data?.best ?? null
 
   // One slot per round, plus the INIT slot the axis starts from.
@@ -674,7 +684,7 @@ function renderLadder(roundsAnswer, conclusionAnswer) {
   // The sentence the chart is read as. It says the same thing to a sighted reader and to a screen
   // reader, and it is what the plot's role="img" carries, because a picture of a staircase is not
   // accessible on its own.
-  const summary = ladderSentence({ rounds, best, baseline, metric })
+  const summary = ladderSentence({ rounds, best, baseline, baselineAbsent, metric })
   root.append(el('p', { class: 'ladder-summary', text: summary }))
 
   if (axis === null) {
@@ -696,7 +706,7 @@ function renderLadder(roundsAnswer, conclusionAnswer) {
   // The rail goes *inside* the ladder's grid, in the second row of the same second column as the
   // plot: that is what makes a marker and the round under it share one slot width.
   grid.append(rail({ rounds, metric, slots }))
-  root.append(grid, ladderKey({ baseline }), ladderTable({ rounds, metric }))
+  root.append(grid, ladderKey({ baseline, baselineAbsent }), ladderTable({ rounds, metric }))
 }
 
 /**
@@ -840,14 +850,19 @@ function rail({ rounds, metric, slots }) {
 }
 
 /** The key: five shapes and the baseline line, because a shape nobody can name is not information. */
-function ladderKey({ baseline }) {
+function ladderKey({ baseline, baselineAbsent }) {
   const key = el('p', { class: 'ladder-key' })
   for (const [shape, word] of Object.entries(SHAPE_WORDS)) {
     key.append(el('span', {}, [el('i', { class: 'rail-candidate', 'data-shape': shape }), word]))
   }
   key.append(
     baseline === null
-      ? el('span', { text: 'baseline not recorded — no INIT line' })
+      ? el('span', {
+          text:
+            baselineAbsent === null
+              ? 'baseline not recorded — no INIT line'
+              : `no INIT line — ${baselineAbsent}`,
+        })
       : el('span', {}, [el('span', { class: 'ladder-key-line' }), `baseline ${number(baseline.value)} · INIT frozen`]),
   )
   return key
@@ -906,14 +921,16 @@ function ladderTable({ rounds, metric }) {
  * round it was set in, and whether a baseline was recorded at all. "No baseline" is a sentence here,
  * never a zero and never an em dash.
  */
-function ladderSentence({ rounds, best, baseline, metric }) {
+function ladderSentence({ rounds, best, baseline, baselineAbsent, metric }) {
   const what =
     best === null || best === undefined
       ? `None of the ${number(rounds.length)} rounds produced a comparable ${metric ?? 'result'} yet.`
       : `${number(rounds.length)} rounds: the best ${metric ?? 'result'} is ${number(best.value)}, set in round ${number(best.round)}.`
   const against =
     baseline === null
-      ? ' No baseline was recorded, so there is no INIT line to measure against.'
+      ? baselineAbsent === null
+        ? ' No baseline was recorded, so there is no INIT line to measure against.'
+        : ` No INIT line: ${baselineAbsent}.`
       : ` The INIT baseline, ${number(baseline.value)}, is the dashed line.`
   return what + against
 }
@@ -1562,7 +1579,9 @@ const stamps = (answer) => {
   document.getElementById('workspace').title = typeof workspace === 'string' ? workspace : ''
   stamp('read-at', clock(state.readAt))
   stamp('last-fact', clock(cursorAt(answer?.cursor)))
-  stamp('cursor', answer?.cursor === undefined || answer?.cursor === null ? '' : cursor(answer.cursor))
+  // The em dash every other absent value uses: an empty stamp read as a blank line, which the panel
+  // drew as `—`, so the two surfaces disagreed about the same empty workspace.
+  stamp('cursor', answer?.cursor === undefined || answer?.cursor === null ? EM_DASH : cursor(answer.cursor))
 }
 
 async function select(candidateId) {
@@ -1572,6 +1591,7 @@ async function select(candidateId) {
 
 /** One poll: the increment for every view, then the page is redrawn from what the facts say. */
 async function refresh() {
+  const mine = ++state.gen
   try {
     const [overview, rounds, conclusion, audit] = await Promise.all([
       read('overview'),
@@ -1579,6 +1599,9 @@ async function refresh() {
       read('conclusion'),
       read('calls'),
     ])
+    // A newer read started while these were in flight: it describes the page as it is now, and
+    // applying this answer would overwrite it with an older selection.
+    if (mine !== state.gen) return
     state.audit = audit
     state.lastError = null
     state.readAt = Date.now()
@@ -1599,10 +1622,18 @@ async function refresh() {
     renderReadings(overview)
     renderAudit()
 
-    if (state.selected !== null) renderCandidate(await read('candidate', { candidate: state.selected }))
+    if (state.selected !== null) {
+      const detail = await read('candidate', { candidate: state.selected })
+      // The candidate read is a second round trip: a click that arrived while it was in flight has
+      // already drawn the newer one, and this one must not paint over it.
+      if (mine !== state.gen) return
+      renderCandidate(detail)
+    }
 
     renderStream()
   } catch (error) {
+    // A read that has been superseded does not report: the newer one owns the strip too.
+    if (mine !== state.gen) return
     // A dashboard that dies on one failed poll leaves the last good page on screen and says what
     // broke — in the strip, beside the other facts the run owes a reader (spec §6.9's 500 row).
     state.lastError = error

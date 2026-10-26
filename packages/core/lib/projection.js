@@ -30,7 +30,7 @@ import { cudaVisibleDevicesOf, gpuExclusivityOf, gpuHolder, jobReport } from './
 import { defaultStaticChecks } from './judge.js'
 import { ranking, roundHistory } from './ranking.js'
 import { readRoundsState } from './rounds.js'
-import { STOP_RULES, describeRules, samplesFor, stopConfig } from './stop.js'
+import { STOP_RULES, describeRules, roundStreaks, samplesFor, stopConfig } from './stop.js'
 import { configWarnings } from './warnings.js'
 
 const FOUR_STATES = ['ok', 'missing', 'conflict', 'invalid']
@@ -74,18 +74,6 @@ function recordedWarningConfig(workspace, config) {
     if (workspace[key] !== undefined) recorded[key] = workspace[key]
   }
   return { ...recorded, ...(config ?? {}) }
-}
-
-/** Trailing streaks over the completed-round history — the same quantities the stop rules use. */
-function streaks(history) {
-  let empty = 0
-  let flat = 0
-  for (const entry of history) {
-    empty = entry.empty ? empty + 1 : 0
-    if (entry.empty) continue
-    flat = entry.improving ? 0 : flat + 1
-  }
-  return { empty, flat }
 }
 
 function stopRecord(workspace) {
@@ -306,7 +294,10 @@ export function overview(store, { config, executor, listing, now } = {}) {
   const workspace = store.getState(undefined, 'workspace', {}) ?? {}
   const rows = view(store, config)
   const history = roundHistory(rows)
-  const { empty, flat } = streaks(history)
+  // The streaks the stop rules measure, from the function that measures them: a live run's unfinished
+  // round has produced nothing *yet*, which is not an empty round, and a gain under the contract's
+  // tolerance is not an improvement here either. Two loops produced two answers.
+  const { empty, flat } = roundStreaks({ rounds: history, contract: rows.contract })
   const budget = budgetOf(workspace, config)
   const spend = spendOf(store)
   const limits = stopLimits(workspace, config)
@@ -460,7 +451,9 @@ function roundSeries(history) {
     complete: entry.complete,
     empty: entry.empty,
     improving: entry.improving,
-    verdict: entry.improving ? 'raised' : entry.empty ? 'empty' : 'held',
+    // An unfinished round is its own word: it has not produced nothing, it has not finished, and its
+    // candidates are drawn as in flight on the rail. `empty` would contradict the squares beside it.
+    verdict: entry.complete === false ? 'running' : entry.improving ? 'raised' : entry.empty ? 'empty' : 'held',
     best: entry.best ?? null,
     cumulative: entry.cumulative ?? null,
     // The candidate ids, in the order the rail draws them.
@@ -1051,7 +1044,7 @@ export function publishedOf(contract, metric) {
  *
  * `changePercent` is the same change as a percentage *of the group*, because "(0.7331 - 0.706981) /
  * 0.706981" is arithmetic, and arithmetic in three renderers is three answers. It is a percentage
- * number (`3.694549`, not the ratio `0.03694549`) so the field name says what the number is. It is
+ * number (`3.694442`, not the ratio `0.03694442`) so the field name says what the number is. It is
  * `null` — never `0`, never `Infinity` — whenever there is no group, or the group is 0 and a relative
  * change does not exist. `group.kind` is what makes the claim readable: the same +2.79% means
  * "against the frozen baseline" or "against the previous best", and they are not the same news.

@@ -14,7 +14,7 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -39,11 +39,31 @@ const withoutComments = (source, name) =>
 const code = (name) => withoutComments(read(name), name)
 
 
+/** The Web UI panel: the same design, one package over, and a client source like any other. */
+const PANEL_DIR = join(dirname(dirname(dirname(fileURLToPath(import.meta.url)))), 'core', 'client')
+
 /**
- * Every file the browser loads from `client/`. Written out rather than read from `ASSETS`: a test that
- * scans the list it is asserting proves nothing about a file nobody added to the list.
+ * Every client source the *repository* ships, read from the two directories rather than a list.
+ *
+ * A hand-written list is the defect this replaced: it named the page's five files and none of the
+ * panel's, so hard constraint 1 ("客户端源码不出现任何颜色字面量") was enforced on the surface that
+ * had already been painted from the stylesheet and not on the one that is a React tree of its own. A
+ * file added to either directory is now scanned the moment it exists, no matter who forgets to edit
+ * a constant.
  */
-const CLIENT_MODULES = ['index.html', 'dashboard.js', 'format.js', 'states.js', 'dashboard.css']
+const CLIENT_SOURCES = [CLIENT_DIR, PANEL_DIR].flatMap((dir) =>
+  readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && /\.(js|css|html)$/.test(entry.name))
+    .map((entry) => ({ path: join(dir, entry.name), name: entry.name })),
+)
+
+/** The four spellings of a colour literal, and the one named colour we do want (`currentColor`). */
+const COLOUR_LITERALS = [
+  { pattern: /#[0-9a-fA-F]{3,8}\b/, what: 'a hex colour' },
+  { pattern: /\brgba?\(/, what: 'an rgb() colour' },
+  { pattern: /\bhsla?\(/, what: 'an hsl() colour' },
+  { pattern: /:\s*(red|green|blue|black|white|gray|grey|orange|yellow|amber)\b/, what: 'a named colour' },
+]
 
 test('the page and its modules are served by the host at the asset routes', async () => {
   const connection = fakeConnection()
@@ -103,18 +123,15 @@ test('no colour is hard-coded: the page follows the host theme tokens and nothin
   //
   // Comments are stripped first (see `code()`): a scan that reads prose would forbid explaining the
   // rule it enforces.
-  for (const name of CLIENT_MODULES) {
-    const source = code(name)
-    assert.doesNotMatch(source, /#[0-9a-fA-F]{3,8}\b/, `${name} must not carry a hex colour`)
-    assert.doesNotMatch(source, /\brgba?\(/, `${name} must not carry an rgb() colour`)
-    assert.doesNotMatch(source, /\bhsla?\(/, `${name} must not carry an hsl() colour`)
-    // A named colour is a colour too, and `currentColor` is the one we do want: it is the ink the
-    // host's theme chose, which is what makes the shapes survive a light/dark flip.
-    assert.doesNotMatch(
-      source,
-      /:\s*(red|green|blue|black|white|gray|grey|orange|yellow|amber)\b/,
-      `${name} must not carry a named colour`,
-    )
+  assert.ok(
+    CLIENT_SOURCES.some((file) => file.path.startsWith(PANEL_DIR)),
+    'the panel is a client source, and the scan is not allowed to skip the package it lives in',
+  )
+  for (const { path, name } of CLIENT_SOURCES) {
+    const source = withoutComments(readFileSync(path, 'utf8'), name)
+    for (const { pattern, what } of COLOUR_LITERALS) {
+      assert.doesNotMatch(source, pattern, `${name} must not carry ${what}`)
+    }
   }
 
   const stylesheet = read('dashboard.css')
@@ -122,7 +139,12 @@ test('no colour is hard-coded: the page follows the host theme tokens and nothin
   for (const token of ['--dsw-alias-bg-base', '--dsw-alias-label-primary', '--dsw-alias-border-l1']) {
     assert.ok(stylesheet.includes(token), `the page consumes ${token}`)
   }
-  assert.match(stylesheet, /color-scheme:\s*light dark/, 'and falls back to the OS scheme (system colours) only when no host token is present')
+  // The OS scheme, declared where it cannot reach the host: on the surface that owns this sheet.
+  assert.match(
+    stylesheet,
+    /\.reprise\s*\{[^}]*color-scheme:\s*light dark/,
+    'and falls back to the OS scheme (system colours) on its own surface, never on the host document',
+  )
 
   // The page paints from that one file and from nothing else: no inline `<style>`, and every rule in
   // the stylesheet scoped so the panel can inject it into the host document without repainting it.
@@ -468,6 +490,19 @@ test('the stylesheet is scoped, so the panel can inject it without repainting th
   for (const match of read('dashboard.css').matchAll(/^\s+(--[a-z0-9-]+):/gm)) {
     assert.match(match[1], /^--reprise-/, `${match[1]} is not a --reprise-* token`)
   }
+
+  // The `:root` block is allowed for one reason only: it declares *our* custom properties, which
+  // collide with nothing. A normal declaration there is a declaration about the host's own document —
+  // `color-scheme: light dark` on `:root` used to force the host's controls and scrollbars into a
+  // scheme it never asked for. So the block is checked property by property, not selector by selector.
+  const rootBlock = /:root\s*\{([^}]*)\}/.exec(css)?.[1]
+  assert.ok(rootBlock !== undefined, 'the token block is still there')
+  const declarations = [...rootBlock.matchAll(/(^|;)\s*([-a-zA-Z]+)\s*:/g)].map((match) => match[2])
+  assert.ok(declarations.length > 10, `the block was read (${declarations.length} declarations)`)
+  for (const property of declarations) {
+    assert.match(property, /^--reprise-/, `the host document must not be told "${property}" by our sheet`)
+  }
+  assert.equal([...css.matchAll(/:root/g)].length, 1, 'one token block, and no other rule keying off :root')
 })
 
 // --------------------------------------- the candidate-state vocabulary (ticket #5)
@@ -618,4 +653,50 @@ test('the cluster cell says why a queued candidate is waiting, not just that one
   assert.match(source, /single_job_gpu|budget/, 'in the decision\'s own vocabulary, not a new one')
   // The reason is a published word; the page maps it to a sentence, it does not re-decide the hold.
   assert.doesNotMatch(source, /holdReason\(/, 'the page does not recompute the hold')
+})
+
+// ------------------------------------------------- the review pass: one number, one surface
+
+test('a read that has been superseded does not paint over the newer one', () => {
+  // The race: a 5 s poll and a click both read, and the Host answers in whatever order it likes. The
+  // page used to end every read in a full re-render, so the last *response* to land won — click two
+  // squares quickly and the inspector flipped back to the earlier candidate for one read while the
+  // newer square stayed pressed. A read now carries a generation and applies only while it is newest.
+  const source = code('dashboard.js')
+
+  assert.match(source, /const mine = \+\+state\.gen/, 'a read takes the next generation when it starts')
+  const guard = source.indexOf('if (mine !== state.gen) return')
+  assert.ok(guard > 0, 'and checks it again before it applies anything')
+  assert.ok(
+    guard < source.indexOf('state.audit = audit'),
+    'the check comes before the first thing a read writes, not after it has half applied',
+  )
+  // The candidate read is a second round trip, so it gets its own check: a click that arrived while it
+  // was in flight has already drawn the newer candidate.
+  assert.equal(
+    [...source.matchAll(/if \(mine !== state\.gen\) return/g)].length,
+    3,
+    'once for the views, once for the candidate, once for the failure strip',
+  )
+})
+
+test('an absent cursor is the em dash, the same word the panel prints', () => {
+  // The one rendering divergence between the two surfaces: an empty workspace showed a blank stamp on
+  // the page and `—` in the panel. Every other absent value on the page is `EM_DASH`.
+  const source = code('dashboard.js')
+
+  assert.match(source, /stamp\('cursor', [^)]*EM_DASH/, 'the cursor stamp answers the em dash, not an empty string')
+  assert.doesNotMatch(source, /answer\?\.cursor === undefined[^\n]*\? ''/, 'and never a blank stamp')
+})
+
+test('the staircase says *why* there is no baseline line, not just that there is none', () => {
+  // `standingBaseline()` distinguishes "this run froze no baseline" from "the frozen baseline records
+  // logloss, not auc"; both surfaces used to print the generic "baseline not recorded — no INIT line".
+  // Ticket #2 asks for "no comparable baseline", and the reason is what makes that checkable.
+  const source = code('dashboard.js')
+
+  assert.match(source, /const baselineAbsent = ladder\?\.baselineAbsent/, 'the page reads the sentence the projection publishes')
+  assert.match(source, /baselineAbsent === null[\s\S]{0,200}'baseline not recorded — no INIT line'/, 'the key keeps a default')
+  assert.match(source, /`no INIT line — \$\{baselineAbsent\}`/, 'and prints the reason when there is one')
+  assert.match(source, /No INIT line: \$\{baselineAbsent\}\./, 'the sentence the chart is read aloud by says it too')
 })

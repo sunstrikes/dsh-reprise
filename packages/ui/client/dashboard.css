@@ -18,10 +18,18 @@
  *      (INIT, then one per round): the plot places its marks at `--reprise-slot` fractions and the
  *      rail divides the same width into the same number of equal cells. They cannot drift apart
  *      without one of the two numbers changing.
+ *
+ * Injecting a sheet into someone else's document means declaring nothing about that document. So the
+ * `:root` block holds our `--reprise-*` properties and nothing else — not even `color-scheme`, which
+ * sits on `.reprise` (the page's body, the panel's container) where it cannot reach the host's own
+ * controls. The scan in `packages/ui/test/client.test.js` holds both halves of that claim.
  */
 
 :root {
-  color-scheme: light dark;
+  /* This block is *only* our custom properties: the panel injects this file into the host's
+     `document.head`, so anything else declared here would repaint the host's own document — which is
+     why `color-scheme` lives on `.reprise` below, where it applies to whichever surface owns the
+     sheet and to nothing else. */
 
   /* Surfaces and ink. The `--dsw-alias-*` names are the host's; the system colours are what a page
      served on its own has instead of a theme, not a palette of ours. */
@@ -64,6 +72,10 @@
 /* ------------------------------------------------------------------ the page's own chrome */
 
 .reprise {
+  /* The OS scheme for everything this sheet paints — and only for that. On the page this class is the
+     body; in the panel it is the docked container. Declared on `:root` it would have forced the
+     *host's* controls and scrollbars into the same scheme, which is the host's decision and not ours. */
+  color-scheme: light dark;
   box-sizing: border-box;
   margin: 0;
   padding: 1.5rem;
