@@ -16,6 +16,7 @@ import { isBlocking, isTerminal, validateArtifact, validateCandidate } from '@ds
 
 import { judgeTimeout } from '@dsh-reprise/exec'
 
+import { readAnchor } from './anchor.js'
 import { autoResumeIfClear, budgetOf, canDispatch, evaluate, pause } from './budget.js'
 import { gateSettings, recheckReport } from './gate.js'
 import { recordedLanding } from './landing.js'
@@ -419,8 +420,15 @@ async function land(ports, candidateId, state) {
   }
 
   // The runner owns the worktree and the base ref; the adapter only edits files inside it.
+  //
+  // Three answers in a fixed order, and the last one is ticket 23's: a candidate may name its own
+  // base (`state.base_ref`), the ports may carry one, and otherwise the run branches from its
+  // **code base anchor** — the candidate the roll rule promoted, recorded as a fact by the `anchor`
+  // intent or by `rounds.js`. Reading it here is what makes the anchor real: an anchor nobody reads
+  // is a field, and a diff taken against a tree the candidate never branched from is a review of the
+  // wrong change.
   const worktreeDir = state.worktree_dir ?? ports.worktreeDir
-  const baseRef = state.base_ref ?? ports.baseRef
+  const baseRef = state.base_ref ?? ports.baseRef ?? readAnchor(store)?.commit
   const parentId = state.parent_id ?? ports.parentId ?? null
 
   const result = await harness.land({

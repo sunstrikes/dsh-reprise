@@ -19,7 +19,9 @@
  */
 
 import { readFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 
+import { anchorHistory } from '../anchor.js'
 import { BASELINE_SUBJECT } from '../baseline.js'
 import { readRoundsState } from '../rounds.js'
 import { Store } from '../store.js'
@@ -203,6 +205,53 @@ function baselineLines(store) {
 }
 
 /**
+ * The code base the run stands on, and the decision that put it there.
+ *
+ * Two questions this answers that nothing else on the page does: *which tree would the next candidate
+ * branch from*, and — for a `human`-mode run — *what is waiting for a person, and what command
+ * answers it*. A proposal nobody can find is a run that quietly stopped improving while looking busy,
+ * so the command is printed verbatim rather than described.
+ *
+ * Absent when the run never rolled and nothing is waiting: "nothing changed" needs no section.
+ */
+function codeBaseLines(store) {
+  const history = anchorHistory(store, dirname(store.path))
+  const { current, events, proposals } = history
+  const failed = [...events].reverse().find((event) => event.event_type === 'anchor_roll_failed')
+  if (current === undefined && proposals.length === 0 && failed === undefined) return []
+
+  const lines = ['', 'code base']
+  if (current === undefined) {
+    lines.push(`  ${pad('anchor', 11)}none — candidates branch from the runner's own base ref`)
+  } else {
+    lines.push(`  ${pad('anchor', 11)}${current.candidate_id}  commit ${current.commit}`)
+    lines.push(
+      `  ${pad('decided', 11)}${
+        current.intent_id === null ? `${current.source} rule — no person was asked` : `human intent ${current.intent_id}`
+      }`,
+    )
+    const rolled = [...events].reverse().find((event) => event.event_type === 'anchor_rolled')
+    if (rolled !== undefined) {
+      lines.push(`  ${pad('rule', 11)}${rolled.evidence?.reason ?? 'unknown'}  (${iso(rolled.at_ms)})`)
+    }
+  }
+  for (const proposal of proposals) {
+    lines.push(
+      `  ${pad('proposal', 11)}${proposal.candidate_id}  commit ${proposal.commit}` +
+        `${Number.isFinite(proposal.proposed_at_ms) ? `  proposed ${iso(proposal.proposed_at_ms)}` : ''}`,
+    )
+    lines.push(`  ${pad('reason', 11)}${proposal.evidence?.reason ?? 'unknown'}`)
+    lines.push(
+      `  ${pad('answer', 11)}dsh-reprise intents anchor --candidate-id ${proposal.candidate_id} --commit ${proposal.commit}`,
+    )
+  }
+  if (failed !== undefined) {
+    lines.push(`  ${pad('failed', 11)}${failed.candidate_id}: ${failed.message}  (${iso(failed.at_ms)})`)
+  }
+  return lines
+}
+
+/**
  * The workspace page: what the run holds on the cluster, what is waiting, and the conclusion line.
  *
  * This is the renderer for the overview and the conclusion panels. Both are printed from the same
@@ -234,6 +283,7 @@ export function renderWorkspaceDump(store, { config } = {}) {
   lines.push(`queue      ${cluster.queue.count} waiting`)
   for (const entry of cluster.queue.waiting) lines.push(`  ${pad(entry.candidate_id, 12)}${entry.reason ?? 'not yet dispatched'}`)
   if (!cluster.read) lines.push(`listing    not read — ${cluster.reason}`)
+  lines.push(...codeBaseLines(store))
 
   if (final.best !== undefined) {
     lines.push(`best       ${final.best.candidate_id} ${final.best.metric}=${final.best.value} (round ${final.best.round})`)
