@@ -444,6 +444,20 @@ test('the panel paints from the page\'s stylesheet, one <style> injected through
   assert.equal(styles[0].removed, true, 'and unloading the plugin takes it out of the host document')
 })
 
+test('a shared module that will not load says so and asks again, instead of waiting forever', () => {
+  const source = panelCode()
+
+  // The panel's first act is to import the page's `format.js` and `states.js`. Those two routes are
+  // mounted by the *Host half* of the plugin, at plugin load: a Host that reloaded this bundle while
+  // its route table stayed put answers 404, and a cached rejection left the dock saying "reading the
+  // fact plane" for the lifetime of the window. Observed in a real Host, on a process that started
+  // before those routes existed. So: the rejection is named, not cached, and retried.
+  assert.match(source, /panel\.sharedFailed/, 'the failure is a sentence the panel can print')
+  assert.match(source, /importing = null/, 'a rejected import is not cached, so the next attempt asks again')
+  assert.match(source, /setTimeout\(attempt, POLL_MS\)/, 'and the attempt repeats on the poll cadence')
+  assert.match(source, /className: failure === null \? 'empty' : 'warning'/, 'an ordinary wait and a failure do not look alike')
+})
+
 test('the panel owns no styles of its own: no style object, and inline styles are geometry only', () => {
   const source = panelCode()
 
