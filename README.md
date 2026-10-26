@@ -254,6 +254,7 @@ and every candidate of a run that declared `keep: true`.
 | CLI | `node packages/core/lib/cli/dump.js --calls` / `--call <ref>` | the model-call audit, and one call with its prompt and response verbatim |
 | CLI | `node packages/core/lib/cli/intents.js place <kind>` / `list` | human intents (`proposal`, `grant`, `anchor`, `pause`, `resume`, `approval`, `experience`) written into `<workspace>/pending/` |
 | CLI | `node packages/core/lib/cli/jobs.js list` / `reap --job <id>` | the cluster job ledger: our jobs as the cluster lists them, the orphans (our marker, no ledger row), and the only way an orphan is ever stopped |
+| CLI | `node packages/core/lib/cli/worktrees.js list` / `prune --candidate <id>` | `list`: one row per candidate — round, phase, files landed, whether the tree is on disk, its path. `prune`: the only way a worktree is ever removed (`git worktree remove` plus a `worktree_pruned` fact), and only when the run declared `runner.keep: false` |
 | Skills | `<domain>/prompts/{land,verify,cand-analyze,round-plan,round-reflect}/SKILL.md` | what the model is told at each of the five call sites; markdown on disk, part of the domain pack, read fresh on every call — **not** DSH skills and not registered as such |
 
 The bundle provides no service and emits no event: it consumes `timer`, `connection` and `tools`.

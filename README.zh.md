@@ -209,6 +209,7 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 | 静态资源 | `GET /api/reprise/page`、`/api/reprise/dashboard.js` | 给没有客户端 slot 的宿主用的独立页面 |
 | CLI | `node packages/core/lib/cli/run.js --workspace <dir> --config <file>` | 与宿主 tick 的同一套接线，由循环驱动；退出码 0 表示有结论、1 表示没有可比的指标、2 用法错误、3 超时 |
 | CLI | `node packages/core/lib/cli/dump.js --candidate <id>` | 时间线、每个闸门的结论、候选工作树路径以及它是否还在磁盘上、身份绑定、前沿（frontier）位置，以及运行为什么停下来 |
+| CLI | `node packages/core/lib/cli/worktrees.js list` / `prune --candidate <id>` | `list`：每个候选一行——轮次、阶段、落地文件数、树是否还在磁盘上、以及它的路径。`prune`：唯一能删掉工作树的方式（`git worktree remove` 加一条 `worktree_pruned` 事实），且只在运行为 `runner.keep: false` 时可用 |
 | CLI | `node packages/core/lib/cli/intents.js place <kind>` / `list` | 人的意图（`proposal`、`grant`、`anchor`、`pause`、`resume`、`approval`、`experience`）写入 `<workspace>/pending/` |
 | Skills | `<domain>/prompts/{land,verify,cand-analyze,round-plan,round-reflect}/SKILL.md` | 模型在五个调用点各自被告知什么；磁盘上的 markdown，属于领域包，每次调用都重新读取——**不是** DSH skills，也没有按 DSH skill 注册 |
 
