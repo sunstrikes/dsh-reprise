@@ -262,6 +262,58 @@ test('a run with nothing to compare against says so: no group, and no percentage
   assert.equal(comparison.better, null)
 })
 
+// --------------------------------------- the retired cards' data (ticket #7)
+
+/**
+ * Ticket #7 deletes the page's last two pre-redesign cards. What must not be deleted is the
+ * projection underneath them: the Web UI panel (#6) and `dump` read the same answer, and a field
+ * removed to make a renderer tidy is a field three surfaces lose.
+ *
+ * The inventory below is the fields those two cards drew, written out rather than read from the
+ * payload — a test that asserts a constant it imports proves nothing about the day the constant is
+ * edited. Every line here is a fact that was on screen yesterday and has to be *reachable* today,
+ * wherever it now lives (the masthead capsule, the strips under the conclusion, the readings row, the
+ * conclusion region).
+ */
+test('the two retired cards retired rendering, not data: every field they read is still answered', async () => {
+  const { dir } = await concludedWorkspace({ stop: { max_rounds: 2 }, conclude: true })
+
+  const overview = (await overviewHandler(dir, {})).data
+  const final = conclusionHandler(dir, {}).data
+
+  for (const key of ['workspace', 'rounds', 'candidates', 'spend', 'best', 'frontier', 'metricContract', 'warnings', 'cluster', 'stop']) {
+    assert.ok(key in overview, `the overview still publishes ${key}`)
+  }
+  // The six-cell card's first line: which phase the workspace is in, and whether it is still running.
+  assert.ok('phase' in overview.workspace, 'the workspace phase, now the masthead capsule')
+  assert.equal(overview.stop.stopped, true, 'and the state word beside it')
+  // Its spend line, including the one number that has nowhere else to go: the token count.
+  for (const key of ['settledGpuHours', 'inFlightGpuHours', 'limitGpuHours', 'tokens']) {
+    assert.ok(key in overview.spend, `the spend reading ${key}`)
+  }
+  assert.ok(overview.spend.budget !== null, 'and the bar materials the readings cell draws')
+  // Its cluster line: the card count, the per-job claim and the ledger floor's own words.
+  for (const key of ['perJob', 'inUse', 'floor', 'floorAbsent']) {
+    assert.ok(key in overview.cluster.cards, `the cluster card field ${key}`)
+  }
+  assert.ok('count' in overview.cluster.queue, 'and how many candidates are waiting')
+  // Its warning list, which `未声明 GPU 排他` only reaches a reader through.
+  assert.ok(Array.isArray(overview.warnings), 'warnings are still published')
+  // The candidates' names, not only their count: the readings cell lists what is in flight.
+  assert.ok(Array.isArray(overview.candidates.inFlight))
+
+  // The measured/published card: the absolute change beside the percentage, the number the domain
+  // published and our distance from it, and which direction each objective runs.
+  for (const key of ['measured', 'group', 'change', 'changePercent', 'better', 'published', 'publishedChange', 'publishedAbsent']) {
+    assert.ok(key in final.comparison, `the comparison still publishes ${key}`)
+  }
+  assert.ok(Array.isArray(final.objectives) && final.objectives.length > 0, 'the objectives are still named')
+  for (const objective of final.objectives) {
+    assert.equal(typeof objective.direction, 'string', `every objective still says which way ${objective.name} runs`)
+    assert.equal(typeof objective.kind, 'string', 'and which one is primary')
+  }
+})
+
 test('a rejected candidate carries the four-state verdict that stopped it', async () => {
   const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 0 } }) })
   seed(ports.store, ports.config)

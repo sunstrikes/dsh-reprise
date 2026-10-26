@@ -189,8 +189,11 @@ test('the page draws the four observability panels, because a value nobody rende
   assert.match(source, /cluster\.cards\.inUse/, 'the overview renders the card count')
   assert.match(source, /cardsInUse/, 'and goes through one place to decide how to say it')
   assert.match(source, /'unknown'/, 'an unread listing is drawn as unknown, never as 0')
-  assert.match(source, /cluster\.cards\.floor/, 'the ledger floor is shown beside it')
-  assert.match(source, /cluster\?\.queue\?\.waiting/, 'and the queue is drawn, one waiter per line')
+  assert.match(source, /cards\.floorAbsent/, 'the ledger floor is shown beside it, in its own words when unknown')
+  // Ticket #7 retired the Overview card, and with it the one-waiter-per-line list: the readings cell
+  // names how many are queued. The count is the fact a reader acts on; the queue's per-candidate
+  // reasons were a second rendering of the fact stream's own lines.
+  assert.match(source, /queue\.count|queue\?\.count/, 'the cluster cell still says how many are waiting')
 
   // 候选详情: the gate chain, step by step, with the three-way status as a badge.
   assert.match(source, /detail\.gateChain/, 'the candidate page renders the gate chain')
@@ -215,13 +218,102 @@ test('the page draws the four observability panels, because a value nobody rende
   assert.match(stylesheet, /\.calls\s*\{/, 'and a style for the call list')
 })
 
+// ------------------------------- the seven regions, and the cards that retired (ticket #7)
+
+/**
+ * The information architecture is seven questions and seven regions (spec §4.1). This is that list,
+ * written out: a region added or removed on purpose should have to come here and say so.
+ *
+ * The page shipped with two pre-redesign cards at the bottom — `Overview` (a six-cell field list) and
+ * `Measured / published` — whose facts the regions above them now each say once. Ticket #7 retires
+ * them, and what they *said* moved rather than vanished: the phase into the masthead capsule, warnings
+ * and notes into a strip under the conclusion, tokens and the names in flight into the readings row,
+ * the absolute change and the published number into the conclusion region.
+ */
+const REGIONS = ['headline', 'strips', 'stop', 'ladder', 'readings', 'candidate', 'audit', 'stream']
+
+test('the page is the seven regions and nothing else: the two pre-redesign cards are gone', () => {
+  const page = code('index.html')
+
+  for (const region of REGIONS) assert.match(page, new RegExp(`id="${region}"`), `the page still has its ${region} region`)
+  assert.doesNotMatch(page, /id="overview"/, 'the six-cell field list has retired')
+  assert.doesNotMatch(page, /id="conclusion"/, 'and so has the measured/published card')
+
+  const source = code('dashboard.js')
+  assert.doesNotMatch(source, /\brenderOverview\b/, 'and no renderer still fills them')
+  assert.doesNotMatch(source, /\brenderConclusion\b/)
+  // A six-cell list is a `<dl class="stats">` of `<div class="stat">` cells; there is no such grid
+  // left anywhere on the page, and the stylesheet stops paying for it.
+  assert.doesNotMatch(source, /class: 'stats'/, 'the equal-weight field list is not drawn anywhere else')
+  assert.doesNotMatch(code('dashboard.css'), /\.reprise \.stats?\b/, 'and its styles went with it')
+})
+
+test('the workspace phase lives in the masthead capsule, is announced when it changes, and is printed nowhere else', () => {
+  const page = read('index.html')
+  const masthead = page.slice(page.indexOf('<header'), page.indexOf('</header>'))
+  assert.match(masthead, /id="phase"/, 'the capsule has a place in the masthead')
+  assert.match(masthead, /aria-live="polite"/, 'and a phase change is worth hearing (spec §6.1)')
+
+  const source = code('dashboard.js')
+  const phaseReads = [...source.matchAll(/workspace\??\.phase/g)]
+  assert.equal(phaseReads.length, 1, 'the phase is read exactly once, in the capsule — no second field elsewhere')
+  assert.match(source, /phase-capsule-state/, 'the capsule carries the state word beside the phase name')
+  const stylesheet = code('dashboard.css')
+  assert.match(stylesheet, /\.reprise \.phase-capsule\b/, 'the capsule is a component of its own')
+  assert.match(stylesheet, /\.reprise \.phase-capsule-dot\b/, 'with the dot that says running or stopped without a word')
+  // `phase` is already the candidate inspector's path of eight steps (#5). Two components behind one
+  // class is how this capsule rendered as the inspector's two-column grid, so the capsule must not
+  // wear that class.
+  assert.match(masthead, /class="phase-capsule"/, 'the capsule wears its own class')
+  assert.doesNotMatch(masthead, /class="phase"[ >]/, 'and not the one the inspector\'s phase path owns')
+})
+
+test('warnings and notes are a strip under the conclusion, in the projection\'s own words', () => {
+  const page = code('index.html')
+  const headline = page.indexOf('id="headline"')
+  const strips = page.indexOf('id="strips"')
+  const stop = page.indexOf('id="stop"')
+  assert.ok(strips > headline, 'the strip sits under the conclusion')
+  assert.ok(strips < stop, 'and above the stop rules — spec §6.9 puts the metric-contract note there')
+
+  const source = code('dashboard.js')
+  assert.match(source, /'strips'/, 'one renderer fills the strip')
+  assert.match(source, /data\.warnings/, 'with the warnings the projection wrote')
+  assert.match(source, /warning\.label/, 'the sentence, not a code')
+  assert.match(source, /answer\?\.notes|answer\.notes/, 'and the notes the route attached to the answer')
+  assert.match(source, /metricContract/, 'and the "nothing can be ranked" note when the contract disagrees with itself')
+})
+
+test('tokens and the names of what is in flight are in the readings row, not in a card', () => {
+  const source = code('dashboard.js')
+
+  assert.match(source, /spend\?\.tokens|spend\.tokens/, 'the token count is shown somewhere')
+  assert.match(source, /inFlight/, 'and what is in flight')
+  assert.match(source, /inFlight\.map\(/, 'by name, one element per candidate id, not only a count')
+  // The row is where they went: no card was added for them.
+  assert.doesNotMatch(code('index.html'), /id="spend"/, 'no ninth card was invented for the spend figures')
+})
+
+test('the conclusion region keeps the absolute change, the published number and the direction of every objective', () => {
+  const source = code('dashboard.js')
+
+  // The percentage alone is not the comparison: the absolute delta is how much metric the run moved.
+  assert.match(source, /change\(comparison\.change\)/, 'the absolute change, beside the percentage')
+  // "they published / difference" is the page's only answer to "should I trust the model's number".
+  assert.match(source, /comparison\.published\b/, 'the number the domain published')
+  assert.match(source, /publishedChange/, 'our distance from it')
+  assert.match(source, /publishedAbsent/, 'and why there is nothing to compare against when there is not')
+  assert.match(source, /\.objectives\b/, 'the objectives, with the direction each one runs')
+  assert.doesNotMatch(source, /measured\.value\s*[-+]\s*published/, 'and the difference is the projection\'s, never subtracted here')
+})
+
 // --------------------------------------------------------------- the conclusion line
 
 test('the conclusion line is the first thing on the page, not the middle of the second card', () => {
   const page = read('index.html')
   const headline = page.indexOf('id="headline"')
   assert.ok(headline > 0, 'the page has a place for the conclusion line')
-  assert.ok(headline < page.indexOf('id="overview"'), 'and it is above every card — the first screen decides whether the run is worth believing')
+  assert.ok(headline < page.indexOf('id="stop"'), 'and it is above every other region — the first screen decides whether the run is worth believing')
   assert.match(read('dashboard.css'), /\.headline-number\s*\{/, 'the best result gets a size of its own, not a cell in a stats grid')
 })
 

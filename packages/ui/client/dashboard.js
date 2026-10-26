@@ -21,7 +21,7 @@
  * the percentage on this page and the number `dump` prints are the same derivation.
  */
 
-import { EM_DASH, change, clock, cursor, fixed, number, percent } from './format.js'
+import { EM_DASH, change, clock, cursor, fixed, number, pathTail, percent } from './format.js'
 import { SHAPE_WORDS, VERDICT_WORDS, phaseMark } from './states.js'
 
 /**
@@ -70,7 +70,12 @@ export function urlFor(view, { cursor, candidate, ref } = {}) {
 const seqStamp = (seq) => `#${seq}`
 
 /** The card count, or the word for "we could not ask". */
-const cardsInUse = (cluster) => (cluster === undefined ? EM_DASH : cluster.cards.inUse === null ? 'unknown' : number(cluster.cards.inUse))
+const cardsInUse = (cluster) =>
+  cluster?.cards === undefined || cluster?.cards === null
+    ? EM_DASH
+    : cluster.cards.inUse === null
+      ? 'unknown'
+      : number(cluster.cards.inUse)
 
 /**
  * The name each stop rule goes by on the page.
@@ -322,7 +327,8 @@ function renderReadings(answer) {
   const cards = cluster.cards ?? {}
   const queue = cluster.queue ?? {}
 
-  const clusterValue = el('span', { class: 'reading-value', text: cards.inUse === null ? 'unknown' : number(cards.inUse) })
+  // One place decides how to say a card count the page could not ask for: `unknown`, never `0`.
+  const clusterValue = el('span', { class: 'reading-value', text: cardsInUse(cluster) })
   const clusterSubs = []
   if (cluster.read === true) {
     clusterSubs.push(`our ledger holds ${number((cluster.jobs?.open ?? []).length)} open job(s), ${number(cards.perJob)} card(s) each`)
@@ -350,9 +356,22 @@ function renderReadings(answer) {
       [
         `completed ${number(candidates.done)} · rejected ${number(candidates.rejected)} · in flight ${number(candidates.inFlight.length)}`,
       ],
+      // Which candidates those are. The rail marks them in 9px slashes; a reader who wants the ids
+      // reads them here, and the count above stops being a number with no referent (ticket #7 moved
+      // this list out of the retired Overview card).
+      [
+        el(
+          'ul',
+          { class: 'reading-list' },
+          candidates.inFlight.map((candidateId) => el('li', { text: candidateId })),
+        ),
+      ],
     ),
     reading('GPU hours', budgetBar(spend) ?? el('span', { class: 'reading-value', text: number(spend?.settledGpuHours) }), undefined, [
       `reserved, not yet settled ${number(spend?.budget?.reservedUnsettledGpuHours)} — held against the ledger, including what a finished candidate did not spend`,
+      // Model tokens are part of what a run costs and are not GPU hours: the retired Overview card
+      // was the only place they appeared, so they live beside the spend they belong to.
+      `tokens ${number(spend?.tokens)}`,
     ]),
     reading(
       'Frontier',
@@ -398,7 +417,7 @@ function el(tag, props = {}, children = []) {
  * set it is part of the answer.
  *
  * Every place the page prints "this candidate scored this much on this metric" goes through here,
- * because the one thing the old page got wrong in three places at once was assembling that string by
+ * because the one thing the pre-redesign page got wrong in three places at once was assembling that string by
  * hand next to a raw value — which is how `undefined=0.7211` reached a reader's screen.
  */
 const measurement = (candidateId, metric, value) =>
@@ -413,7 +432,11 @@ const state = {
   events: [],
   /** How many facts the page has read at all — the number beside the stream's title. */
   factTotal: 0,
+  /** The wall clock of the newest fact read, for the `last fact` stamp. Tracked as facts arrive. */
+  lastFactMs: null,
   selected: null,
+  /** When the last *successful* poll completed: the `read at` stamp, and what "last good read" means. */
+  readAt: null,
   lastError: null,
   /** The audit list as last read, whether the reader left it open, and the one call they opened. */
   audit: null,
@@ -461,6 +484,10 @@ async function read(view, options = {}) {
     state.seen.add(event.cursor)
     state.events.push(event)
     state.factTotal += 1
+    // A running "newest so far" over the facts as they arrive — the same instant the cursor names.
+    if (typeof event.wall_clock_ms === 'number' && (state.lastFactMs === null || event.wall_clock_ms > state.lastFactMs)) {
+      state.lastFactMs = event.wall_clock_ms
+    }
   }
   if (state.events.length > STREAM_LIMIT) state.events.splice(0, state.events.length - STREAM_LIMIT)
   return answer
@@ -468,74 +495,112 @@ async function read(view, options = {}) {
 
 // ------------------------------------------------------------------ rendering
 
-function stat(label, value) {
-  return el('div', { class: 'stat' }, [el('dt', { text: label }), el('dd', { text: value ?? EM_DASH })])
-}
+/**
+ * The phase capsule in the masthead — the only place on the page the workspace phase appears.
+ *
+ * It answers the first question a reader has: *is it still running, and where is it*. The capsule
+ * carries three things and each has one source: the phase name (the workspace record), the state word
+ * (the recorded stop conclusion — a run that has concluded says `stopped`, not `running`), and a dot
+ * that is decoration for the same fact the word already states. Nothing here is derived: `phase` is
+ * `null` on a run that has not recorded one, and the capsule says so in words instead of printing a
+ * dash that reads as "none of your business".
+ *
+ * `aria-live="polite"` on the capsule itself (index.html) is the point: a phase change is worth
+ * hearing, and a screen reader that is told once per poll that nothing changed hears nothing.
+ */
+function renderPhase(answer) {
+  const root = document.getElementById('phase')
+  const data = answer?.data
 
-function renderOverview(answer) {
-  const root = document.getElementById('overview')
-  root.replaceChildren(el('h2', { text: 'Overview' }))
-
-  if (answer?.data === null || answer?.data === undefined) {
-    root.append(el('p', { class: 'empty', text: answer?.reason ?? 'no facts recorded yet' }))
+  if (data === null || data === undefined) {
+    root.dataset.state = 'unknown'
+    root.replaceChildren(
+      el('span', { class: 'phase-capsule-dot', 'aria-hidden': 'true' }),
+      el('span', { class: 'phase-capsule-name', text: 'no facts yet' }),
+    )
     return
   }
-  const data = answer.data
-  const stop = data.stop?.stopped ? `stopped: ${data.stop.rule}` : 'running'
-  root.append(
-    el('dl', { class: 'stats' }, [
-      stat('phase', data.workspace.phase ?? EM_DASH),
-      stat('state', stop),
-      stat('rounds', `${number(data.rounds.completed)}/${number(data.rounds.total)}`),
-      stat('in flight', number(data.candidates.inFlight.length)),
-      stat('rejected', number(data.candidates.rejected)),
-      stat(
-        'best',
-        data.best === undefined ? 'no comparable result yet' : measurement(data.best.candidate_id, data.best.metric, data.best.value),
-      ),
-      stat('GPU h settled', number(data.spend.settledGpuHours)),
-      // `reserved − settled`, under the name of what it is. It is not work in flight: it includes the
-      // leftover of candidates that already finished without spending their whole reservation.
-      stat('GPU h reserved, not yet settled', number(data.spend.budget?.reservedUnsettledGpuHours)),
-      stat('GPU h limit', data.spend.limitGpuHours === 0 ? 'unlimited' : number(data.spend.limitGpuHours)),
-      stat('tokens', number(data.spend.tokens)),
-      stat('cards in use', cardsInUse(data.cluster)),
-      stat('cards / job', number(data.cluster?.cards?.perJob)),
-      stat('ledger floor', number(data.cluster?.cards?.floor)),
-      stat('waiting', number(data.cluster?.queue?.count)),
-    ]),
-  )
 
-  // The card figures above are only knowable when the cluster answered; a page that cannot ask says
-  // so, and never draws the unknown as 0 — "0 cards" is the answer somebody acts on.
-  if (data.cluster !== undefined && data.cluster.read === false) {
-    // The floor is our own ledger's answer, and it has its own sentence when the run never recorded
-    // how many cards a job claims: `— card(s)` there would read as "none", which is a different fact.
-    const floor =
-      data.cluster.cards.floor === null
-        ? data.cluster.cards.floorAbsent
-        : `${number(data.cluster.cards.floor)} card(s) is what our own ledger supports, not what is running`
-    root.append(el('p', { class: 'note', text: `the cluster listing was not read — ${data.cluster.reason}; ${floor}` }))
+  const stopped = data.stop?.stopped === true
+  root.dataset.state = stopped ? 'stopped' : 'running'
+  root.replaceChildren(
+    el('span', { class: 'phase-capsule-dot', 'aria-hidden': 'true' }),
+    el('span', { class: 'phase-capsule-name', text: data.workspace?.phase ?? 'phase not recorded' }),
+    el('span', { class: 'phase-capsule-state', text: stopped ? 'stopped' : 'running' }),
+  )
+}
+
+/**
+ * The capsule when the very first read failed: `connecting…` is a promise the page cannot keep.
+ *
+ * A dashboard pointed at a workspace it cannot open (a corrupt fact plane, a host that answers 500)
+ * has not read the phase — so it says `not read` rather than leaving the initial placeholder up
+ * forever, which is the one thing an unreachable page must not do: look like a slow one.
+ */
+function renderPhaseUnread() {
+  const root = document.getElementById('phase')
+  root.dataset.state = 'unknown'
+  root.replaceChildren(
+    el('span', { class: 'phase-capsule-dot', 'aria-hidden': 'true' }),
+    el('span', { class: 'phase-capsule-name', text: 'not read' }),
+    el('span', { class: 'phase-capsule-state', text: 'unknown' }),
+  )
+}
+
+/**
+ * The strip under the conclusion: the loud facts that are not a step in any region.
+ *
+ * Three kinds, and all three are the projection's own sentences rather than a code this page invents:
+ * the warnings the run owes a reader (`warnings.js` — an executor that does not reserve GPUs, say),
+ * the notes the route attached to its own answer ("this workspace never recorded a budget"), and the
+ * metric contract's refusal when it disagrees with itself (spec §6.9 puts that one above the stop
+ * rules, which is where this strip sits).
+ *
+ * A failed poll is reported here too, in the same voice as the others: a dashboard that leaves its
+ * last good page up is right, but staying silent about *why* it is stale is not (spec §6.9's 500 row).
+ */
+function renderStrips(answer) {
+  const root = document.getElementById('strips')
+  root.replaceChildren()
+
+  if (state.lastError !== null && state.lastError !== undefined) {
+    root.append(
+      el('p', {
+        class: 'warning',
+        text: `could not read ${state.lastError instanceof Error ? state.lastError.message : String(state.lastError)}`,
+      }),
+      el('p', {
+        class: 'note',
+        text:
+          state.readAt === null || state.readAt === undefined
+            ? 'nothing has been read successfully yet, so the page is still empty'
+            : `the page is showing the last successful read (${clock(state.readAt)})`,
+      }),
+    )
   }
-  for (const entry of data.cluster?.queue?.waiting ?? []) {
-    root.append(el('p', { class: 'dim', text: `waiting: ${entry.candidate_id} — ${entry.reason ?? 'not yet dispatched'}` }))
+
+  const data = answer?.data
+  if (data === null || data === undefined) {
+    for (const note of answer?.notes ?? []) root.append(el('p', { class: 'note', text: note }))
+    return
   }
 
   for (const warning of data.warnings ?? []) {
     root.append(el('p', { class: warning.severity === 'warning' ? 'warning' : 'note', text: warning.label ?? warning.code }))
+    // The label is the headline ("未声明 GPU 排他"); the message is what it costs. Both are the
+    // projection's words, and a warning nobody can act on is only half a warning.
+    if (typeof warning.message === 'string' && warning.message !== '' && warning.message !== warning.label) {
+      root.append(el('p', { class: 'dim', text: warning.message }))
+    }
   }
 
   if (data.metricContract?.ok !== true) {
-    root.append(el('p', { class: 'note', text: `nothing can be ranked — ${data.metricContract?.error ?? 'no metric contract'}` }))
+    root.append(
+      el('p', { class: 'note', text: `nothing can be ranked — ${data.metricContract?.error ?? 'no metric contract'}` }),
+    )
   }
-  for (const note of answer.notes ?? []) root.append(el('p', { class: 'note', text: note }))
 
-  const inFlight = data.candidates.inFlight
-  if (inFlight.length > 0) {
-    root.append(el('h3', { text: 'in flight' }), el('p', { class: 'dim', text: inFlight.join(', ') }))
-  }
-  // The stop decision is not repeated here: it has a section of its own above the chart, where a
-  // reader who asks "will this end on its own, and why" is already looking.
+  for (const note of answer?.notes ?? []) root.append(el('p', { class: 'note', text: note }))
 }
 
 /**
@@ -1238,61 +1303,74 @@ function renderHeadline(answer) {
       el('span', { class: 'headline-unit', text: comparison.metric ?? '' }),
     ]),
     el('p', { class: 'headline-sentence', text: conclusionSentence(comparison) }),
+    ...comparisonFacts(data),
   )
 }
 
-function renderConclusion(answer) {
-  const root = document.getElementById('conclusion')
-  root.replaceChildren(el('h2', { text: 'Measured / published' }))
+/** One cell of the facts row under the conclusion sentence: a label and its value. */
+function fact(label, value) {
+  return el('div', { class: 'fact' }, [el('dt', { text: label }), el('dd', { text: value })])
+}
 
-  if (answer?.data === null || answer?.data === undefined) {
-    root.append(el('p', { class: 'empty', text: answer?.reason ?? 'no facts recorded yet' }))
-    return
-  }
-
-  const data = answer.data
+/**
+ * The three facts the sentence cannot carry, in the projection's numbers.
+ *
+ * The sentence says "＋3.69% against the frozen baseline 0.706981" — a percentage and a denominator.
+ * What it cannot say is *how much metric that is* (the absolute change), whether a number the domain
+ * published is anywhere near ours (the pack's table, and our distance from it), and which direction
+ * each objective runs (without which neither of those numbers is readable as good or bad news).
+ *
+ * All three came off the retired `Measured / published` card. They are the page's only answer to
+ * "should I trust the model's number", so they moved into the conclusion region rather than being
+ * dropped: the card was the furniture, not the facts.
+ *
+ * The difference against the published number is `comparison.publishedChange` — the projection's
+ * subtraction, not this page's (constraint 2). When the contract publishes nothing, the card's reason
+ * arrives as `publishedAbsent` and is printed as a sentence; when it does, the source file is named,
+ * because a number with no provenance is a number a reader has to take on faith.
+ */
+function comparisonFacts(data) {
   const comparison = data.comparison
-  if (comparison?.measured !== null && comparison?.measured !== undefined) {
-    root.append(
-      el('dl', { class: 'stats' }, [
-        stat('we measured', measurement(comparison.measured.candidate_id, comparison.metric, comparison.measured.value)),
-        stat(
-          'against',
-          comparison.group === null
-            ? 'no comparable baseline'
-            : `${comparison.group.kind} ${number(comparison.group.value)}`,
-        ),
-        stat('change', change(comparison.change)),
-        stat('change %', percent(comparison.changePercent, { sign: true })),
-        stat(
-          'they published',
-          comparison.published === null
-            ? 'nothing published'
-            : `${comparison.published.method} ${measurement(null, comparison.published.metric, comparison.published.value)}`,
-        ),
-        stat('difference', change(comparison.publishedChange)),
-      ]),
-    )
-    if (comparison.published === null) {
-      root.append(el('p', { class: 'note', text: comparison.publishedAbsent }))
-    } else if (comparison.published.source?.file !== undefined) {
-      root.append(
-        el('p', {
-          class: 'dim',
-          text: `published numbers: ${comparison.published.source.file}${comparison.published.dataset === null ? '' : ` (${comparison.published.dataset})`}`,
-        }),
-      )
+  const published = comparison.published
+  const rows = []
+
+  const facts = el('dl', { class: 'facts' }, [
+    fact(
+      'change',
+      comparison.change === null || comparison.change === undefined
+        ? 'no comparison group'
+        : `${change(comparison.change)}${comparison.metric === null ? '' : ` ${comparison.metric}`}`,
+    ),
+    published === null
+      ? fact('they published', 'nothing published')
+      : fact('they published', `${published.method} ${measurement(null, published.metric, published.value)}`),
+    published === null
+      ? null
+      : fact('difference', `${change(comparison.publishedChange)}${comparison.metric === null ? '' : ` ${comparison.metric}`}`),
+    fact(
+      'objectives',
+      data.objectives.length === 0
+        ? EM_DASH
+        : data.objectives
+            .map((objective) => `${objective.name} (${objective.direction}${objective.kind === 'primary' ? ', primary' : ''})`)
+            .join(' · '),
+    ),
+  ])
+  rows.push(facts)
+
+  if (published === null) {
+    if (comparison.publishedAbsent !== null && comparison.publishedAbsent !== undefined) {
+      rows.push(el('p', { class: 'dim', text: comparison.publishedAbsent }))
     }
-  } else {
-    root.append(el('p', { class: 'empty', text: 'nothing has been measured yet — the conclusion line above says what is missing.' }))
+  } else if (published.source?.file !== undefined) {
+    rows.push(
+      el('p', {
+        class: 'dim',
+        text: `published numbers: ${published.source.file}${published.dataset === null ? '' : ` (${published.dataset})`}`,
+      }),
+    )
   }
-
-  root.append(el('p', { class: 'dim', text: `rounds ${number(data.rounds)} · frontier ${number(data.frontier.size)}` }))
-  const objectives = data.objectives.map((objective) => `${objective.name} (${objective.direction})`)
-  root.append(el('p', { class: 'dim', text: `objectives ${objectives.length === 0 ? EM_DASH : objectives.join(', ')}` }))
-
-  // The stop decision itself is not repeated here: the stop section above the chart is the one place
-  // that says why the run ended, and two renderings of one conclusion is how they start to disagree.
+  return rows
 }
 
 /**
@@ -1438,14 +1516,29 @@ function renderStream() {
 
 // ---------------------------------------------------------------------- wiring
 
-const status = (text) => {
-  document.getElementById('status').textContent = text
+/** One stamp in the masthead: a label and a value, and the label is not optional. */
+const stamp = (id, text) => {
+  document.getElementById(id).textContent = text
 }
 
-const cursorLine = () => {
+/**
+ * The stamps beside the workspace: when *this page* last read, when the *run* last moved, and the
+ * cursor the last answer handed back.
+ *
+ * They are different instants and the page used to print one of them with no label at all — a reader
+ * could not tell "17:15:30" from "22:24:40" without knowing which question each answered (spec §6.1).
+ * `read at` is the successful poll; `last fact` is the newest fact this page has read, which is the
+ * same instant the cursor names, in the shape a person reads.
+ */
+const stamps = (workspace) => {
+  // The last three segments, with the whole path on the element: a masthead is a place for a name,
+  // not for a scrollbar, and `title` keeps the address recoverable (spec §6.1).
+  stamp('workspace', pathTail(workspace))
+  document.getElementById('workspace').title = workspace ?? ''
+  stamp('read-at', clock(state.readAt))
+  stamp('last-fact', state.lastFactMs === null ? EM_DASH : clock(state.lastFactMs))
   const latest = [...state.cursors.values()].at(-1)
-  document.getElementById('cursor').textContent =
-    latest === undefined ? '' : `cursor ${cursor(latest)}`
+  stamp('cursor', latest === undefined ? '' : cursor(latest))
 }
 
 async function select(candidateId) {
@@ -1463,29 +1556,36 @@ async function refresh() {
       read('calls'),
     ])
     state.audit = audit
-    // The conclusion line first: the rest of the page is evidence for it.
+    state.lastError = null
+    state.readAt = Date.now()
+
+    // The masthead first: which phase it is in, and the two instants a reader orients by.
+    renderPhase(overview)
+    // Which workspace this page watches. Two windows open on two workspaces must be distinguishable
+    // without reading the URL.
+    stamps(overview.workspace)
+    // The loud facts a reader owes themselves before believing anything: warnings, notes, and a
+    // metric contract that cannot rank.
+    renderStrips(overview)
+    // The conclusion line next: the rest of the page is evidence for it.
     renderHeadline(conclusion)
-    // Then the two questions a reader asks next: will it end on its own, and what has it cost.
+    // Then the questions a reader asks next: will it end on its own, what did it find, what has it cost.
     renderStop(overview)
     renderLadder(rounds, conclusion)
     renderReadings(overview)
-    renderOverview(overview)
-    renderConclusion(conclusion)
     renderAudit()
 
     if (state.selected !== null) renderCandidate(await read('candidate', { candidate: state.selected }))
 
     renderStream()
-    cursorLine()
-    // Which workspace this page watches. Two windows open on two workspaces must be distinguishable
-    // without reading the URL.
-    document.getElementById('workspace').textContent = overview.workspace ?? ''
-    state.lastError = null
-    status(`read-only · refreshed ${clock(Date.now())}`)
   } catch (error) {
-    // A dashboard that dies on one failed poll leaves the last good page on screen and says what broke.
+    // A dashboard that dies on one failed poll leaves the last good page on screen and says what
+    // broke — in the strip, beside the other facts the run owes a reader (spec §6.9's 500 row).
     state.lastError = error
-    status(`read-only · ${error instanceof Error ? error.message : String(error)} · last good read kept`)
+    // The capsule keeps whatever it last knew: a failed read is not evidence that the run has no
+    // phase. But a page that has *never* read anything must not keep saying `connecting…`.
+    if (state.readAt === null) renderPhaseUnread()
+    renderStrips(null)
   }
 }
 

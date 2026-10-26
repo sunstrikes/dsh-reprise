@@ -15,20 +15,49 @@
     <link rel="stylesheet" href="./dashboard.css" />
   </head>
   <body class="reprise">
+    <!--
+      The masthead answers the first question a reader has — *is it still running, and where is it* —
+      and nothing else does. The phase capsule is the only place the workspace phase appears, and it
+      is `aria-live`: a phase change is worth hearing. Beside it are the four stamps the design asks
+      for (workspace, read at, last fact, cursor), each with its own label, so a reader never has to
+      guess which instant they are looking at.
+    -->
     <header class="masthead">
-      <h1>reprise</h1>
-      <span class="meta" id="workspace"></span>
-      <span class="meta" id="status">connecting…</span>
-      <span class="meta" id="cursor"></span>
+      <div class="masthead-run">
+        <h1>reprise</h1>
+        <span class="phase-capsule" id="phase" aria-live="polite">
+          <span class="phase-capsule-dot" aria-hidden="true"></span>
+          <span class="phase-capsule-name">connecting…</span>
+        </span>
+        <span class="masthead-mode">read-only</span>
+      </div>
+      <div class="masthead-stamps">
+        <span class="stamp"><span class="stamp-label">workspace</span><span class="stamp-value" id="workspace"></span></span>
+        <span class="stamp"><span class="stamp-label">read at</span><span class="stamp-value" id="read-at">—</span></span>
+        <span class="stamp"><span class="stamp-label">last fact</span><span class="stamp-value" id="last-fact">—</span></span>
+        <span class="stamp"><span class="stamp-label">cursor</span><span class="stamp-value" id="cursor"></span></span>
+      </div>
     </header>
 
     <!--
       The conclusion line, first: the best result, what it is measured against, and by how much. The
-      page's own title sits above it in the masthead; everything below is evidence for this.
+      page's own title sits above it in the masthead; everything below is evidence for this. Under the
+      sentence sit the three numbers the sentence cannot carry — the absolute change, the number the
+      domain published (our distance from it), and the direction of every objective — because a
+      percentage alone does not say how much metric moved, and "should I trust the model's number" is
+      the question this region exists to answer.
     -->
     <section class="headline" id="headline" aria-live="polite">
       <p class="headline-empty">waiting for facts…</p>
     </section>
+
+    <!--
+      The strip: the loud facts that are not a step in any region — warnings, the notes a route
+      attached to its own answer, and the "nothing can be ranked" note when the metric contract
+      disagrees with itself (spec §6.9 puts that one above the stop rules). They are sentences in the
+      projection's own words, not furniture, so they get their own line and no card.
+    -->
+    <section class="strips" id="strips" aria-live="polite"></section>
 
     <!--
       The stop section: while the run is going, one row of gauges — how close each rule is to firing,
@@ -88,18 +117,6 @@
           <p class="empty">nothing yet.</p>
         </section>
       </div>
-    </div>
-
-    <div class="grid">
-      <section class="card" id="overview" aria-live="polite">
-        <h2>Overview</h2>
-        <p class="empty">waiting for facts…</p>
-      </section>
-
-      <section class="card" id="conclusion" aria-live="polite">
-        <h2>Conclusion</h2>
-        <p class="empty">waiting for facts…</p>
-      </section>
     </div>
 
     <script type="module" src="./dashboard.js"></script>

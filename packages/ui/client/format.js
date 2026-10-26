@@ -135,3 +135,20 @@ export function cursor(value) {
   if (match === null) return value
   return `${clock(Number(match[1]))} · ${match[2]} · seq ${match[3]}`
 }
+/**
+ * A path shortened to its last `segments` parts: `/Users/me/code/ws/run` → `…/code/ws/run`.
+ *
+ * The masthead names the workspace by its last three segments (spec §6.1), and the panel will name
+ * the same workspace the same way (#6). A path with nothing to cut is returned whole — `…/tmp` would
+ * be *more* text than the path it replaces. Shortening is presentation only: the caller keeps the
+ * full path in the element's `title`, because a shortened path a reader cannot recover is a path lost.
+ *
+ * @param {unknown} value
+ * @param {number} [segments]
+ */
+export function pathTail(value, segments = 3) {
+  if (typeof value !== 'string' || value === '') return EM_DASH
+  const parts = value.split('/').filter((part) => part !== '')
+  if (parts.length <= segments) return value
+  return `…/${parts.slice(-segments).join('/')}`
+}
