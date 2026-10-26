@@ -22,8 +22,10 @@
  * idea — so these are recorded as `candidate_rejected` facts on that candidate, with a `stop_rule`
  * naming the rule that killed it:
  *
- *   `last_window_unmeasured` — the 「证据无效」 case: the artifact was fine, the number was absent. A
- *   reason with **no four-state status** (CODING_STANDARDS §2), because nothing was malformed.
+ *   `last_window_unmeasured` — the 「证据无效」 case, in words that do not borrow the four states: the
+ *   artifact was fine and the number was **absent** ("not measured"). The reason is
+ *   `evidence_missing` and it carries **no four-state status** (CODING_STANDARDS §2), because
+ *   nothing was malformed — `evidence_invalid` said the opposite of what the fact was.
  *   `metric_regression` — a ranked metric worse than the baseline in every one of the trailing N
  *   paired windows, beyond that metric's tolerance.
  *
@@ -357,6 +359,11 @@ function pickRule({ limits, rounds, view, contract, samples, now, startedAt }) {
 /**
  * The 「证据无效」 rule: the candidate's last window carries no finite value for the metric that decides.
  *
+ * Named for what it found. The window series is a well-formed artifact — it is there, it parses, it
+ * satisfies the contract — so nothing about it is *invalid*: the number it should carry is **absent**.
+ * The reason says `evidence_missing`, which is the fact, and the rejection carries no four-state
+ * status at all, because there is no artifact that breaks its schema to name.
+ *
  * Why the last window and not the mean: a run's tail is where a rollout, a divergence or a broken
  * parser shows up, and the contract's `window_mode` decides how a *comparison* collapses — not
  * whether the run's last window exists. An older window is never substituted, because that would read
@@ -376,13 +383,13 @@ function invalidEvidence({ contract, candidate, series }) {
   return {
     candidate_id: candidate.candidate_id,
     rule: 'last_window_unmeasured',
-    reason: 'evidence_invalid',
+    reason: 'evidence_missing',
     metric,
     window: last === undefined ? null : { index: last.index, start: last.start, end: last.end },
     message:
       last === undefined
-        ? `${candidate.candidate_id} recorded a window series holding no window at all, so there is nothing to judge it on: the evidence is invalid`
-        : `${candidate.candidate_id}'s last window [${last.start}, ${last.end}) holds no finite ${metric}, whatever earlier windows measured: the evidence is invalid, so this candidate is rejected now rather than waiting for a timeout`,
+        ? `${candidate.candidate_id} recorded a window series holding no window at all, so there is nothing to judge it on: the deciding metric was not measured`
+        : `${candidate.candidate_id}'s last window [${last.start}, ${last.end}) holds no finite ${metric}, whatever earlier windows measured: the metric was not measured there, so this candidate is rejected now rather than waiting for a timeout`,
   }
 }
 
