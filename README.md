@@ -130,6 +130,25 @@ shape below, including the two path rules that cost a debugging round each.
     budget: { candidate_gpu_hours: 0.5, gpu_hours_limit: 0 }
 ```
 
+An operator who starts one run per task should not have to edit that patch at all. Both of these work
+without it, and they compose — the precedence is **inline `config` → `config_file` →
+environment**:
+
+- **One file per run.** Put `config_file: /path/to/run.json` in the patch's `config` (or point
+  `DSH_REPRISE_CONFIG` at it, for a launcher that writes no YAML). The file is read **at mount**,
+  once: it is the base configuration and any inline `config` key wins over it — a shallow merge, key
+  by key. `workspace` written *inside* that file resolves against **the file's own directory**, so a
+  file can sit next to the run it describes; every other path keeps the host-cwd rule below. A
+  missing, unreadable or non-JSON file is a named refusal on the boot log (path and parse error), never
+  a silent fallback to defaults.
+- **One environment variable.** `DSH_REPRISE_WORKSPACE` names the workspace when the configuration
+  does not; a relative value resolves against the host cwd, an absolute one is used as is. An inline
+  `workspace` still outranks it.
+
+Either way, the boot log's `run:` line answers *what is this host running?* in one line: the resolved
+workspace (and where it came from), the repository candidates branch from, where their worktrees are
+created, whether they are kept, and which file the configuration was read from.
+
 Restart the host (bundle lists are read at startup; with HMR a patch edit alone applies live). You are
 mounted when the log carries the boot half's `applied` line, then the tick half's `tick-applied`, the
 sidebar shows **Reprise**, and `reprise_status` is available to the model.
@@ -152,7 +171,8 @@ pack, and a pack missing a part is refused by name at boot instead of running ha
 
 | Field | Default | Meaning |
 |---|---|---|
-| `workspace` | **required** | directory the run owns; the fact plane is `workspace.db` inside it |
+| `workspace` | **required**, or `DSH_REPRISE_WORKSPACE` | directory the run owns; the fact plane is `workspace.db` inside it. Relative resolves against the host cwd; an absolute path is used as is |
+| `config_file` | — (or `DSH_REPRISE_CONFIG`) | one JSON run configuration file, read once at mount: the **base** configuration, with every inline key winning over it (a shallow, key-by-key merge). `workspace` inside the file resolves against the file's directory. A missing/malformed file is a named boot refusal |
 | `domain` | **required** | directory of the domain pack; no pack, no metric contract, no prompts |
 | `interval_ms` | `5000` | tick cadence |
 | `executor.kind` | the pack's | `local` (a subprocess) or `ray` (Job Submission REST) |

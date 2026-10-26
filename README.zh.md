@@ -120,6 +120,20 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
     budget: { candidate_gpu_hours: 0.5, gpu_hours_limit: 0 }
 ```
 
+按任务起一次运行的操作者，其实不必改这个 patch。下面两种做法都可以，而且可以叠加——优先级是
+**内联 `config` → `config_file` → 环境变量**：
+
+- **每次运行一个文件。** 在 patch 的 `config` 里写 `config_file: /path/to/run.json`（或者让
+  `DSH_REPRISE_CONFIG` 指向它，适合不写 YAML 的启动器）。这个文件在**挂载时**读取一次：它是基础
+  配置，任何内联 `config` 键都会覆盖它——按 key 的浅合并。文件*内部*的 `workspace` 相对**文件自身
+  所在目录**解析，所以文件可以放在它所描述的那次运行旁边；其它路径仍然遵循下方「相对宿主 cwd」的规则。
+  文件缺失、不可读或不是 JSON 时，启动日志会给出一条点名的拒绝（含路径与解析错误），绝不会悄悄退回默认值。
+- **一个环境变量。** 配置里没有 `workspace` 时，`DSH_REPRISE_WORKSPACE` 就是它；相对路径按宿主 cwd
+  解析，绝对路径原样使用。内联的 `workspace` 仍然优先。
+
+无论走哪条路，启动日志里的 `run:` 行都用一行回答*这个宿主到底在跑什么*：解析后的工作区（以及它来自
+哪里）、候选分支自哪个仓库、工作树建在哪里、是否保留，以及配置读自哪个文件。
+
 重启宿主（插件包清单只在启动时读取；开着 HMR 时，单独改 patch 就会立即生效）。当日志里出现 boot 那一
 半的 `applied` 行、接着出现 tick 那一半的 `tick-applied`、侧边栏显示 **Reprise**、并且模型能用
 `reprise_status` 时，你就挂载好了。
@@ -141,7 +155,8 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
-| `workspace` | **必填** | 运行拥有的目录；事实面就是它里面的 `workspace.db` |
+| `workspace` | **必填**，或 `DSH_REPRISE_WORKSPACE` | 运行拥有的目录；事实面就是它里面的 `workspace.db`。相对路径按宿主 cwd 解析，绝对路径原样使用 |
+| `config_file` | —（或 `DSH_REPRISE_CONFIG`） | 一份 JSON 运行配置文件，挂载时读一次：**基础**配置，任何内联键都覆盖它（按 key 的浅合并）。文件里的 `workspace` 相对文件所在目录解析。文件缺失或格式错误会是点名的启动拒绝 |
 | `domain` | **必填** | 领域包目录；没有包就没有指标契约、没有提示词 |
 | `interval_ms` | `5000` | tick 节律 |
 | `executor.kind` | 取领域包 | `local`（子进程）或 `ray`（Job Submission REST） |
