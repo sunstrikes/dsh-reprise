@@ -83,6 +83,23 @@ export function change(value) {
 }
 
 /**
+ * The same number at one fixed width, `0.7200` — the staircase's three y-axis labels.
+ *
+ * `number()` trims, which is right for a reading ("0.7 is visibly round") and wrong for an axis:
+ * `0.72` above `0.7183` above `0.71` makes the outer labels look like coarser quantities than the
+ * middle one, and an axis is read as a scale. Four decimals by default because a metric compared to
+ * the fourth decimal must not be *shown* to the second. It pads and never derives — the axis bounds
+ * arrive already computed by the projection.
+ *
+ * @param {unknown} value
+ * @param {number} [digits]
+ */
+export function fixed(value, digits = 4) {
+  if (!isNumber(value)) return EM_DASH
+  return value.toFixed(digits)
+}
+
+/**
  * A percentage number — `3.694549` in, `3.69%` out.
  *
  * The argument is a *percentage*, not a ratio: the projection already multiplied by 100, and a

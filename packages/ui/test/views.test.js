@@ -284,3 +284,41 @@ test('a rejected candidate carries the four-state verdict that stopped it', asyn
     ['VERIFY:invalid'],
   )
 })
+// --------------------------------------------- the staircase's inputs (ticket #3)
+
+/**
+ * The chart itself is drawn by the browser, so what these tests can hold is the other half of the
+ * contract: that the two views carry every number the drawing needs, that they are the same rounds,
+ * and that the frame the page is given contains every mark it can place inside it.
+ */
+test('the rounds view carries the step series and a shape per candidate; the conclusion carries the frame', async () => {
+  const { dir } = await concludedWorkspace()
+
+  const rows = roundsHandler(dir, {}).data
+  const ladder = conclusionHandler(dir, {}).data.ladder
+
+  assert.deepEqual(
+    rows.map((entry) => ({ round: entry.round, verdict: entry.verdict, after: entry.cumulative.value })),
+    [
+      { round: 1, verdict: 'raised', after: 0.7 },
+      { round: 2, verdict: 'raised', after: 0.7401 },
+    ],
+    'each round says what it did to the best, and what the best then stood at',
+  )
+  assert.deepEqual(
+    rows.flatMap((entry) => entry.candidates).map((candidate) => `${candidate.candidate_id}:${candidate.shape}`),
+    ['r1-c1:done', 'r2-c1:frontier'],
+    'and each candidate arrives with the shape the rail draws — round 2 both leads and is the last round',
+  )
+
+  assert.equal(ladder.metric, 'auc', 'the frame names the metric it is drawn on')
+  assert.equal(ladder.baseline, null, 'this fixture recorded no frozen baseline')
+  assert.match(ladder.baselineAbsent, /no frozen baseline/i)
+
+  // The frame must contain every mark: a value outside `axis` would be drawn off the top or the
+  // bottom of the plot, which is the silent failure a chart is prone to.
+  const plotted = rows.map((entry) => entry.cumulative.value)
+  assert.ok(ladder.axis.bottom < Math.min(...plotted), 'the lowest mark sits above the bottom edge')
+  assert.ok(ladder.axis.top > Math.max(...plotted), 'and the highest sits below the top edge')
+  assert.equal(ladder.rounds.length, rows.length, 'the chart and the rail are the same rounds, not two lists')
+})

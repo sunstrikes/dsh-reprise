@@ -20,7 +20,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { EM_DASH, change, clock, cursor, number, percent, stamp } from '../client/format.js'
+import { EM_DASH, change, clock, cursor, fixed, number, percent, stamp } from '../client/format.js'
 
 /** A local wall clock the test can state exactly: 2026-10-22 14:36:48 in whatever zone this runs. */
 const LOCAL = new Date(2026, 9, 22, 14, 36, 48, 0).getTime()
@@ -49,6 +49,18 @@ test('a number keeps the digits it was measured with, and never grows a sixth de
   assert.equal(number(2), '2')
   assert.equal(number(20.9), '20.9')
   assert.equal(number(0.123456789), '0.123457', 'at most six decimals, so two readings of one number stay comparable')
+})
+
+test('the axis gets a number of one fixed width, because three labels of different widths read as three scales', () => {
+  // `number()` trims, which is right for a reading ("0.7 is visibly round") and wrong for an axis:
+  // `0.72` over `0.7183` over `0.71` makes the top and bottom labels look like coarser quantities than
+  // the middle one. One padded variant, so the padding is not re-invented at three call sites.
+  assert.equal(fixed(0.72), '0.7200')
+  assert.equal(fixed(0.7183), '0.7183')
+  assert.equal(fixed(0.70227958), '0.7023')
+  assert.equal(fixed(2), '2.0000')
+  assert.equal(fixed(0.7331, 5), '0.73310', 'another width, when a metric needs one')
+  for (const value of ABSENT) assert.equal(fixed(value), EM_DASH, `fixed(${String(value)})`)
 })
 
 test('a change says which way it went, without a colour to say it', () => {
