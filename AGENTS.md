@@ -22,3 +22,17 @@ broken export survive five separate tickets.
 `package.json` files and integrations are shared between everyone working in this repository. Change
 them in the same commit as the code that needs them, and run the check before handing over — a
 manifest that disagrees with the code is what `scripts/check.mjs` fails on.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in this repo's GitHub Issues, driven with the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles, each label string equal to its role name. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` plus `docs/adr/` at the repo root. See `docs/agents/domain.md`.
