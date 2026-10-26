@@ -422,14 +422,27 @@ async function land(ports, candidateId, state) {
   }
 
   if (result.ok === false) {
-    // A landing that failed on a cross-check is a *conflict*: two accounts of the same edit
-    // disagree. Everything else the harness refuses is an invalid artifact, not a contradiction.
-    const status = result.conflict === true ? 'conflict' : 'invalid'
+    // A landing that failed a cross-check is a *conflict*: two accounts of the same edit disagree,
+    // and neither wins. Everything else the harness refuses is a failure of the *process* — the
+    // implementer exited non-zero, refused, or never produced an answer we could read — and none of
+    // that makes an artifact malformed. So it is a rejection with a message and the class, and no
+    // four-state `status` at all (CODING_STANDARDS §2). Filing "the harness exited 1" as `invalid`
+    // sends the next reader hunting for a broken document that never existed, which is exactly what
+    // it did on ticket 28's acceptance run.
+    if (result.conflict === true) {
+      return rejectCandidate(
+        ports,
+        candidateId,
+        'LAND',
+        { status: 'conflict', message: result.message ?? 'the implementer disagreed with git about what it changed' },
+        { error_class: result.error_class ?? null, files: result.files ?? [] },
+      )
+    }
     return rejectCandidate(
       ports,
       candidateId,
       'LAND',
-      { status, message: result.message ?? `landing failed: ${result.error_class}` },
+      { message: result.message ?? `the implementer failed: ${result.error_class ?? 'no class'}` },
       { error_class: result.error_class ?? null, files: result.files ?? [] },
     )
   }
