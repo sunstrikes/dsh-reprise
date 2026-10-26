@@ -278,7 +278,7 @@ function windowsMeasured(samples) {
  *   now?: number,
  *   startedAt?: number,
  * }} facts
- * @returns {Map<string, { observed: number | null, message?: string, unmeasured?: string }>}
+ * @returns {Map<string, { observed: number | null, reading?: number, message?: string, unmeasured?: string }>}
  */
 function measureRules({ limits, view, rounds, contract = view.contract, samples, now, startedAt }) {
   const measured = new Map()
