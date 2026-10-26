@@ -1,7 +1,7 @@
 /**
  * The dashboard's routes — registered on the host's existing HTTP surface, never on a port of ours.
  *
- * `registerRoutes({ connection, workspace })` mounts six exact Fetch routes through
+ * `registerRoutes({ connection, workspace, platform, notice })` mounts six exact Fetch routes through
  * `connection.fetch.register` and returns the disposer that unmounts them. There is no server here,
  * no launcher, no liveness probe: the host already owns the listener, and a dashboard that opened a
  * second one would be the detached FastAPI process this rewrite exists to delete.
@@ -60,6 +60,9 @@ export function withStore(workspace, read) {
   }
 }
 
+/** The one sentence an empty page says, written once so a test and a payload cannot drift apart. */
+const NOTHING_YET = 'no facts recorded in this workspace yet'
+
 /**
  * The answer for a workspace that has no facts at all. Same envelope as a real view, so the client
  * has one shape to render: nothing new arrived, and here is why there is no page.
@@ -72,7 +75,7 @@ const nothingYet = (view, workspace, query) => ({
   more: false,
   incremental: { events: [] },
   data: null,
-  reason: 'no facts recorded in this workspace yet',
+  reason: NOTHING_YET,
 })
 
 function answer(workspace, name, render, query) {
@@ -88,7 +91,34 @@ function answer(workspace, name, render, query) {
 const SYSTEM_CLOCK = Object.freeze({ now: () => Date.now() })
 
 /**
- * The overview route's plain handler: `(workspace, query, { platform, clock }) → Promise<JSON>`.
+ * Fold the host's `notice` into the overview envelope — the one channel both surfaces draw words from.
+ *
+ * The notice is why the run is not ticking (a refused configuration, say), and it is not a fact, so it
+ * cannot come out of the projection: the projection reads the workspace and nothing else, and two
+ * reads of the same facts must stay equal. It rides `notes`, which the strip on both surfaces draws in
+ * every state — including the empty one, where `client/dashboard.js`'s `renderStrips` paints the notes
+ * before it returns (`packages/core/client/index.js` does the same). So a notice reaches a reader on a
+ * workspace that never ticked, which is the case it exists for. It goes first because a reader should
+ * meet the reason before the numbers it explains.
+ *
+ * `reason` is deliberately left alone. It answers a different question — "why is this page empty" —
+ * and both surfaces draw it as the empty text of several regions; folding the notice into it would
+ * print the same sentence four times on one screen.
+ *
+ * Absent, empty or non-string leaves the envelope untouched, so a mount without a notice still sends
+ * byte-for-byte what it sent before this option existed.
+ *
+ * @param {object} body an overview envelope
+ * @param {string | undefined} notice
+ * @returns {object}
+ */
+function withNotice(body, notice) {
+  if (typeof notice !== 'string' || notice === '') return body
+  return { ...body, notes: [notice, ...(body.notes ?? [])] }
+}
+
+/**
+ * The overview route's plain handler: `(workspace, query, { platform, clock, notice }) → Promise<JSON>`.
  *
  * The one route that may ask the world a question. `cards.inUse` and `queue.upstream` are facts only
  * the cluster owns, so when a platform port is supplied the handler reads its listing through
@@ -102,13 +132,19 @@ const SYSTEM_CLOCK = Object.freeze({ now: () => Date.now() })
  * wall-clock limit, and a distance measured against a clock the projection reached for itself could
  * not be reproduced by `dump` or by a test.
  *
+ * The one route that also takes `notice`, the words the host could not put in a fact: why the run is
+ * not ticking. It belongs here and not on the other routes because it is about the run, and the
+ * overview is the page that reports the run — see `withNotice` for how it reaches both of the page's
+ * surfaces.
+ *
  * Asynchronous because a listing is a network call. Every other route stays synchronous; the route
  * adapter awaits uniformly, so a handler's shape is one thing rather than two.
  */
-export async function overviewHandler(workspace, query = {}, { platform, clock = SYSTEM_CLOCK } = {}) {
+export async function overviewHandler(workspace, query = {}, { platform, clock = SYSTEM_CLOCK, notice } = {}) {
   const listing = platform === undefined ? undefined : await readListing(platform)
   const now = clock.now()
-  return answer(workspace, 'overview', (store) => overviewView(store, query, { listing, now }), query)
+  const body = answer(workspace, 'overview', (store) => overviewView(store, query, { listing, now }), query)
+  return withNotice(body, notice)
 }
 
 /** The rounds route's plain handler. */
@@ -205,15 +241,17 @@ function route({ path, methods, fetch }) {
   return { path, methods, requestBody: 'buffered', fetch }
 }
 
-function routeFor({ path, handler, workspace, platform, clock }) {
+function routeFor({ path, handler, workspace, platform, clock, notice }) {
   return route({
     path,
     methods: ['GET'],
     // `await` on a non-promise is a no-op, so one adapter serves the five synchronous views and the
-    // one route that reads the cluster listing.
+    // one route that reads the cluster listing. Every option is handed to every handler: only the
+    // overview reads them, and a handler that ignored its third argument before cannot start using it
+    // by accident — the tests pin the other five payloads as byte-identical with both options mounted.
     fetch: async (request) => {
       try {
-        return json(await handler(workspace, queryOf(request.url), { platform, clock }))
+        return json(await handler(workspace, queryOf(request.url), { platform, clock, notice }))
       } catch (error) {
         if (error instanceof ViewError) return json({ error: { message: error.message } }, error.status)
         return json({ error: { message: error?.message ?? String(error) } }, 500)
@@ -230,17 +268,24 @@ function routeFor({ path, handler, workspace, platform, clock }) {
  *   workspace: string,
  *   platform?: object,
  *   clock?: { now: () => number },
+ *   notice?: string,
  * }} options `platform` is optional: it is the only thing any route may ask, and only the overview
  *   route does (the cluster listing). Without it the page is exactly as complete as it was — it just
  *   reports "the cluster listing was not read" instead of a number. `clock` is optional too, and
  *   defaults to the system clock: it is what the stop gauges measure a wall-clock limit against.
+ *   `notice` is the third option, and is the host's sentence about the *run* rather than about the
+ *   facts: why the loop is not ticking (a refused configuration). It is not a fact, so it cannot be
+ *   in the projection, but a dashboard mounted over a run that never started would otherwise show an
+ *   empty page and no reason — the reader goes hunting for the wrong fault. It lands first in the
+ *   overview envelope's `notes`, the channel the standalone page already renders; an empty page draws
+ *   only `reason`, so it lands there too (see `withNotice`). No other route carries it.
  * @returns {() => void} the disposer that unregisters every route this call mounted
  */
-export function registerRoutes({ connection, workspace, platform, clock }) {
+export function registerRoutes({ connection, workspace, platform, clock, notice }) {
   const disposers = []
   try {
     for (const entry of ROUTES) {
-      disposers.push(connection.fetch.register(routeFor({ ...entry, workspace, platform, clock })))
+      disposers.push(connection.fetch.register(routeFor({ ...entry, workspace, platform, clock, notice })))
     }
     for (const entry of ASSETS) {
       disposers.push(

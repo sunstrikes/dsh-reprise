@@ -27,7 +27,6 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 
-import { safeSlug } from '@dsh-reprise/exec'
 import { landWithCli } from '@dsh-reprise/exec/harness'
 import { createClaudeHarness } from '@dsh-reprise/exec/harness/claude'
 import { createDshHarness } from '@dsh-reprise/exec/harness/dsh'
@@ -48,6 +47,7 @@ import { BASELINE_SUBJECT } from './baseline.js'
 import { cudaVisibleDevicesOf, MARKER_KEY, submissionIdFor } from './jobs.js'
 import { createJudge } from './judge.js'
 import { readRoundsState } from './rounds.js'
+import { runnerLayout, worktreePathFor } from './worktrees.js'
 
 /** Where the run keeps the evidence it froze: one directory, copyable as a unit. */
 export const BASELINE_FILENAME = 'baseline.json'
@@ -97,19 +97,32 @@ function absoluteise(argv, launchDir, variables = {}) {
  * `seal` is the other half: an anchor has to name a *commit*, and a candidate's worktree holds
  * uncommitted edits — committing it is a git write, so it belongs to the runner and to nobody else.
  *
- * @param {{repo: string, dir: string, base_ref?: string}} options `repo`/`dir` are relative to the
- *   workspace unless absolute
+ * **Retention.** A landed candidate's tree is evidence — the diff it was judged on is the files in
+ * that directory — so the runner removes nothing unless the run declared `keep: false`, and even then
+ * only when someone explicitly asks (`remove`, reachable only from `worktrees prune`). The two calls
+ * that write git are `seal` and `remove`; both are here because the outer runner owns worktrees and
+ * refs, and a kernel that could delete them on its own would be a kernel that can destroy the record
+ * of what it decided.
+ *
+ * @param {{repo: string, dir: string, base_ref?: string, keep?: boolean}} options `repo`/`dir` are
+ *   relative to the workspace unless absolute; `keep` defaults to `true` (remove nothing)
  * @param {{
  *   workspaceDir: string, log?: Function, git?: Function,
  *   anchor?: () => ({ commit?: string } | undefined),
  * }} context `anchor` reads the code base the run is on; absent means "no anchor, ever"
  */
-export function createWorktreeRunner({ repo, dir, base_ref: baseRef = 'HEAD' }, { workspaceDir, log = () => {}, git, anchor }) {
+export function createWorktreeRunner(
+  { repo, dir, base_ref: baseRef = 'HEAD', keep = true },
+  { workspaceDir, log = () => {}, git, anchor },
+) {
   if (!isText(repo)) throw new TypeError('the runner needs runner.repo — the repository candidates are branched from')
   if (!isText(dir)) throw new TypeError('the runner needs runner.dir — where candidate worktrees are created')
 
-  const repoDir = resolve(workspaceDir, repo)
-  const worktreesDir = resolve(workspaceDir, dir)
+  // One derivation of the two directories, shared with the worktree report (`worktrees.js`), so the
+  // path a tree is created at is the path the inventory prints.
+  const layout = runnerLayout({ workspaceDir, runner: { repo, dir, base_ref: baseRef, keep } })
+  const repoDir = layout.repoDir
+  const worktreesDir = layout.worktreesDir
   const gitRun = git ?? ((args, options) => spawnSync('git', args, { encoding: 'utf8', ...options }))
   const created = new Map()
   const anchorCommit = () => {
@@ -123,6 +136,11 @@ export function createWorktreeRunner({ repo, dir, base_ref: baseRef = 'HEAD' }, 
     repoDir,
     worktreesDir,
 
+    /** The declared retention policy: `true` (the default) means nothing may remove a tree. */
+    get keep() {
+      return layout.keep
+    },
+
     /** The ref every reader branches from: the code base anchor, or the configured ref. */
     get baseRef() {
       return baseRefNow()
@@ -135,7 +153,7 @@ export function createWorktreeRunner({ repo, dir, base_ref: baseRef = 'HEAD' }, 
 
     /** Deterministic, because a worktree path is part of what a dump has to be able to explain. */
     pathFor(candidateId) {
-      return join(worktreesDir, safeSlug(candidateId))
+      return worktreePathFor({ worktreesDir, candidateId })
     },
 
     /**
@@ -236,6 +254,44 @@ export function createWorktreeRunner({ repo, dir, base_ref: baseRef = 'HEAD' }, 
       }
       log(`runner: sealed ${candidateId} as ${ref} (${sha})`)
       return sha
+    },
+
+    /**
+     * Remove one candidate's worktree — the only deletion in the kernel, and only when it is allowed.
+     *
+     * Two conditions, both checked here rather than trusted to the caller: the run must have declared
+     * `keep: false` (with `keep: true` nothing may remove a tree, which is why this throws instead of
+     * silently doing nothing), and the tree is removed with `git worktree remove --force` in the
+     * repository it was added to — a directory deleted behind git's back leaves a registration that
+     * makes the next `git worktree add` fail with "missing but already registered". `worktree prune`
+     * follows for the case where the directory was already gone, which is exactly the state a crash
+     * or a careless `rm` leaves behind.
+     *
+     * @returns {{candidate_id: string, path: string, removed: boolean}}
+     */
+    remove(candidateId) {
+      if (!isText(candidateId)) throw new TypeError('remove needs a candidate id')
+      if (layout.keep) {
+        throw new Error(
+          `the runner will not remove ${candidateId}: this run keeps its worktrees (runner.keep: true), ` +
+            'and a kept worktree is the evidence behind every verdict about the candidate',
+        )
+      }
+      const path = created.get(candidateId) ?? this.pathFor(candidateId)
+      const existed = existsSync(path)
+      if (existed) {
+        const result = gitRun(['worktree', 'remove', '--force', path], { cwd: repoDir })
+        if (result?.error || result?.status !== 0) {
+          throw new Error(
+            `the runner could not remove the worktree for ${candidateId} at ${path}: ` +
+              `${(result?.stderr ?? result?.error?.message ?? '').toString().trim() || 'git said nothing'}`,
+          )
+        }
+      }
+      gitRun(['worktree', 'prune'], { cwd: repoDir })
+      created.delete(candidateId)
+      log(`runner: removed worktree ${path} (explicit prune)`)
+      return { candidate_id: candidateId, path, removed: existed }
     },
   }
 }

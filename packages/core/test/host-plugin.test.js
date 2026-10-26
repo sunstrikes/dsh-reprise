@@ -136,6 +136,54 @@ test('a configuration with no workspace is refused, and the host still boots', a
   await root.fiber.dispose()
 })
 
+test('a run configuration file is enough: the host reads it at mount and ticks the workspace it named', async (t) => {
+  const hostRuntime = await host()
+  if (hostRuntime === undefined) return t.skip('cordis is not in this checkout (it ships with the DeepSeek Harness profile)')
+  const root = mkdtempSync(join(tmpdir(), 'reprise-host-config-'))
+  const file = join(root, 'run.json')
+  // A relative workspace on purpose: an operator's file travels with the run it describes, so it must
+  // resolve against the file and not against wherever the host was started.
+  writeFileSync(
+    file,
+    JSON.stringify({
+      workspace: 'the-run',
+      domain: CONFIG_ONLY_PACK_DIR,
+      executor: { kind: 'local', command: ['node', '-e', '0'] },
+      runner: { repo: 'model-repo', dir: 'worktrees' },
+      interval_ms: 20,
+    }),
+  )
+
+  const log = collector()
+  const context = new hostRuntime.Context()
+  await context.plugin(hostRuntime.TimerService)
+  await context.plugin(plugin, { config_file: file, onLog: log.onLog })
+  await wait(300)
+
+  assert.ok(existsSync(join(root, 'the-run', 'workspace.db')), 'the fact plane lives where the file said, relative to the file')
+  assert.match(log.text(), /run: workspace .*the-run/, 'the boot log says which workspace this host is running')
+  assert.match(log.text(), new RegExp(join(root, 'the-run', 'worktrees').replaceAll('.', '\\.')), 'and where candidate worktrees go')
+  assert.match(log.text(), /model-repo/, 'and which repository they branch from')
+  assert.match(log.text(), /tick-applied/)
+  await context.fiber.dispose()
+})
+
+test('a config_file that cannot be read is a named refusal, and the host still boots', async (t) => {
+  const hostRuntime = await host()
+  if (hostRuntime === undefined) return t.skip('cordis is not in this checkout')
+  const root = new hostRuntime.Context()
+  const log = collector()
+  const missing = join(mkdtempSync(join(tmpdir(), 'reprise-host-config-missing-')), 'run.json')
+  await root.plugin(hostRuntime.TimerService)
+  await root.plugin(plugin, { config_file: missing, onLog: log.onLog })
+  await wait(80)
+
+  assert.match(log.text(), /not ticking/)
+  assert.match(log.text(), /run\.json/, 'the path is on the record, so the reader can fix it')
+  assert.equal(root.get('timer') !== undefined, true, 'the host is still alive')
+  await root.fiber.dispose()
+})
+
 test('a real executor with no GPU-hours limit is announced at boot, not discovered on the bill', async (t) => {
   const hostRuntime = await host()
   if (hostRuntime === undefined) return t.skip('cordis is not in this checkout')

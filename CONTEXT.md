@@ -79,6 +79,12 @@ routes and a plain-ESM client, and `packages/core/lib/dashboard.js` mounts them 
 plugin** declaring `inject: ['connection']` (so a headless host loses the dashboard and not the loop).
 The kernel hands the UI a connection service and a workspace directory; it never learns a route.
 
+A **refused** run configuration does not unplug it. The display half mounts on the directory
+`declaredWorkspace` (`config.js`) can still name — one owner for that precedence, so the page and the
+run cannot read two different directories — and hands the page the refusal as the overview's first
+note. A page that disappears exactly when the run is broken is a page nobody can diagnose with; the
+one configuration that leaves nothing to mount is one that names no workspace at all.
+
 *Blurred with:* a view (a projection *is* a view, but a projection is specifically the one the display
 layer reads; it must never grow a write path). v1 has no write endpoints.
 

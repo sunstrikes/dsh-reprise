@@ -16,6 +16,19 @@
 #     candidate's worktree, and the runner's `repo` / `dir` stay relative because they name
 #     directories inside the workspace.
 #
+# Two ways to avoid editing this file per run, and they compose (inline config wins over the file,
+# the file wins over the environment):
+#
+#   - `config_file: /path/to/run.json` — reads that JSON document at mount; it is the base
+#     configuration and the keys below override it key by key. Inside that file `workspace` resolves
+#     against **the file's own directory** (the one path rule that differs), so a file can sit beside
+#     the run it describes. `DSH_REPRISE_CONFIG` names the same file when the key is absent; a
+#     missing or malformed file is a named refusal on the boot log, never a fallback to defaults.
+#   - `DSH_REPRISE_WORKSPACE=/path/to/workspace` — supplies `workspace` when this block does not.
+#
+# The boot log's `run:` line then prints the resolved workspace (and where it came from), the
+# repository candidates branch from, and where their worktrees are created.
+#
 # `domain` names the pack the run reads its metric contract, priors, adjustable surface, five prompts
 # and executor entry from. The `executor` block below is kept on purpose: the pack ships the same one,
 # and this run overrides nothing — delete it and the run measures the same way.
@@ -53,7 +66,10 @@
         - /absolute/path/to/dsh-reprise/examples/feed-structure/hypotheses.json
       timeout_ms: 60000
       env: {}
-    runner: { repo: model-repo, base_ref: HEAD, dir: worktrees }
+    # `keep: true` is the default and the contract: a landed candidate's tree is the evidence behind
+    # its verdict, so nothing in the kernel removes one. Set `keep: false` only if this workspace may
+    # be pruned with `node packages/core/lib/cli/worktrees.js prune --candidate <id>`.
+    runner: { repo: model-repo, base_ref: HEAD, dir: worktrees, keep: true }
     model:
       command:
         - node

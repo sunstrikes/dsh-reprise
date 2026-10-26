@@ -159,7 +159,10 @@ function workspaceState(store, clock, config) {
     // `executor` is here for the same reason: the dashboard must be able to say whether this run is
     // spending real GPU hours and whether anything caps them (see `warnings.js`), and asking the
     // *current* configuration instead of the frozen one would answer about a different run.
-    for (const key of ['metrics', 'stop', 'budget', 'injection', 'executor']) {
+    // `runner` is here for the same reason and one more: `dump` and the worktree report have only the
+    // workspace directory, and "where did candidate r2-h1's tree go?" is answered by the directory the
+    // run was configured with — not by the YAML somebody has to remember.
+    for (const key of ['metrics', 'stop', 'budget', 'injection', 'executor', 'runner']) {
       if (config?.[key] !== undefined && seeded[key] === undefined) seeded[key] = config[key]
     }
 

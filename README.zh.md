@@ -120,6 +120,20 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
     budget: { candidate_gpu_hours: 0.5, gpu_hours_limit: 0 }
 ```
 
+按任务起一次运行的操作者，其实不必改这个 patch。下面两种做法都可以，而且可以叠加——优先级是
+**内联 `config` → `config_file` → 环境变量**：
+
+- **每次运行一个文件。** 在 patch 的 `config` 里写 `config_file: /path/to/run.json`（或者让
+  `DSH_REPRISE_CONFIG` 指向它，适合不写 YAML 的启动器）。这个文件在**挂载时**读取一次：它是基础
+  配置，任何内联 `config` 键都会覆盖它——按 key 的浅合并。文件*内部*的 `workspace` 相对**文件自身
+  所在目录**解析，所以文件可以放在它所描述的那次运行旁边；其它路径仍然遵循下方「相对宿主 cwd」的规则。
+  文件缺失、不可读或不是 JSON 时，启动日志会给出一条点名的拒绝（含路径与解析错误），绝不会悄悄退回默认值。
+- **一个环境变量。** 配置里没有 `workspace` 时，`DSH_REPRISE_WORKSPACE` 就是它；相对路径按宿主 cwd
+  解析，绝对路径原样使用。内联的 `workspace` 仍然优先。
+
+无论走哪条路，启动日志里的 `run:` 行都用一行回答*这个宿主到底在跑什么*：解析后的工作区（以及它来自
+哪里）、候选分支自哪个仓库、工作树建在哪里、是否保留，以及配置读自哪个文件。
+
 重启宿主（插件包清单只在启动时读取；开着 HMR 时，单独改 patch 就会立即生效）。当日志里出现 boot 那一
 半的 `applied` 行、接着出现 tick 那一半的 `tick-applied`、侧边栏显示 **Reprise**、并且模型能用
 `reprise_status` 时，你就挂载好了。
@@ -127,6 +141,10 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 三种缺失会降级而不是失败，这是设计如此：没有 `timer` 服务意味着 tick 那一半被*推迟*，而不是失败
 （cordis 对这两种情况的报告一模一样，这也是本包有两个入口的原因）；没有 `connection` 服务意味着没有
 看板；打不开的工作区或跑不起来的配置只是一行日志，宿主照常启动。**这三种情况都不会以错误的形式出现。**
+
+被校验**拒绝**的跑配置不属于上面三种缺失，也不会再连看板一起带走：看板仍会挂到配置点名的工作区上，并把
+「回路为什么静默」写进 overview 的 `notes`——两个界面上的条带在任何状态下都会画它，空页也不例外。所以看板
+照旧显示工作区里已有的事实，但不会假装回路在跑。连工作区都点不名的配置，是唯一仍然挂不上看板的情况。
 
 `@dsh-reprise/memory` 插件包是可选的、独立的（行 `reprise-memory`），它把注入包（injection packet）
 作为一个 `dsh-mnemon` Source 暴露出来。`packages/core` 里没有任何东西 import 它。
@@ -141,7 +159,8 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
-| `workspace` | **必填** | 运行拥有的目录；事实面就是它里面的 `workspace.db` |
+| `workspace` | **必填**，或 `DSH_REPRISE_WORKSPACE` | 运行拥有的目录；事实面就是它里面的 `workspace.db`。相对路径按宿主 cwd 解析，绝对路径原样使用 |
+| `config_file` | —（或 `DSH_REPRISE_CONFIG`） | 一份 JSON 运行配置文件，挂载时读一次：**基础**配置，任何内联键都覆盖它（按 key 的浅合并）。文件里的 `workspace` 相对文件所在目录解析。文件缺失或格式错误会是点名的启动拒绝 |
 | `domain` | **必填** | 领域包目录；没有包就没有指标契约、没有提示词 |
 | `interval_ms` | `5000` | tick 节律 |
 | `executor.kind` | 取领域包 | `local`（子进程）或 `ray`（Job Submission REST） |
@@ -150,7 +169,8 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 | `executor.root_dir` / `metrics_required` | `'jobs'` / `true` | 作业目录所在位置；没有指标的作业算失败 |
 | `candidate.kind` | `'command'` | `command`、`claude` 或 `dsh`——LAND 的实现者 |
 | `candidate.command` | **`command` 时必填** | argv；`{candidate}` 和 `{worktree}` 会被替换 |
-| `runner.repo` / `runner.dir` | **配置 `candidate` 时必填** | 工作区里的仓库；工作树创建的位置 |
+| `runner.repo` / `runner.dir` | **配置 `candidate` 时必填** | 工作区里的仓库；工作树创建的位置（`<workspace>/worktrees/<candidateId>`） |
+| `runner.keep` | `true` | 保留策略。为 `true` 时内核里没有任何东西会删掉候选工作树；为 `false` 本身也不会删，只是允许显式执行 `worktrees prune` |
 | `runner.base_ref` | git 默认值 | 候选从中拉分支的那个 commit；代码基滚动之后以锚点为准（见 `rounds.anchor`） |
 | `model.command` | **配置了 `rounds` 时必填** | 每个判断相位都通过这个 argv 触达模型 |
 | `rounds.metric.name` / `.direction` | 取领域包的契约 | 轮次闸门优化的那一个指标；重述它就是让这次运行指向另一个目标 |
@@ -172,8 +192,15 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 校验在 `packages/core/lib/config.js` 里，启动时只跑一次。本包不导出 `Config` 对象，所以宿主对这条
 配置行没有 schema：配置有问题只是一行日志，永远不会变成启动失败。有两处拒绝值得在你撞上之前先知道——有
 `rounds` 却没有 `model.command`，以及有 `candidate` 却没有 `runner`——否则替代方案就是一次在第一轮
-就卡住的运行，而不是在启动时卡住。`metrics`、`stop`、`budget` 与 `executor` 会在 INIT 时被复制进
-工作区，之后只从那里读取，所以运行中途改 patch 不会改变看板报告的任何东西。
+就卡住的运行，而不是在启动时卡住。`metrics`、`stop`、`budget`、`executor` 与 `runner` 会在 INIT 时被复制进
+工作区，之后只从那里读取，所以运行中途改 patch 不会改变看板报告的任何东西（`dump` 也仍然能只凭工作区
+目录说出工作树去了哪里）。
+
+**候选工作树是有意保留的。** 一个已落地（LAND）的候选，它的树在
+`<workspace>/<runner.dir>/<candidateId>`——判定它时看的那份 diff *就是*那个目录里的文件——所以没有任何
+阶段、恢复路径或清理例程会删掉它。`runner.keep`（默认 `true`）是契约而不是巧合；`dump --candidate <id>`
+会打印路径以及它是否还在磁盘上，`worktrees list` 是整次运行的清单，而 `worktrees prune --candidate <id>`
+是唯一可以删树的东西——它会拒绝尚未结束的候选、不认识的 id，以及声明了 `keep: true` 的那次运行里的每一个候选。
 
 <a id="what-it-adds"></a>
 ### 它新增了什么
@@ -185,7 +212,8 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 | HTTP 路由 | `GET /api/reprise/{overview,rounds,candidate,conclusion,calls,call}` | 四个视图与模型调用审计，各自通过自己的只读句柄读取 |
 | 静态资源 | `GET /api/reprise/page`、`/api/reprise/dashboard.js`、`/api/reprise/format.js` | 给没有客户端 slot 的宿主用的独立页面，以及页面与面板共用的格式化模块 |
 | CLI | `node packages/core/lib/cli/run.js --workspace <dir> --config <file>` | 与宿主 tick 的同一套接线，由循环驱动；退出码 0 表示有结论、1 表示没有可比的指标、2 用法错误、3 超时 |
-| CLI | `node packages/core/lib/cli/dump.js --candidate <id>` | 时间线、每个闸门的结论、身份绑定、前沿（frontier）位置，以及运行为什么停下来 |
+| CLI | `node packages/core/lib/cli/dump.js --candidate <id>` | 时间线、每个闸门的结论、候选工作树路径以及它是否还在磁盘上、身份绑定、前沿（frontier）位置，以及运行为什么停下来 |
+| CLI | `node packages/core/lib/cli/worktrees.js list` / `prune --candidate <id>` | `list`：每个候选一行——轮次、阶段、落地文件数、树是否还在磁盘上、以及它的路径。`prune`：唯一能删掉工作树的方式（`git worktree remove` 加一条 `worktree_pruned` 事实），且只在运行为 `runner.keep: false` 时可用 |
 | CLI | `node packages/core/lib/cli/intents.js place <kind>` / `list` | 人的意图（`proposal`、`grant`、`anchor`、`pause`、`resume`、`approval`、`experience`）写入 `<workspace>/pending/` |
 | Skills | `<domain>/prompts/{land,verify,cand-analyze,round-plan,round-reflect}/SKILL.md` | 模型在五个调用点各自被告知什么；磁盘上的 markdown，属于领域包，每次调用都重新读取——**不是** DSH skills，也没有按 DSH skill 注册 |
 

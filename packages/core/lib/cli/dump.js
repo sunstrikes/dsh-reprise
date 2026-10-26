@@ -34,6 +34,7 @@ import {
   summariseEvent,
 } from '../projection.js'
 import { ranking, rebuildRanking } from '../ranking.js'
+import { worktreeOf } from '../worktrees.js'
 
 const pad = (value, width) => String(value).padEnd(width)
 
@@ -133,6 +134,37 @@ function workspaceStopLines(store, { config } = {}) {
     return `${rule.rule}=${rule.limit} enabled${note}`
   })
   if (rules.length > 0) lines.push(`  ${pad('rules', 11)}${rules.join('; ')}`)
+  return lines
+}
+
+/**
+ * Where this candidate's tree is, and whether it is still there.
+ *
+ * Two questions the page could not answer before, and the second one is the one an operator actually
+ * asks after a run ends: *where did candidate r2-h1's tree go?* A tree is kept by contract
+ * (`runner.keep` defaults to `true`) and nothing in the kernel removes it, so "missing" is a real
+ * finding — a person, a stray `git worktree prune`, or an explicit `worktrees prune` — and it is
+ * printed as one, with the prune's own fact when there is one. A candidate that never landed has no
+ * tree at all, which is a third answer and has its own sentence.
+ */
+function worktreeLines(store, candidateId) {
+  const row = worktreeOf({ store, workspaceDir: dirname(store.path), candidateId })
+  if (row === undefined) return []
+  const lines = ['', 'worktree']
+  if (row.path === null) {
+    lines.push(`  ${pad('path', 11)}(none — this run records no runner, so there is nowhere a tree could be)`)
+    return lines
+  }
+  const state = !row.landed
+    ? 'never landed — a worktree is created lazily at LAND, so this candidate has no tree yet'
+    : row.exists
+      ? 'present'
+      : row.pruned_at_ms !== null
+        ? `MISSING — removed by an explicit prune at ${iso(row.pruned_at_ms)} (job \`worktrees prune\`)`
+        : 'MISSING — nothing is on disk at that path; this run keeps its worktrees, so something removed it'
+  lines.push(`  ${pad('path', 11)}${row.path}`)
+  lines.push(`  ${pad('state', 11)}${state}`)
+  if (row.phase !== null) lines.push(`  ${pad('phase', 11)}${row.phase}${row.sealed_commit === null ? '' : `  sealed as ${row.sealed_commit}`}`)
   return lines
 }
 
@@ -419,6 +451,7 @@ export function renderDump(store, candidateId, { config } = {}) {
     if (rejection.artifact !== undefined) lines.push(`  ${pad('from', 11)}${rejection.artifact}`)
   }
 
+  lines.push(...worktreeLines(store, candidateId))
   lines.push(...gateChainLines(detail))
   lines.push(...frontierLines(store, candidateId, { config }))
   lines.push(...workspaceStopLines(store, { config }))

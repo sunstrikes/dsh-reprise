@@ -52,17 +52,25 @@ export async function importUiPackage() {
  * Never throws: every reason it cannot mount is a value the caller logs. That is the difference
  * between "no dashboard" and "no run", and it is the whole point of this module existing separately.
  *
+ * `notice` is passed straight through, untouched and uninterpreted. It is the reason the loop is not
+ * ticking, and it exists because this seam mounts the page for a **refused** run configuration too
+ * (`boot.js`'s `displayForHost`): the page needs a workspace directory, not a working run, and the
+ * operator who opens it at that moment is the one who needs the reason most. Whether and where to
+ * render it is the UI package's decision — the kernel knows a workspace and one sentence, no routes.
+ *
  * @param {{
  *   connection: any,
  *   workspace: string,
  *   platform?: any,
+ *   notice?: string,
  *   log?: Function,
  *   importUi?: () => Promise<any>,
  * }} options `platform` is the one external thing a route may ask (the overview's cluster listing);
- *   without it the page still mounts and reports the cluster as unread.
+ *   without it the page still mounts and reports the cluster as unread. `notice` is the refusal
+ *   sentence for a run that is not ticking, or `undefined` for one that is.
  * @returns {Promise<{mounted: boolean, dispose?: () => void, routes?: number, reason?: string}>}
  */
-export async function mountDashboard({ connection, workspace, platform, importUi = importUiPackage }) {
+export async function mountDashboard({ connection, workspace, platform, notice, importUi = importUiPackage }) {
   if (typeof connection?.fetch?.register !== 'function') {
     return { mounted: false, reason: 'the host exposes no connection.fetch.register, so there is no surface to mount on' }
   }
@@ -88,7 +96,7 @@ export async function mountDashboard({ connection, workspace, platform, importUi
 
   let dispose
   try {
-    dispose = ui.registerRoutes({ connection, workspace, platform })
+    dispose = ui.registerRoutes({ connection, workspace, platform, notice })
   } catch (error) {
     return { mounted: false, reason: `@dsh-reprise/ui refused to mount: ${messageOf(error)}` }
   }
@@ -113,6 +121,12 @@ export async function mountDashboard({ connection, workspace, platform, importUi
  */
 function platformFor(config) {
   if (typeof config?.workspaceDir !== 'string' || config.workspaceDir === '') return undefined
+  // A configuration that reached here from `resolveConfig` always carries an executor (that file fills
+  // the default in). A display-only configuration — the one `index.js` hands over for a refused run —
+  // does not, and inventing a local adapter from it would make the page report a cluster listing
+  // nobody asked about. "The cluster was not read" is the honest answer, and it is one the
+  // projection already has.
+  if (config.executor === undefined) return undefined
   try {
     return createPlatform(config, { workspaceDir: config.workspaceDir })
   } catch {
@@ -135,12 +149,16 @@ export function apply(ctx, config = {}) {
   )
 
   // Async because the import is: the fiber's dispose is registered first, so a host that shuts down
-  // during the import still ends up with nothing mounted.
+  // during the import still ends up with nothing mounted. `importUi` is a seam for the same reason
+  // `onLog` and `config.js`'s `loadDomain` are: a test can mount a stand-in UI and assert the
+  // arguments this seam promises, without the real package's behaviour becoming the thing tested.
   void (async () => {
     const result = await mountDashboard({
       connection: ctx.connection,
       workspace: config.workspaceDir,
       platform: platformFor(config),
+      notice: config.notice,
+      importUi: config.importUi,
     })
     if (disposed) {
       result.dispose?.()

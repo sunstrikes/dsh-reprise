@@ -28,6 +28,7 @@ import { MODEL_KINDS } from '@dsh-reprise/exec/model'
 import { DomainPackError, executorProblems, loadDomainPack } from './domain.js'
 import { gpuExclusivityProblems } from './jobs.js'
 import { bindingOf, resolveMetricContract } from './metric-contract.js'
+import { loadConfigFile } from './run-config.js'
 import { configWarnings, modelPortDeclared } from './warnings.js'
 
 /** Five seconds: the cadence ticket 01 measured in the real host (78 beats / 415 s, drift ≤ 3 ms). */
@@ -39,16 +40,65 @@ const isText = (value) => typeof value === 'string' && value.trim() !== ''
 const isCommand = (value) => Array.isArray(value) && value.length > 0 && value.every(isText)
 
 /**
+ * The workspace directory a configuration declares — answered without judging the rest of it.
+ *
+ * Two callers ask this question for different reasons and must not get different answers.
+ * `resolveConfig` asks it to decide whether a run may start (no directory, no run), and the display
+ * half (`boot.js`'s `displayForHost`) asks it about a run that was **refused**, because the
+ * read-only page needs a directory to read rather than a working run — and a refusal is exactly when
+ * somebody opens that page. Two accounts of "which directory does this run mean?" would let the boot
+ * log and the page disagree about it, so both come here.
+ *
+ * The precedence is one order: inline `workspace` → the value the run configuration file supplied →
+ * `DSH_REPRISE_WORKSPACE`. The first two share one field after `loadConfigFile`'s shallow merge, which
+ * is what `workspaceFromFile` exists to tell apart. `dir` is absolute in every case: an inline or
+ * environment value was typed in the host's cwd and means what it says there, while a value inside a
+ * configuration file was already resolved against *that file's* directory (`run-config.js`'s one
+ * differing path rule) — resolving it again against `cwd` cannot move an absolute path.
+ *
+ * @param {unknown} raw the object the host's bundle patch, the `run` CLI, or a test hands over
+ * @param {{cwd?: string, env?: Record<string, string | undefined>, readFile?: (path: string) => string,
+ *         loaded?: object}} [options] `loaded` is `loadConfigFile`'s result when the caller has already
+ *   read the file (the boot path has, and one run is not read twice); omit it and this reads the file
+ *   itself, which is what a refused boot does — it has the raw configuration, not the reading.
+ * @returns {{dir: string, source: 'config' | 'config_file' | 'env'} | {problem: string}}
+ */
+export function declaredWorkspace(raw = {}, { cwd = process.cwd(), env = process.env, readFile, loaded } = {}) {
+  const read = loaded ?? loadConfigFile({ raw, cwd, env, readFile })
+  if (!read.ok) return { problem: read.problems[0] }
+
+  const merged = read.raw ?? {}
+  if (isText(merged.workspace)) {
+    return { dir: resolvePath(cwd, merged.workspace), source: read.workspaceFromFile ? 'config_file' : 'config' }
+  }
+  // The environment is last because a value typed into the configuration is the more specific
+  // statement, and first among the two when the configuration names none.
+  if (isText(env?.DSH_REPRISE_WORKSPACE)) return { dir: resolvePath(cwd, env.DSH_REPRISE_WORKSPACE), source: 'env' }
+
+  return {
+    problem:
+      'workspace must be the path of the directory this run owns, e.g. workspace: .reprise/run-1 — ' +
+      'or set DSH_REPRISE_WORKSPACE (a relative path in either place resolves against the host cwd)',
+  }
+}
+
+/**
  * Validate and normalise one plugin/CLI configuration.
  *
  * @param {unknown} raw the object the host's bundle patch, the `run` CLI, or a test hands over
- * @param {{cwd?: string, loadDomain?: (dir: string) => object}} [options] `workspace` and `domain`
- *   are resolved against `cwd`, not against wherever the host process happens to be. `loadDomain` is
- *   the seam a test uses to hand over a pack without a directory of files on disk.
+ * @param {{cwd?: string, env?: Record<string, string | undefined>, loadDomain?: (dir: string) => object,
+ *         readFile?: (path: string) => string}} [options] `workspace` and `domain` are resolved against
+ *   `cwd`, not against wherever the host process happens to be. `loadDomain` is the seam a test uses
+ *   to hand over a pack without a directory of files on disk; `readFile` is the seam for the run
+ *   configuration file `config_file` / `DSH_REPRISE_CONFIG` names; `env` is passed, never read
+ *   implicitly, so configuration precedence is testable.
  * @returns {{ok: true, config: object, problems: string[], warnings: object[]}
  *         | {ok: false, problem: string, problems: string[], warnings: object[]}}
  */
-export function resolveConfig(raw = {}, { cwd = process.cwd(), loadDomain = loadDomainPack } = {}) {
+export function resolveConfig(
+  raw = {},
+  { cwd = process.cwd(), env = process.env, loadDomain = loadDomainPack, readFile } = {},
+) {
   const problems = []
   const fail = () => ({ ok: false, problem: problems[0], problems, warnings: [] })
 
@@ -57,9 +107,23 @@ export function resolveConfig(raw = {}, { cwd = process.cwd(), loadDomain = load
     return fail()
   }
 
-  if (!isText(raw.workspace)) {
-    problems.push('workspace must be the path of the directory this run owns, e.g. workspace: .reprise/run-1')
+  // One file per run, when the operator names one: it is the base, and the inline keys below win key
+  // by key. Refusing here (rather than at the first tick) is the same rule the rest of this module
+  // follows — a missing file is a run pointed at defaults nobody chose, and that is a run that starts
+  // in the wrong directory.
+  const loaded = loadConfigFile({ raw, cwd, env, readFile })
+  if (!loaded.ok) {
+    problems.push(...loaded.problems)
+    return fail()
   }
+  const merged = loaded.raw
+
+  // The workspace is the one key whose answer survives a refused run (the dashboard reads it), so the
+  // order in which three sources win lives in `declaredWorkspace` above rather than here — and this
+  // call passes the reading it just did, so a run's file is opened once and not twice.
+  const workspace = declaredWorkspace(raw, { cwd, env, readFile, loaded })
+  if (workspace.problem !== undefined) problems.push(workspace.problem)
+  raw = merged
 
   // The pack is loaded here, at boot, because every way it can be wrong is a way the run cannot
   // work: no metric contract means nothing to compare, no prompts means a model answering nothing,
@@ -126,6 +190,18 @@ export function resolveConfig(raw = {}, { cwd = process.cwd(), loadDomain = load
     }
   }
 
+  // Retention is a *declared* policy rather than something a reader has to infer from the code:
+  // `keep: true` (the default) means nothing in the kernel may remove a candidate worktree, and
+  // `keep: false` does not remove anything by itself either — it only allows the explicit
+  // `worktrees prune`, which is the one action that may. Either way the value has to be a boolean, or
+  // "may I clean this up?" is answered by a string nobody validated.
+  if (isPlainObject(raw.runner) && raw.runner.keep !== undefined && typeof raw.runner.keep !== 'boolean') {
+    problems.push(
+      `runner.keep must be true (keep every candidate worktree — the default) or false (allow an explicit ` +
+        `worktrees prune); got ${JSON.stringify(raw.runner.keep)}`,
+    )
+  }
+
   // The judgement phases reach a model through one command adapter. `kind` names a shipped CLI
   // (`dsh --profile headless`, `claude -p`); `command` names a wrapper of your own. One of them must
   // be there, because "no model port" is a run that stalls at the first round rather than a run that
@@ -161,15 +237,26 @@ export function resolveConfig(raw = {}, { cwd = process.cwd(), loadDomain = load
 
   const config = {
     ...raw,
+    // Recorded so the boot log and the dashboard can answer "where did this value come from?" without
+    // guessing: an operator who has just set an environment variable needs to know it was read.
+    // `workspace` and `workspaceDir` carry the same absolute directory: the first is the name older
+    // readers use, and two spellings of one path must not be able to drift apart in one object.
+    workspace: workspace.dir,
+    workspaceSource: workspace.source,
     // The whole contract, not the two fields the readers used to need: the tolerance, the guardrail
     // and the window reading are part of "which metric decides", and a run that dropped them would
     // leave the ranking and the gate reading a contract nobody wrote.
     metrics: { ...metricContract },
     executor: { kind: 'local', ...executor },
     interval_ms: intervalMs,
-    workspaceDir: resolvePath(cwd, raw.workspace),
+    workspaceDir: workspace.dir,
     domainPack: pack,
   }
+
+  // One normalised `runner`: `keep` is filled in here rather than left to each reader's memory of
+  // what the default is, because "did this run keep its worktrees?" is answered by the same object in
+  // the boot log, the worktree report and the prune command.
+  if (isPlainObject(raw.runner)) config.runner = { keep: true, ...raw.runner }
 
   // The round workflow's binding is *derived* from the same resolution rather than declared beside it:
   // `rounds.metric` is the shape rounds.js freezes at INIT, and a second account of which metric leads

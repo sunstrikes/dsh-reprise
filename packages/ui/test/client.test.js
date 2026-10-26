@@ -700,3 +700,20 @@ test('the staircase says *why* there is no baseline line, not just that there is
   assert.match(source, /`no INIT line — \$\{baselineAbsent\}`/, 'and prints the reason when there is one')
   assert.match(source, /No INIT line: \$\{baselineAbsent\}\./, 'the sentence the chart is read aloud by says it too')
 })
+
+test('the run-wide notice is drawn on the empty page too: the strip paints `notes` before it returns', () => {
+  // CODING_STANDARDS §3: the host's notice is only worth sending if the page paints it. The state a
+  // refused run is actually in is a workspace with no `workspace.db`, so the page's whole answer has
+  // `data: null` — and `renderStrips` is the one region that must still paint `answer.notes` there.
+  // A strip that returned before its notes loop would leave the notice a string nobody reads in
+  // exactly the case it exists for.
+  const source = read('dashboard.js')
+  const start = source.indexOf('function renderStrips(')
+  assert.notEqual(start, -1, 'the strip is still the region the notes and warnings hang off')
+
+  const empty = source.slice(source.indexOf('if (data === null || data === undefined) {', start))
+  const branch = empty.slice(0, empty.indexOf('return'))
+
+  assert.match(branch, /for \(const note of answer\?\.notes \?\? \[\]\)/, 'the empty branch paints the notes')
+  assert.match(source.slice(start), /for \(const note of answer\?\.notes \?\? \[\]\)[\s\S]*metricContract/, 'and the populated one paints them after the warnings')
+})
