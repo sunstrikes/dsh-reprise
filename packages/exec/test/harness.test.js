@@ -44,6 +44,10 @@ const ADAPTERS = [
       assert.notEqual(index, -1, 'stream-json is the only output format that reports per-run events and spend')
       assert.equal(argv[index + 1], 'stream-json', 'the adapter parses stream-json, so it must ask for stream-json')
       assert.ok(
+        argv.includes('--verbose'),
+        'the CLI refuses -p with stream-json unless --verbose is passed; without it every landing fails',
+      )
+      assert.ok(
         !argv.includes('--add-dir'),
         'the worktree must be the child cwd; an --add-dir whitelist would leave the process running in the loop\'s own checkout',
       )
