@@ -19,8 +19,8 @@
  *      rejection — there is no candidate — and none may be absorbed into "an empty denominator",
  *      which would turn every later comparison into a win.
  *   3. **The job is marked.** Its ledger row says `kind: 'baseline'` and its submission id is
- *      `baseline`, so neither our own dispatch path nor a cluster listing can mistake it for a
- *      candidate (ticket 16's marker work hangs off the same row).
+ *      `reprise:baseline`, so neither our own dispatch path nor a cluster listing can mistake it for
+ *      a candidate (ticket 16's marker work hangs off the same row).
  *   4. **It spends budget like any other job**: reserved on dispatch, settled on completion. A free
  *      lane would make the remaining budget a lie in exactly the tick a candidate asks about it.
  *
@@ -30,7 +30,7 @@
 import { judgeTimeout } from '@dsh-reprise/exec'
 
 import { budgetOf, canDispatch } from './budget.js'
-import { baselineMarker } from './jobs.js'
+import { baselineMarker, submissionIdFor } from './jobs.js'
 import { recordWindowSamples, seriesOf } from './samples.js'
 
 /**
@@ -42,8 +42,15 @@ import { recordWindowSamples, seriesOf } from './samples.js'
  */
 export const BASELINE_SUBJECT = '_baseline'
 
-/** The cluster-visible idempotency key. A resubmission after a crash resolves to the same job. */
-export const BASELINE_SUBMISSION_ID = 'baseline'
+/**
+ * The cluster-visible idempotency key. A resubmission after a crash resolves to the same job.
+ *
+ * It is the baseline's marker (`reprise:baseline`) rather than the bare word `baseline`, because the
+ * key is the only field the cluster's job listing is guaranteed to carry: reading "this is the
+ * denominator of a run of this repository" back out of it is what keeps the baseline out of the
+ * `foreign` pile — and out of reach of anything that stops unknown jobs.
+ */
+export const BASELINE_SUBMISSION_ID = submissionIdFor({ baseline: true })
 
 /** Poll cadence defaults; a configuration may override either number. */
 const POLL = Object.freeze({ base_ms: 1_000, max_ms: 60_000 })

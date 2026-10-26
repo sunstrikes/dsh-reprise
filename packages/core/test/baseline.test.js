@@ -136,7 +136,7 @@ test('BASELINE submits the baseline through the platform port and freezes the sa
   assert.equal(ports.platform.submits.length, 1, 'the denominator is measured by a job, not read from a file')
   assert.deepEqual(
     { submission: ports.platform.submits[0].submissionId, candidate: ports.platform.submits[0].candidateId },
-    { submission: 'baseline', candidate: '_baseline' },
+    { submission: 'reprise:baseline', candidate: '_baseline' },
     'the submission carries the baseline id the ledger and the cluster will both show',
   )
 
@@ -314,7 +314,11 @@ test('the ledger says a job is the baseline, so nothing can dispatch or count it
 
   const row = ports.store.jobFor(BASELINE_SUBJECT)
   assert.equal(row.kind, 'baseline', 'the ledger marks what the job is for, not only who it belongs to')
-  assert.equal(row.submission_id, 'baseline', 'and the cluster-visible key says so too (ticket 16 reads this)')
+  assert.equal(
+    row.submission_id,
+    'reprise:baseline',
+    'and the cluster-visible key says so too: it is the marker, so a listing without metadata still says "baseline"',
+  )
   assert.equal(row.candidate_id, '_baseline')
   assert.deepEqual(ports.store.candidateIds(), [], 'a baseline job is not a candidate the phase machine steps')
 
@@ -497,7 +501,7 @@ test('a baseline job is marked as ours and as the baseline, so a cluster listing
 
   const report = jobReport({
     rows: ports.store.allJobs(),
-    listing: { ok: true, jobs: [{ submission_id: 'baseline', marker: baselineMarker(), status: 'SUCCEEDED' }] },
+    listing: { ok: true, jobs: [{ submission_id: 'reprise:baseline', marker: baselineMarker(), status: 'SUCCEEDED' }] },
   })
   assert.equal(report.read, true)
   assert.equal(report.ours.length, 1, 'the baseline is one of our jobs')

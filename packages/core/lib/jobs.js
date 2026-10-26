@@ -11,10 +11,12 @@
  *
  * Two decisions worth naming:
  *
- *  - **The marker is the identity, and it travels in `metadata`.** A listing row may carry
- *    `job_id: null` (measured: 42 of 129 rows had one), while `submission_id` and `metadata` survive.
- *    So the marker names the candidate id and the round the job was submitted in, and matching never
- *    depends on the cluster's own id.
+ *  - **The identity is the submission id, and the marker is the same string.** A listing row may
+ *    carry `job_id: null` (measured: 80 of 167 rows had one), while `submission_id` always survives.
+ *    The marker names the candidate id and the round the job was submitted in, so matching never
+ *    depends on the cluster's own id. It is written *and read back* on two channels: the job's
+ *    `metadata` (what we send) and `submission_id` itself (what the listing always answers with —
+ *    measured 2026-10-25: not one of the 167 listing rows carried `metadata` at all).
  *  - **A job with somebody else's identity is `foreign`, not an orphan.** The cluster had 106 jobs
  *    from other work before this ledger existed. Calling those "ours but unrecorded" is how an
  *    automatic cleanup kills somebody else's training; only a marker we wrote can make a job a
@@ -59,6 +61,56 @@ export const BASELINE_MARKER = `${MARKER_PREFIX}:baseline`
 
 export function baselineMarker() {
   return BASELINE_MARKER
+}
+
+/**
+ * The name one job of ours is submitted under — the same string as its marker, by construction.
+ *
+ * **Why this exists.** Measured on the live cluster (2026-10-25, `GET /api/v0/jobs?limit=200`, 167
+ * rows): a listing row's keys are exactly `job_id, submission_id, entrypoint, type, status, message,
+ * error_type, driver_info`. Not one row carried `metadata`, and 80 had `job_id: null`. The per-job
+ * route does return metadata, so the marker was never lost — but it was unreadable *from the
+ * listing*, which is where an orphan is found, so every job of ours classified as `foreign`. Making
+ * the submission id carry the same two facts gives the identity a channel that always survives, and
+ * it costs nothing: the idempotency key already had to be one per job.
+ *
+ * Two shapes, and no third:
+ *
+ *  - `reprise:candidate=<id>:round=<n>` for a candidate in a round — the round is in the key because
+ *    one candidate may be run more than once and two submissions must be two jobs (today's key was
+ *    the bare candidate id, so a second round's submit resolved to the *first* round's finished job).
+ *  - `reprise:baseline` for the denominator, which has neither a candidate nor a round.
+ *
+ * `probe: true` asks for the **round-less** form (`reprise:candidate=<id>`): the family root a
+ * recovering process asks the platform about when it does not know which attempt it is looking for
+ * (`platform.find`). Nothing is ever submitted under it, and `parseMarker` refuses it, so it can
+ * never masquerade as a job. Without `probe` the round remains mandatory, exactly as in `jobMarker`:
+ * a key that names half a job would let two submissions collide.
+ *
+ * @param {{candidateId?: string, round?: number, baseline?: boolean, probe?: boolean}} input
+ */
+export function submissionIdFor({ candidateId, round, baseline = false, probe = false } = {}) {
+  if (baseline === true) return baselineMarker()
+  if (probe === true) {
+    if (typeof candidateId !== 'string' || candidateId === '') {
+      throw new TypeError('a submission id needs the candidate id it evaluates')
+    }
+    return `${MARKER_PREFIX}:candidate=${candidateId}`
+  }
+  return jobMarker({ candidateId, round })
+}
+
+/**
+ * The marker a submission id carries, or `undefined` when that id is not one of ours.
+ *
+ * One vocabulary, read from whichever channel the cluster handed us: this is the same parser as
+ * `parseMarker`, so a submission id and a `metadata.marker` can never disagree about what a job is.
+ * A foreign id (`raysubmit_…`, `autotrain-smoke-…`) answers `undefined` — inventing a candidate from
+ * somebody else's string is how their training becomes eligible for collection.
+ */
+export function markerFromSubmissionId(submissionId) {
+  if (typeof submissionId !== 'string') return undefined
+  return parseMarker(submissionId) === undefined ? undefined : submissionId
 }
 
 /**
@@ -110,15 +162,27 @@ const TERMINAL_STATUSES = Object.freeze(['SUCCEEDED', 'FAILED', 'STOPPED', 'LOST
 /**
  * One row of the cluster's listing, in words this repository can use.
  *
- * Tolerant about *where* the marker is (`metadata.marker` is where we write it) and about a missing
- * `job_id`, because the listing is somebody else's data. `reference` is the id to use when talking
- * about the job afterwards: the cluster's own id when it has one, the submission id when it does not
- * — measured on Ray 2.59, `GET|POST /api/jobs/<submission_id>` resolves for rows whose document
- * reports `job_id: null`, so a null id is not a job that cannot be addressed.
+ * The marker is read from the first channel that has it: a top-level `marker`, the job's
+ * `metadata.marker` (what we send), and finally the `submission_id` itself (what the listing always
+ * answers with — measured: the live listing carried no `metadata` on any row). Reading all three is
+ * what makes an orphan visible on a cluster that dropped one of them, and it cannot invent a job:
+ * each channel is parsed by the same vocabulary, and anything else stays `null`.
+ *
+ * Tolerant about a missing `job_id` too, because the listing is somebody else's data. `reference` is
+ * the id to use when talking about the job afterwards: the cluster's own id when it has one, the
+ * submission id when it does not — measured on Ray 2.59, `GET|POST /api/jobs/<submission_id>`
+ * resolves for rows whose document reports `job_id: null`, so a null id is not a job that cannot be
+ * addressed.
  */
 export function readListingRow(raw) {
   const row = raw ?? {}
-  const marker = typeof row.marker === 'string' ? row.marker : row.metadata?.[MARKER_KEY]
+  const metadataMarker = row.metadata?.[MARKER_KEY]
+  const marker =
+    typeof row.marker === 'string'
+      ? row.marker
+      : typeof metadataMarker === 'string'
+        ? metadataMarker
+        : markerFromSubmissionId(row.submission_id)
   const parsed = parseMarker(marker)
   const jobId = typeof row.job_id === 'string' && row.job_id !== '' ? row.job_id : null
   const submissionId = typeof row.submission_id === 'string' && row.submission_id !== '' ? row.submission_id : null
@@ -154,6 +218,19 @@ export function jobReport({ rows = [], listing } = {}) {
   const read = listing?.ok === true && Array.isArray(listing.jobs)
   const reason = read ? undefined : (listing?.message ?? 'the executor returned no job listing')
   const bySubmission = new Map(rows.map((row) => [row.submission_id, row]))
+  // A listing row and a ledger row can name the same job in two vocabularies: the ledger writes the
+  // marker into its `submission_id` (`reprise:candidate=<id>:round=<n>`), while a cluster that keeps
+  // metadata reports the same marker in `metadata.marker` and an older submission id in the row. So
+  // identity is the *candidate and round*, which both vocabularies carry, and the submission id is
+  // only the fast path — without this, a recorded job reads as an orphan of itself.
+  const identity = (candidateId, round) =>
+    candidateId === null || candidateId === undefined ? undefined : `${candidateId}#${round ?? ''}`
+  const byIdentity = new Map()
+  for (const row of rows) {
+    const marker = parseMarker(row.marker)
+    const key = identity(row.candidate_id ?? marker?.candidateId, row.round ?? marker?.round)
+    if (key !== undefined) byIdentity.set(key, row)
+  }
   const ours = []
   const orphans = []
   const foreign = []
@@ -163,7 +240,9 @@ export function jobReport({ rows = [], listing } = {}) {
   if (read) {
     for (const raw of listing.jobs) {
       const job = readListingRow(raw)
-      const known = job.submission_id === null ? undefined : bySubmission.get(job.submission_id)
+      const known =
+        (job.submission_id === null ? undefined : bySubmission.get(job.submission_id)) ??
+        byIdentity.get(identity(job.candidate_id, job.round))
       if (known !== undefined) {
         seen.add(known.submission_id)
         ours.push({ ...job, round: known.round ?? job.round, outcome: known.outcome ?? null, error_class: known.error_class ?? null })

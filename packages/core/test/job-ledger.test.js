@@ -30,9 +30,12 @@ import { createRayPlatform } from '@dsh-reprise/exec/platform/ray'
 import { createCandidate, reconcile, tick } from '../lib/loop.js'
 import { Store } from '../lib/store.js'
 import { jobsCommand } from '../lib/cli/jobs.js'
-import { jobMarker, jobReport, parseMarker, readListing, reapOrphans } from '../lib/jobs.js'
+import { jobMarker, jobReport, parseMarker, readListing, reapOrphans, submissionIdFor } from '../lib/jobs.js'
 
 const AT = 1_761_091_200_000
+
+/** The job carrying our marker that this workspace never recorded: r8-h8's eighth-round attempt. */
+const ORPHAN_ID = 'reprise:candidate=r8-h8:round=8'
 
 class FakeClock {
   constructor(at = AT) {
@@ -179,11 +182,17 @@ test('a submitted job is a ledger fact carrying its candidate id, its round and 
   const row = ports.store.jobFor('r2-h1')
   assert.equal(row.round, 2, 'the round is part of what a job is, not something re-derived later')
   assert.equal(row.marker, 'reprise:candidate=r2-h1:round=2')
-  assert.equal(row.outcome, null, 'a job still running has no outcome yet')
 
   const submitted = [...ports.cluster.jobs.values()].at(-1)
   assert.equal(submitted.round, 2, 'the round reaches the plan, so the marker can be built there')
-  assert.equal(submitted.submission_id, 'r2-h1', 'the idempotency key stays the candidate id: recovery finds jobs by it')
+  assert.equal(
+    submitted.submission_id,
+    'reprise:candidate=r2-h1:round=2',
+    'the idempotency key is the marker: on the live cluster the listing answers with a submission id and no metadata at all',
+  )
+  assert.equal(row.submission_id, submitted.submission_id, 'the ledger records the key the cluster was given')
+  assert.equal(row.marker, row.submission_id, 'and the marker is that same string, so the listing and the ledger name one job')
+  assert.equal(row.outcome, null, 'a job still running has no outcome yet')
   ports.store.close()
 })
 test('the view finds our jobs in the listing and calls a marker we never recorded an orphan', async () => {
@@ -204,7 +213,7 @@ test('the view finds our jobs in the listing and calls a marker we never recorde
   // submission id is the reference, because that is the field the listing always has.
   cluster.jobs.set('raysubmit_9100', {
     job_id: null,
-    submission_id: 'r8-h8',
+    submission_id: ORPHAN_ID,
     candidate_id: 'r8-h8',
     round: 8,
     metadata: { marker: jobMarker({ candidateId: 'r8-h8', round: 8 }) },
@@ -215,12 +224,12 @@ test('the view finds our jobs in the listing and calls a marker we never recorde
   const report = jobReport({ rows: ports.store.allJobs(), listing: await cluster.list() })
 
   assert.equal(report.read, true)
-  assert.deepEqual(report.ours.map((job) => job.submission_id), ['r2-h1'])
+  assert.deepEqual(report.ours.map((job) => job.submission_id), ['reprise:candidate=r2-h1:round=2'])
   assert.equal(report.ours[0].round, 2)
   assert.equal(report.ours[0].outcome, null, 'a running job has no outcome')
-  assert.deepEqual(report.orphans.map((job) => job.submission_id), ['r8-h8'])
+  assert.deepEqual(report.orphans.map((job) => job.submission_id), [ORPHAN_ID])
   assert.equal(report.orphans[0].job_id, null)
-  assert.equal(report.orphans[0].reference, 'r8-h8', 'a null job id still names the job: the dashboard resolves the submission id')
+  assert.equal(report.orphans[0].reference, ORPHAN_ID, 'a null job id still names the job: the dashboard resolves the submission id')
   assert.deepEqual(
     report.foreign.map((job) => job.submission_id).sort(),
     ['autotrain-smoke-1792741140', 'someone-elses-work'],
@@ -269,10 +278,10 @@ test('a 200 the Ray adapter cannot read reaches the view as "cannot read", not a
 function orphan(cluster, { candidateId = 'r8-h8', round = 8, jobId = 'raysubmit_9100' } = {}) {
   const job = {
     job_id: jobId,
-    submission_id: candidateId,
+    submission_id: submissionIdFor({ candidateId, round }),
     candidate_id: candidateId,
     round,
-    metadata: { marker: jobMarker({ candidateId, round }) },
+    metadata: { marker: submissionIdFor({ candidateId, round }) },
     state: 'running',
     status: 'RUNNING',
   }
@@ -312,11 +321,11 @@ test('reaping stops exactly the orphan it was asked about, and refuses everythin
     platform: cluster,
     store: ports.store,
     report,
-    jobIds: ['r8-h8', 'raysubmit_9001', ourJobId, 'raysubmit_does-not-exist'],
+    jobIds: [ORPHAN_ID, 'raysubmit_9001', ourJobId, 'raysubmit_does-not-exist'],
     now: ports.clock.now(),
   })
 
-  assert.deepEqual(result.stopped.map((entry) => entry.submission_id), ['r8-h8'], 'the orphan, addressed by its submission id')
+  assert.deepEqual(result.stopped.map((entry) => entry.submission_id), [ORPHAN_ID], 'the orphan, addressed by its submission id')
   assert.deepEqual(cluster.stops, ['raysubmit_9100'], 'one stop, for the orphan only')
 
   const refused = Object.fromEntries(result.refusals.map((entry) => [entry.job_id, entry.reason]))
@@ -326,7 +335,7 @@ test('reaping stops exactly the orphan it was asked about, and refuses everythin
 
   const ops = ports.store.ops().filter((op) => op.op === 'orphan_reaped')
   assert.equal(ops.length, 1, 'the stop is a fact recorded on our side of the wire')
-  assert.equal(JSON.parse(ops[0].detail).submission_id, 'r8-h8')
+  assert.equal(JSON.parse(ops[0].detail).submission_id, ORPHAN_ID)
   ports.store.close()
 })
 
@@ -388,8 +397,14 @@ test('a job somebody else stopped and a job that broke are two different facts',
 
   // The view keys on the outcome, so "which jobs failed" never answers with a stopped one.
   const report = jobReport({ rows: ports.store.allJobs(), listing: await cluster.list() })
-  assert.deepEqual(report.ours.filter((job) => job.outcome === 'failed').map((job) => job.submission_id), ['r1-h2'])
-  assert.deepEqual(report.ours.filter((job) => job.outcome === 'canceled').map((job) => job.submission_id), ['r1-h1'])
+  assert.deepEqual(
+    report.ours.filter((job) => job.outcome === 'failed').map((job) => job.submission_id),
+    ['reprise:candidate=r1-h2:round=1'],
+  )
+  assert.deepEqual(
+    report.ours.filter((job) => job.outcome === 'canceled').map((job) => job.submission_id),
+    ['reprise:candidate=r1-h1:round=1'],
+  )
 
   // And neither is recorded as a candidate defect: no four-state status, and the reason a person
   // reads says which of the two happened.
@@ -447,12 +462,12 @@ test('the jobs command puts the orphan on screen, and stops only what it is told
   assert.equal(listed.code, 0)
   const text = printed.join('\n')
   assert.match(text, /orphans \(1\)/)
-  assert.match(text, /r8-h8/, 'the orphan is visible, with the reference that would stop it')
+  assert.match(text, new RegExp(ORPHAN_ID), 'the orphan is visible, with the reference that would stop it')
   assert.match(text, /not ours \(1\)/)
   assert.match(text, /autotrain-smoke-1792741140/)
 
   printed.length = 0
-  const reaped = await jobsCommand(['reap', '--job', 'r8-h8', '--job', 'raysubmit_9001'], {
+  const reaped = await jobsCommand(['reap', '--job', ORPHAN_ID, '--job', 'raysubmit_9001'], {
     out,
     config,
     platform: cluster,
