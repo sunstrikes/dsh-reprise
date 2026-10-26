@@ -4,14 +4,19 @@
  * §11): `best` is one row here, chosen on the primary metric, and no member of this view is a
  * verdict about which candidates are worth comparing.
  *
- * Two rules shape this module:
+ * Three rules shape this module:
  *
- *   1. **The numbers come from the platform, not from the model.** The only source of a metric
- *      value is the `metrics_collected` event, which the kernel writes from `platform.poll()`. A
- *      CAND_ANALYZE report is an argument about those numbers; it is never an input here, and no
- *      code path in this file reads a payload field written by a model. `stop.js` inherits the same
- *      guarantee by consuming this view and nothing else.
- *   2. **Domain differences are data.** Which metrics exist, which direction is better, and which
+ *   1. **The numbers come from the platform, not from the model.** A metric value enters through one
+ *      of two events the kernel writes from the executor's own answer: `metrics_collected` (from
+ *      `platform.poll()`) and `window_samples` (the run's series, plus the contract's reading of it,
+ *      recorded in `samples.js`). A CAND_ANALYZE report is an argument about those numbers; it is
+ *      never an input here, and no code path in this file reads a payload field written by a model.
+ *      `stop.js` inherits the same guarantee by consuming this view and nothing else.
+ *   2. **When a series exists, the contract reads it.** "Mean of the windows" and "the last window"
+ *      are the metric contract's decision (`window_mode`), so the number that ranks a candidate comes
+ *      from `readMetric` rather than from the executor's headline aggregate — see `vectorOf`. The
+ *      flat aggregate is ranked only when there is no series to read.
+ *   3. **Domain differences are data.** Which metrics exist, which direction is better, and which
  *      one decides "best" all come from the metric contract, resolved once in `metric-contract.js`.
  *      The kernel knows the words `up` and `down` and nothing else about which metric it is or what
  *      it measures — and when the contract is absent or contradicts itself, this view ranks nothing
@@ -31,6 +36,7 @@ import { BASELINE_SUBJECT } from './baseline.js'
 import { frontierOf } from './frontier.js'
 import { WORKSPACE_ACTOR } from './intents.js'
 import { resolveMetricContract } from './metric-contract.js'
+import { WINDOW_SAMPLES_EVENT } from './samples.js'
 import { WORKSPACE_SUBJECT } from './store.js'
 
 /**
@@ -62,7 +68,7 @@ const NOT_A_CANDIDATE = new Set([WORKSPACE_SUBJECT, BASELINE_SUBJECT, WORKSPACE_
  * still matches, so nothing would ever re-derive it). Changing this constant is the invalidation;
  * `dump --rebuild` is the check that catches a row which disagrees anyway.
  */
-export const DERIVED_VERSION = 1
+export const DERIVED_VERSION = 2
 
 const ACTIVE = 'active'
 const DONE = 'done'
@@ -80,7 +86,19 @@ function numericMetrics(input) {
 }
 
 function emptyRow() {
-  return { version: DERIVED_VERSION, stamped_seq: 0, round: null, status: ACTIVE, metrics: {}, metrics_seq: 0 }
+  return {
+    version: DERIVED_VERSION,
+    stamped_seq: 0,
+    round: null,
+    status: ACTIVE,
+    metrics: {},
+    metrics_seq: 0,
+    // The contract's own reading of the run's window series, as recorded on the `window_samples`
+    // fact (`samples.js`) — `null` until a series exists. The ranking prefers it over `metrics`
+    // because it is the number the contract computed, not the executor's headline aggregate.
+    window_read: null,
+    window_read_seq: 0,
+  }
 }
 
 /**
@@ -100,6 +118,12 @@ function foldRow(previous, events) {
     if (event.event_type === 'metrics_collected') {
       row.metrics = numericMetrics(event.payload?.metrics)
       row.metrics_seq = event.local_seq
+    }
+    if (event.event_type === WINDOW_SAMPLES_EVENT) {
+      // A recorded reading replaces the previous one: a resubmitted job rewrites the same artifact
+      // name, and two accounts of one run would leave the reader choosing between them.
+      row.window_read = event.payload?.window_read ?? null
+      row.window_read_seq = event.local_seq
     }
     if (event.event_type === 'cand_analyze') row.status = DONE
     if (event.event_type === 'candidate_rejected') row.status = REJECTED
@@ -163,23 +187,71 @@ function compareByPrimary(left, right, contract) {
 }
 
 /** Turn materialised rows into the ranking: one row per candidate, plus the single best. Pure: no store access, no clock, no model. */
+/**
+ * One row's objective vector: the contract's reading of its window series when there is one, and the
+ * executor's reported number only when there is no series at all.
+ *
+ * The rule, in full, and why each branch exists:
+ *
+ *   1. **The series exists and was read under the same window mode the contract states now** — use
+ *      the contract's number. This is the whole point: "mean of the windows" and "the last window"
+ *      are answers to a question the executor's flat aggregate never answered.
+ *   2. **The series exists and the contract could not read that metric** — the metric is *missing*,
+ *      with `readMetric`'s reason. No fallback: the contract asked the evidence and got "not
+ *      measured", and substituting the aggregate would be the silent reinterpretation
+ *      `metric-contract.js` exists to remove.
+ *   3. **The series was read under a different mode** (the contract was edited, or `--config` states
+ *      another one) — the recorded number does not answer this reader's question, so fall back to
+ *      the reported one rather than pass a last-window value off as a mean.
+ *   4. **No series at all** — the reported number, which is all that exists. A candidate without
+ *      samples still finishes and is still ranked; the *baseline* is the subject that cannot.
+ *
+ * `vector_source` says which branch each metric took, because "0.55" means two different things
+ * depending on where it came from and a reader must not have to guess.
+ */
+function vectorOf(contract, row) {
+  const metrics = row.metrics ?? {}
+  const read = row.window_read ?? undefined
+  const vector = {}
+  const missing = []
+  const source = {}
+  for (const objective of contract.objectives) {
+    const mode = objective.window === 'last' ? 'last' : 'mean'
+    const fromSeries = read !== null && read !== undefined && read.modes?.[objective.name] === mode
+    if (fromSeries && typeof read.values?.[objective.name] === 'number') {
+      vector[objective.name] = read.values[objective.name]
+      source[objective.name] = 'window_series'
+    } else if (fromSeries && read.unmeasured?.[objective.name] !== undefined) {
+      missing.push(objective.name)
+      source[objective.name] = 'not_measured'
+    } else if (Object.hasOwn(metrics, objective.name)) {
+      vector[objective.name] = metrics[objective.name]
+      source[objective.name] = 'executor'
+    } else {
+      missing.push(objective.name)
+    }
+  }
+  return { vector, missing, source }
+}
+
 function viewOf(contract, rows) {
   const candidates = []
   for (const candidateId of [...rows.keys()].sort()) {
     const row = rows.get(candidateId)
     const metrics = row.metrics ?? {}
-    const vector = {}
-    const missing = []
-    for (const objective of contract.objectives) {
-      if (Object.hasOwn(metrics, objective.name)) vector[objective.name] = metrics[objective.name]
-      else missing.push(objective.name)
-    }
+    const { vector, missing, source } = vectorOf(contract, row)
     candidates.push({
       candidate_id: candidateId,
       round: row.round ?? null,
       status: row.status ?? ACTIVE,
       metrics,
       vector,
+      // Which reading produced each number (`window_series` / `executor` / `not_measured`).
+      vector_source: source,
+      // What the contract could not read, with its reason — the series was there and said nothing.
+      unmeasured: row.window_read?.unmeasured ?? {},
+      // Where the two accounts disagreed, as recorded on the sample fact.
+      metric_disagreements: row.window_read?.disagreements ?? [],
       complete: contract.ok && missing.length === 0,
       missing,
       onFrontier: false,

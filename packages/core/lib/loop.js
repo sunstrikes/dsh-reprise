@@ -12,7 +12,7 @@
  * @module
  */
 
-import { isBlocking, isTerminal, validateArtifact, validateCandidate } from '@dsh-reprise/contract'
+import { isBlocking, isPlainObject, isTerminal, validateArtifact, validateCandidate } from '@dsh-reprise/contract'
 
 import { judgeTimeout } from '@dsh-reprise/exec'
 
@@ -792,7 +792,7 @@ async function analyze(ports, candidateId, state) {
   // The run's windowed samples, recorded before the report is validated: what this run measured is a
   // fact about the run whether or not the analysis written about it is acceptable. Same recorder,
   // same artifact, same event as the baseline's — that identity is what makes pairing possible.
-  const samples = recordCandidateSamples(ports, candidateId, job, collected)
+  const samples = recordCandidateSamples(ports, candidateId, job, collected, state)
 
   let artifact
   try {
@@ -839,7 +839,7 @@ async function analyze(ports, candidateId, state) {
  * refused is silence about an unusable series — a run whose samples do not satisfy the contract gets
  * a fact saying so, because "no samples" and "samples that break the shape" are different answers.
  */
-function recordCandidateSamples(ports, candidateId, job, collected) {
+function recordCandidateSamples(ports, candidateId, job, collected, state) {
   if (collected === undefined || job === undefined) return undefined
 
   const samples = seriesOf(collected)
@@ -855,6 +855,11 @@ function recordCandidateSamples(ports, candidateId, job, collected) {
     return undefined
   }
 
+  // What the executor reported, in the same precedence the analysis uses: what `collect()` fetched,
+  // then what the monitor recorded when the job succeeded, then the ledger row. It is recorded beside
+  // the series so a disagreement with the contract's reading is a fact rather than a mystery.
+  const reported = [collected?.metrics, state?.metrics, job?.metrics].find(isPlainObject) ?? {}
+
   return recordWindowSamples(
     { store: ports.store, clock: ports.clock, artifacts: ports.artifacts },
     {
@@ -864,6 +869,10 @@ function recordCandidateSamples(ports, candidateId, job, collected) {
       series: samples.series,
       source: samples.source,
       metric: null,
+      // The run's metric contract, so the window mode decides these numbers once, here, instead of
+      // every later reader inventing its own reading of the same series.
+      contract: ports.config?.metrics,
+      reported,
     },
   )
 }

@@ -31,6 +31,8 @@ import { fileURLToPath } from 'node:url'
 import { validateArtifact } from '@dsh-reprise/contract'
 import { WINDOW_MARKER, parseWindowLog } from '@dsh-reprise/exec/windows'
 
+import { readSeries, resolveMetricContract } from './metric-contract.js'
+
 /** The event that records "these samples were collected". One type for both subjects, on purpose. */
 export const WINDOW_SAMPLES_EVENT = 'window_samples'
 
@@ -155,17 +157,29 @@ export function windowSamplesOf({ store, artifacts }, subject) {
 /**
  * Write the series as an artifact and append the fact that points at it.
  *
+ * The fact carries the contract's own reading of the series (`window_read`), computed here because
+ * this is the one moment both the windows and the executor's aggregate are in hand: `metric` is what
+ * the executor said, `reported` is its whole metric table, and `contract` is the run's metric
+ * contract. The ranking is a read-only view with no artifact store, so the collapsed numbers travel
+ * with the fact — and a disagreement between the two accounts is recorded here rather than resolved
+ * silently later, in either direction.
+ *
  * @param {{store: any, clock: {now: () => number}, artifacts?: any}} ports
  * @param {{
  *   subject: string, subjectKind: 'baseline'|'candidate', jobId: string,
  *   series: object, source: string, metric?: {name: string, value: number} | null,
- * }} collected
+ *   contract?: object, reported?: Record<string, unknown>,
+ * }} collected `contract` is the run's metric contract as data; absent, nothing is read (`null`)
  * @returns {{artifact: string, path: string, sha256: string, unit: string, windows: number, seq: number}}
  */
-export function recordWindowSamples(ports, { subject, subjectKind, jobId, series, source, metric = null }) {
+export function recordWindowSamples(
+  ports,
+  { subject, subjectKind, jobId, series, source, metric = null, contract, reported = {} },
+) {
   const { store, clock, artifacts } = ports
   const name = windowSamplesArtifact(subject)
   const written = artifacts === undefined ? { path: name, sha256: '' } : artifacts.write(name, series)
+  const windowRead = contract === undefined ? null : readSeries(resolveMetricContract(contract), series, reported)
 
   const ref = {
     artifact: name,
@@ -189,6 +203,8 @@ export function recordWindowSamples(ports, { subject, subjectKind, jobId, series
       artifact: ref.artifact,
       sha256: ref.sha256,
       metric: metric === null ? null : { name: metric.name, value: metric.value },
+      // What the contract read out of this series, per ranked metric — the number the ranking uses.
+      window_read: windowRead,
     },
   })
 

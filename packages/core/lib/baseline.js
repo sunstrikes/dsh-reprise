@@ -255,7 +255,7 @@ async function poll(context, job) {
 
 /** The job succeeded. Freeze the numbers it reported — or name what is missing and stop. */
 async function collect(context, job, answered) {
-  const { store, clock, platform, settings, now, log, artifacts } = context
+  const { store, clock, platform, settings, config, now, log, artifacts } = context
 
   // `poll` carries the metric table; `collect` carries what the job left behind. Both are asked for,
   // because a windowed series can arrive in either place depending on the executor.
@@ -330,6 +330,11 @@ async function collect(context, job, answered) {
       series: samples.series,
       source: samples.source,
       metric: { name: metricName, value },
+      // Same recorder, same contract reading as a candidate's: the denominator's window series is
+      // read by the same rule, so "what the contract says this run scored" has one definition for
+      // both sides of every comparison.
+      contract: config?.metrics,
+      reported: { ...(answered.metrics ?? {}), ...(collected?.metrics ?? {}) },
     },
   )
 

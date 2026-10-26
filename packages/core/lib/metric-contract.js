@@ -513,3 +513,63 @@ export function readMetric(series, rule) {
   const total = measured.reduce((sum, window) => sum + window.value, 0)
   return { metric: name, window: mode, value: total / measured.length, reason: undefined }
 }
+
+/**
+ * Read one series the way the contract says to, for **every** ranked metric — and compare each
+ * answer with the flat number the executor reported.
+ *
+ * Why this exists as a function rather than as a loop at one call site: the window reading is
+ * recorded **when the samples land** (`samples.js`), because that is the last moment both the series
+ * and the executor's own aggregate are in hand. The ranking is a read-only view that never touches
+ * the artifact store, so the contract's read travels with the fact; whoever ranks later reads it
+ * back. One reading, one place, and the number in the ranking is the number the contract computed.
+ *
+ * `values` holds a metric only when the contract could read one. A metric it could not read lands in
+ * `unmeasured` with `readMetric`'s reason and **no fallback** to `reported` — the contract asked the
+ * evidence and got "not measured", and substituting the executor's headline number would be the
+ * silent reinterpretation this module exists to remove. `reported` is used for exactly one thing: the
+ * `disagreements` list, so a reader can see that the executor's aggregate said something else.
+ *
+ * `modes` records which reading produced each value, so a later reader whose contract states a
+ * *different* window mode can tell that the recorded number does not answer its question.
+ *
+ * @param {any} contract a resolved contract (`resolveMetricContract`); anything not `ok` reads nothing
+ * @param {{unit?: string, windows?: unknown[]}} series a `window_series` document
+ * @param {Record<string, unknown>} [reported] the executor's own metric table, for the disagreement list
+ * @returns {{
+ *   values: Record<string, number>,
+ *   unmeasured: Record<string, string>,
+ *   modes: Record<string, 'mean' | 'last'>,
+ *   disagreements: {metric: string, window: 'mean' | 'last', contract: number, reported: number}[],
+ *   contract_ref: string | null,
+ * } | null}
+ */
+export function readSeries(contract, series, reported = {}) {
+  // No contract is not "read it however you like": there is no rule for which metric decides or how a
+  // window collapses, so nothing is read and the caller sees `null`.
+  if (contract?.ok !== true) return null
+
+  /** @type {Record<string, number>} */
+  const values = {}
+  /** @type {Record<string, string>} */
+  const unmeasured = {}
+  /** @type {Record<string, 'mean' | 'last'>} */
+  const modes = {}
+  const disagreements = []
+
+  for (const objective of contract.objectives) {
+    const read = readMetric(series, objective)
+    modes[objective.name] = read.window
+    if (typeof read.value !== 'number' || !Number.isFinite(read.value)) {
+      unmeasured[objective.name] = read.reason ?? `no window measured ${objective.name}`
+      continue
+    }
+    values[objective.name] = read.value
+    const flat = isPlainObject(reported) ? reported[objective.name] : undefined
+    if (typeof flat === 'number' && Number.isFinite(flat) && flat !== read.value) {
+      disagreements.push({ metric: objective.name, window: read.window, contract: read.value, reported: flat })
+    }
+  }
+
+  return { values, unmeasured, modes, disagreements, contract_ref: contract.ref ?? null }
+}
