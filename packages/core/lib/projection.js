@@ -28,7 +28,7 @@ import { cudaVisibleDevicesOf, gpuExclusivityOf, gpuHolder, jobReport } from './
 import { defaultStaticChecks } from './judge.js'
 import { ranking, roundHistory } from './ranking.js'
 import { readRoundsState } from './rounds.js'
-import { describeRules, stopConfig } from './stop.js'
+import { STOP_RULES, describeRules, samplesFor, stopConfig } from './stop.js'
 import { configWarnings } from './warnings.js'
 
 const FOUR_STATES = ['ok', 'missing', 'conflict', 'invalid']
@@ -101,6 +101,71 @@ function stopRecord(workspace) {
     // The rule statuses as they stood when the decision was taken. Recomputing them from today's
     // configuration would print a page that never decided anything.
     rules: stopped.rules,
+  }
+}
+
+/**
+ * The limits the stop rules are read with: **the ones in force when the run concluded**, when it has.
+ *
+ * A stopped run's page answers "why is this over, and what would have been next"; both are questions
+ * about the decision, so the limits are the decision's. The *observed* values, on the other hand, are
+ * re-measured from the round history — the same facts the decision read, since a concluded workspace
+ * is absorbing and its history cannot change. The one thing that would drift is the wall clock, which
+ * is why the caller pins `now` to the recorded stop instant (see `overview()`).
+ *
+ * An edited `stop` block in a config file therefore changes nothing on a concluded run's page: it
+ * describes a decision that was never taken.
+ */
+function stopLimits(workspace, config) {
+  const limits = stopConfig(config)
+  const recorded = workspace.stopped?.rules
+  if (!Array.isArray(recorded)) return limits
+  for (const rule of recorded) {
+    if (STOP_RULES.includes(rule?.rule) && typeof rule.limit === 'number') limits[rule.rule] = rule.limit
+  }
+  return limits
+}
+
+// --------------------------------------------------------------- the budget bar
+
+/** A percentage of the bar's width, rounded to a hundredth and never negative. */
+const share = (part, whole) => (whole > 0 ? Math.max(0, Math.min(100, Number(((part / whole) * 100).toFixed(2)))) : 0)
+
+/**
+ * The budget bar's three materials, as widths — the page draws, it does not divide.
+ *
+ * Spec §6.6: settled is solid, `reserved − settled` is a hatch, the rest of the cap is empty, and the
+ * soft limit and the cap are markers named in the legend. Those are three readings of one denominator
+ * (the cap), so the denominator and the three shares are published together and the renderer's only
+ * job is `width: <share>%`.
+ *
+ * Two states are not the capped one, and each says so rather than looking like a bar with a value:
+ *
+ *  - **No cap** (`gpu_hours_limit: 0`, which is the kernel's "unlimited"): the bar is scaled by what
+ *    was *used*, `remainingPercent` is 0 because there is no remainder to draw, and there is no
+ *    soft-limit marker. Drawing a 0-width bar would read as "nothing spent".
+ *  - **Nothing spent yet**: there is no scale at all (`scaleGpuHours: null`) — a bar with no spent
+ *    material and no cap has no length to be, and the page says "nothing spent yet".
+ *
+ * `reservedUnsettledGpuHours` is deliberately not called "in flight": it is `reserved − settled`,
+ * which includes the leftover reservation of candidates that already finished — money that was
+ * promised and not spent, not work that is running.
+ */
+export function budgetBar(spend, budget) {
+  const limit = budget.gpu_hours_limit
+  const limited = limit > 0
+  const scaleGpuHours = limited ? limit : spend.usedGpuHours > 0 ? spend.usedGpuHours : null
+  const reservedUnsettledGpuHours = spend.inFlightGpuHours
+  return {
+    limited,
+    scaleGpuHours,
+    settledPercent: share(spend.settledGpuHours, scaleGpuHours),
+    reservedPercent: share(reservedUnsettledGpuHours, scaleGpuHours),
+    remainingPercent: limited ? share(Math.max(0, limit - spend.usedGpuHours), limit) : 0,
+    // The soft limit is a fraction of the cap, so it has no meaning without one.
+    softLimitPercent: limited ? share(limit * budget.soft_ratio, limit) : null,
+    reservedUnsettledGpuHours,
+    over: limited && spend.usedGpuHours > limit,
   }
 }
 
@@ -195,6 +260,12 @@ export function cluster(store, { config, executor, listing } = {}) {
       // Only a listing can answer "how many are in use"; our ledger can only say "at least".
       inUse: report.read && perJob !== null ? running.length * perJob : null,
       floor: perJob !== null ? open.length * perJob : null,
+      // A floor we could not compute is a sentence, not a dash: a reader who is told "unknown" about
+      // the cluster and then sees "— cards" beside it has been told two nothings that look like a zero.
+      floorAbsent:
+        perJob !== null
+          ? null
+          : 'this run never recorded how many cards one job claims, so our own ledger cannot say how many it holds',
     },
     jobs: {
       recorded: jobs.length,
@@ -221,14 +292,24 @@ function visibleCandidates(store) {
 
 /**
  * The workspace page: where the run is, how it is spending, what it found, and why it ended (if it did).
+ *
+ * `now` is the caller's clock reading — the route's, for the page — and never a `Date.now()` taken
+ * here: the projection is a pure function of facts, and "how close is this run to its wall-clock
+ * limit" is only reproducible when the instant it was measured at is an input. Without it the
+ * wall-clock rule reports that it was not measured, rather than 0 hours.
  */
-export function overview(store, { config, executor, listing } = {}) {
+export function overview(store, { config, executor, listing, now } = {}) {
   const workspace = store.getState(undefined, 'workspace', {}) ?? {}
   const rows = view(store, config)
   const history = roundHistory(rows)
   const { empty, flat } = streaks(history)
   const budget = budgetOf(workspace, config)
   const spend = spendOf(store)
+  const limits = stopLimits(workspace, config)
+  // A concluded run's wall clock is the clock that concluded it: reading it against "now" would make
+  // the distance to a rule that can no longer fire grow every time the page is opened.
+  const readAt = workspace.stopped?.at_ms ?? now
+  const startedAt = workspace.started_at_ms
 
   const candidates = rows.candidates
   return {
@@ -258,12 +339,22 @@ export function overview(store, { config, executor, listing } = {}) {
       limitGpuHours: budget.gpu_hours_limit,
       softLimitGpuHours: budget.gpu_hours_limit > 0 ? budget.gpu_hours_limit * budget.soft_ratio : 0,
       tokens: spend.tokens,
+      // The bar's three materials and two markers, divided once here — see `budgetBar()`.
+      budget: budgetBar(spend, budget),
     },
     best: rows.best,
     frontier: {
       objectives: rows.contract.objectives,
       members: rows.frontier,
       size: rows.frontier.length,
+      // The cell lists each member with its number, so it needs the metric the numbers are in and the
+      // reading of every member — not just their ids.
+      primary: rows.contract.primary ?? null,
+      readings: rows.frontier.map((candidateId) => {
+        const row = rows.candidates.find((candidate) => candidate.candidate_id === candidateId)
+        const value = rows.contract.primary === null ? undefined : row?.vector?.[rows.contract.primary]
+        return { candidate_id: candidateId, value: typeof value === 'number' ? value : null }
+      }),
     },
     // `status` is the four-state name (`ok` / `missing` / `invalid` / `conflict`); `error` is the
     // sentence. Both are carried so a reader can switch on the name instead of pattern-matching prose.
@@ -278,9 +369,18 @@ export function overview(store, { config, executor, listing } = {}) {
     cluster: cluster(store, { config, executor, listing }),
     stop: {
       ...stopRecord(workspace),
-      // A concluded run reports the rules it decided with; a running one reports today's
-      // configuration, which is the only thing that can still change the outcome.
-      rules: stopRecord(workspace).rules ?? describeRules({ limits: stopConfig(config), view: rows }),
+      // Every rule, its limit, and how far along it is. A concluded run reports the limits that were
+      // in force when it decided (`stopLimits`); a running one reports today's configuration, which
+      // is the only thing that can still change the outcome. The observed values are measured by the
+      // same function `decideStop` reads, so a gauge cannot disagree with a recorded conclusion.
+      rules: describeRules({
+        limits,
+        view: rows,
+        rounds: history,
+        samples: samplesFor(store, workspaceArtifacts(store), rows, limits),
+        now: readAt,
+        startedAt,
+      }),
     },
   }
 }
