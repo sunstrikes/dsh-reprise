@@ -21,7 +21,7 @@
  * the percentage on this page and the number `dump` prints are the same derivation.
  */
 
-import { EM_DASH, change, clock, cursor, number, percent, stamp } from './format.js'
+import { EM_DASH, change, clock, cursor, fixed, number, percent, stamp } from './format.js'
 
 /**
  * The views this page shows. Paths are absolute because the host mounts them on its own origin.
@@ -205,47 +205,310 @@ function renderOverview(answer) {
   }
 }
 
-function renderRounds(answer) {
-  const root = document.getElementById('rounds')
-  root.replaceChildren(el('h2', { text: 'Rounds' }))
+/**
+ * The staircase: the best result after each round, and the round rail underneath it.
+ *
+ * This replaces the old Rounds table. It answers one question at a glance — *is this run getting
+ * better?* — and it answers it the same way for a reader who cannot see it: the chart carries a
+ * one-sentence `aria-label`, and the same rounds are expandable below as a table.
+ *
+ * What the page may and may not decide:
+ *
+ *   - **Draw.** Slot geometry, where a value sits between the published axis bounds, which marker is
+ *     filled (the projection's `improving`), which candidate is which shape (the projection's
+ *     `shape`). That is placement, and it is the only arithmetic here — one division per mark.
+ *   - **Not derive.** No running maximum, no comparison of two results, no binning of "empty". The
+ *     cumulative series, the axis and the verdicts all arrive computed (`ladder` in the conclusion
+ *     view, `cumulative`/`verdict`/`shape` in the rounds view), so the step this page draws and the
+ *     one `dump` prints are the same number.
+ *
+ * The chart and the rail share one slot model: `n+1` slots (INIT, then one per round), whose width is
+ * `--reprise-slot`. The plot places its marks by that fraction and the rail divides the same width
+ * into the same number of equal cells, so the two cannot drift apart (spec §6.4).
+ */
+function renderLadder(roundsAnswer, conclusionAnswer) {
+  const root = document.getElementById('ladder')
+  root.replaceChildren(el('h2', { text: 'Best so far, round by round' }))
 
-  const rows = answer?.data
-  if (!Array.isArray(rows) || rows.length === 0) {
-    root.append(el('p', { class: 'empty', text: answer?.reason ?? 'no round has facts yet' }))
+  const rounds = roundsAnswer?.data
+  if (!Array.isArray(rounds) || rounds.length === 0) {
+    root.append(el('p', { class: 'empty', text: roundsAnswer?.reason ?? 'no round has facts yet' }))
     return
   }
 
-  const table = el('table', {}, [
-    el('thead', {}, [
-      el('tr', {}, ['round', 'improved', 'empty', 'best', 'candidates'].map((label) => el('th', { text: label }))),
-    ]),
-  ])
-  const body = el('tbody')
-  for (const entry of rows) {
-    const cells = [
-      el('td', { text: number(entry.round) }),
-      el('td', { text: entry.improving ? 'yes' : 'no' }),
-      el('td', { text: entry.empty ? 'yes' : 'no' }),
-      // `entry.best.metric` is the projection's published metric, not a guess: this cell used to read
-      // `undefined=0.7211` because the round best carried only a value.
-      el('td', { text: entry.best === undefined ? 'no comparable result' : measurement(entry.best.candidate_id, entry.best.metric, entry.best.value) }),
-      el(
-        'td',
-        {},
-        entry.candidates.map((candidate) =>
-          el('button', {
-            type: 'button',
-            text: candidate.candidate_id,
-            'aria-pressed': state.selected === candidate.candidate_id ? 'true' : 'false',
-            onclick: () => select(candidate.candidate_id),
-          }),
-        ),
-      ),
-    ]
-    body.append(el('tr', {}, cells))
+  const data = conclusionAnswer?.data
+  const ladder = data?.ladder ?? null
+  const metric = ladder?.metric ?? null
+  const axis = ladder?.axis ?? null
+  const baseline = ladder?.baseline ?? null
+  const best = data?.best ?? null
+
+  // One slot per round, plus the INIT slot the axis starts from.
+  const slots = rounds.length + 1
+  const slot = 100 / slots
+  const grid = el('div', {
+    class: 'ladder',
+    'data-slots': String(slots),
+    style: `--reprise-slot: ${slot.toFixed(6)}%`,
+  })
+
+  // The sentence the chart is read as. It says the same thing to a sighted reader and to a screen
+  // reader, and it is what the plot's role="img" carries, because a picture of a staircase is not
+  // accessible on its own.
+  const summary = ladderSentence({ rounds, best, baseline, metric })
+  root.append(el('p', { class: 'ladder-summary', text: summary }))
+
+  if (axis === null) {
+    // Nothing comparable: no axis, no plot, and the rail is what survives (spec §6.9). The chart is
+    // dropped rather than drawn empty — an empty frame reads as "no change", which is a different
+    // claim from "nothing was measured".
+    root.append(
+      el('p', { class: 'note', text: ladder?.axisAbsent ?? 'no comparable result yet, so there is no staircase to draw' }),
+    )
+  } else {
+    grid.append(
+      el('div', { class: 'ladder-axis' }, [axis.top, axis.middle, axis.bottom].map((bound) =>
+        el('span', { class: 'ladder-axis-label', text: fixed(bound) }),
+      )),
+      ladderPlot({ rounds, axis, baseline, slot, summary }),
+    )
   }
-  table.append(body)
-  root.append(table)
+
+  // The rail goes *inside* the ladder's grid, in the second row of the same second column as the
+  // plot: that is what makes a marker and the round under it share one slot width.
+  grid.append(rail({ rounds, metric, slots }))
+  root.append(grid, ladderKey({ baseline }), ladderTable({ rounds, metric }))
+}
+
+/**
+ * Where a value sits inside the plot, measured from the top in percent.
+ *
+ * Drawing geometry, not a derivation: the bounds are the projection's (`ladder.axis`), and this only
+ * answers "how far down the box" — the one division the page performs on a metric, which is why the
+ * axis is published instead of computed from the series. The guard is for a degenerate axis (the two
+ * published bounds equal), where the division would not be a number at all; it compares the axis to
+ * itself and never two results.
+ */
+function heightPercent(value, axis) {
+  const range = axis.top - axis.bottom
+  if (range === 0) return 50
+  return ((axis.top - value) / range) * 100
+}
+
+/** The plot: the INIT baseline, the steps, the risers, and one marker per round that produced a best. */
+function ladderPlot({ rounds, axis, baseline, slot, summary }) {
+  const plot = el('div', { class: 'ladder-plot', role: 'img', 'aria-label': summary })
+
+  if (baseline !== null) {
+    // A missing baseline is not zero and not the last best: the line is dropped, and the key says it
+    // was not recorded (spec §6.9). The page never invents a value to draw.
+    plot.append(
+      el('div', { class: 'ladder-baseline', style: `top: ${heightPercent(baseline.value, axis).toFixed(3)}%` }, [
+        el('span', {
+          class: 'ladder-baseline-label',
+          text: `${baseline.metric ?? 'baseline'} ${number(baseline.value)} · INIT frozen`,
+        }),
+      ]),
+    )
+  }
+
+  rounds.forEach((entry, index) => {
+    const cumulative = entry.cumulative
+    if (cumulative === null || cumulative === undefined) return
+    // Slot 0 is INIT, so round `index` sits in slot `index + 1`; a mark sits at the slot's centre.
+    const centre = (index + 1.5) * slot
+    const level = heightPercent(cumulative.value, axis)
+    const previous = rounds[index - 1]?.cumulative ?? null
+
+    // The step runs from this round's centre to the next slot's — and off the right edge after the
+    // last round, because the best then stands. `improving` is the projection's word for "this round
+    // is where it rose", so the riser needs no comparison of its own.
+    const tail = index === rounds.length - 1 ? slot / 2 : slot
+    plot.append(
+      el('span', {
+        class: 'ladder-step',
+        style: `left: ${centre.toFixed(3)}%; width: ${tail.toFixed(3)}%; top: ${level.toFixed(3)}%`,
+      }),
+    )
+
+    if (entry.improving === true && previous !== null) {
+      // A running best never falls, so the riser runs from this round's level down to the previous
+      // one: the height is one subtraction of two *placements*, and there is no "which is higher" to
+      // decide — the projection already decided it with `improving`.
+      const from = heightPercent(previous.value, axis)
+      plot.append(
+        el('span', {
+          class: 'ladder-riser',
+          style: `left: ${centre.toFixed(3)}%; top: ${level.toFixed(3)}%; height: ${(from - level).toFixed(3)}%`,
+        }),
+      )
+    }
+
+    // A round that produced no comparable number gets no marker: the step runs on at the value the
+    // run still held, and the gap at the slot is the fact (spec §6.4 — "只有真正抬高了最好成绩的那一轮
+    // 才填实标记；持平轮留空心；空轮在轨道上是可见的空位").
+    if (entry.empty !== true) {
+      plot.append(
+        el('span', {
+          class: 'ladder-marker',
+          'data-filled': entry.improving === true ? 'true' : 'false',
+          style: `left: ${centre.toFixed(3)}%; top: ${level.toFixed(3)}%`,
+        }),
+      )
+    }
+  })
+
+  return plot
+}
+
+/** The names a shape goes by. A shape nobody can name is a decoration, not a datum. */
+const SHAPE_WORDS = {
+  done: 'completed',
+  frontier: 'completed, on the frontier',
+  rejected: 'rejected',
+  'in-flight': 'in flight',
+  invalid: 'invalid artifact',
+}
+
+/** The words a round's verdict goes by — the projection decides which one applies. */
+const VERDICT_WORDS = { raised: 'raised', held: 'held', empty: 'empty round' }
+
+/** One candidate's accessible name: who it is, what shape it is, and what it scored if it scored. */
+function candidateLabel(candidate, metric) {
+  const shape = SHAPE_WORDS[candidate.shape] ?? candidate.shape
+  const score = candidate.value === null || candidate.value === undefined ? '' : ` · ${metric ?? 'value'} ${number(candidate.value)}`
+  return `${candidate.candidate_id} · ${shape}${score}`
+}
+
+/**
+ * The round rail: one cell per round, one square per candidate.
+ *
+ * The squares are real buttons — keyboard reachable, `aria-pressed` on the one the inspector is
+ * showing, and a click re-points the inspector. Shape carries the meaning (filled, hollow, hatched,
+ * struck through), never hue: two readers, one of them colour-blind, have to separate "rejected"
+ * from "in flight" from "invalid artifact" from an empty slot.
+ */
+function rail({ rounds, metric, slots }) {
+  const cells = [
+    el('div', { class: 'rail-cell', 'data-round': 'init' }, [
+      el('div', { class: 'rail-candidates', 'data-role': 'none' }),
+      el('span', { class: 'rail-round', text: 'INIT' }),
+      el('span', { class: 'rail-verdict', 'data-verdict': 'init', text: 'baseline' }),
+    ]),
+  ]
+
+  for (const entry of rounds) {
+    const candidates = entry.candidates ?? []
+    cells.push(
+      el('div', { class: 'rail-cell', 'data-round': String(entry.round), 'data-verdict': entry.verdict }, [
+        el(
+          'div',
+          { class: 'rail-candidates' },
+          candidates.map((candidate) =>
+            el('button', {
+              type: 'button',
+              class: 'rail-candidate',
+              'data-shape': candidate.shape,
+              'aria-pressed': state.selected === candidate.candidate_id ? 'true' : 'false',
+              'aria-label': candidateLabel(candidate, metric),
+              title: candidateLabel(candidate, metric),
+              onclick: () => select(candidate.candidate_id),
+            }),
+          ),
+        ),
+        el('span', { class: 'rail-round', text: `R${number(entry.round)}` }),
+        el('span', {
+          class: 'rail-verdict',
+          'data-verdict': entry.verdict,
+          text: VERDICT_WORDS[entry.verdict] ?? entry.verdict,
+        }),
+      ]),
+    )
+  }
+
+  // The rail shares the plot's slot model: `slots` cells across the same width, so the mark above a
+  // round and the round's own cell line up. The count is in the DOM (`data-slots`) so a probe can
+  // check the two views were built from the same number.
+  return el('div', { class: 'rail', 'data-slots': String(slots) }, cells)
+}
+
+/** The key: five shapes and the baseline line, because a shape nobody can name is not information. */
+function ladderKey({ baseline }) {
+  const key = el('p', { class: 'ladder-key' })
+  for (const [shape, word] of Object.entries(SHAPE_WORDS)) {
+    key.append(el('span', {}, [el('i', { class: 'rail-candidate', 'data-shape': shape }), word]))
+  }
+  key.append(
+    baseline === null
+      ? el('span', { text: 'baseline not recorded — no INIT line' })
+      : el('span', {}, [el('span', { class: 'ladder-key-line' }), `baseline ${number(baseline.value)} · INIT frozen`]),
+  )
+  return key
+}
+
+/** The text alternative: the same rounds as a table, because a chart cannot be read aloud. */
+function ladderTable({ rounds, metric }) {
+  const body = el('tbody')
+  for (const entry of rounds) {
+    body.append(
+      el('tr', {}, [
+        el('td', { text: `R${number(entry.round)}` }),
+        el('td', { text: VERDICT_WORDS[entry.verdict] ?? entry.verdict }),
+        el('td', {
+          text:
+            entry.best === null || entry.best === undefined
+              ? EM_DASH
+              : measurement(entry.best.candidate_id, entry.best.metric, entry.best.value),
+        }),
+        el('td', {
+          text:
+            entry.cumulative === null || entry.cumulative === undefined
+              ? EM_DASH
+              : measurement(entry.cumulative.candidate_id, entry.cumulative.metric, entry.cumulative.value),
+        }),
+        el('td', {
+          text: (entry.candidates ?? [])
+            .map((candidate) => `${candidate.candidate_id} ${candidate.verdict ?? candidate.status}`)
+            .join(' · '),
+        }),
+      ]),
+    )
+  }
+  return el('details', { class: 'ladder-aside' }, [
+    el('summary', { text: 'Read it as a table' }),
+    el('table', {}, [
+      el('thead', {}, [
+        el('tr', {}, ['round', 'what happened', 'best in the round', 'best after', 'candidates'].map((label) =>
+          el('th', { text: label }),
+        )),
+      ]),
+      body,
+    ]),
+    el('p', {
+      class: 'dim',
+      text: `Each round on the primary metric (${metric ?? 'none declared'}); a candidate is named with the gate's own four-state word when it has one.`,
+    }),
+  ])
+}
+
+/**
+ * The one sentence the staircase is worth. Same text for the plot's `aria-label` and for the visible
+ * summary: two renderings of one sentence is one claim, two sentences is two.
+ *
+ * It states only what the projection published — how many rounds there were, the best result and the
+ * round it was set in, and whether a baseline was recorded at all. "No baseline" is a sentence here,
+ * never a zero and never an em dash.
+ */
+function ladderSentence({ rounds, best, baseline, metric }) {
+  const what =
+    best === null || best === undefined
+      ? `None of the ${number(rounds.length)} rounds produced a comparable ${metric ?? 'result'} yet.`
+      : `${number(rounds.length)} rounds: the best ${metric ?? 'result'} is ${number(best.value)}, set in round ${number(best.round)}.`
+  const against =
+    baseline === null
+      ? ' No baseline was recorded, so there is no INIT line to measure against.'
+      : ` The INIT baseline, ${number(baseline.value)}, is the dashed line.`
+  return what + against
 }
 
 function renderCandidate(answer) {
@@ -658,7 +921,7 @@ async function refresh() {
     // The conclusion line first: the rest of the page is evidence for it.
     renderHeadline(conclusion)
     renderOverview(overview)
-    renderRounds(rounds)
+    renderLadder(rounds, conclusion)
     renderConclusion(conclusion)
     renderAudit()
 

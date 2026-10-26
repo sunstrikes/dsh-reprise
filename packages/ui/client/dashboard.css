@@ -1,0 +1,661 @@
+/**
+ * The dashboard's one stylesheet: the token block, and every component the page draws.
+ *
+ * Served by the host at `/api/reprise/dashboard.css` and linked by the page, so there is no build
+ * step between this file and the screen. The Web UI panel injects this same file in ticket #6: that
+ * is why every rule is scoped under `.reprise` and no bare element selector appears anywhere — a
+ * stylesheet that restyled every `table` and `button` in the host document could not be injected.
+ *
+ * Three rules hold this file together, and each has a test:
+ *
+ *   1. **No colour literal.** Not a hex triple, not `rgb()`, not `hsl()`. Colour comes from the
+ *      host's `--dsw-alias-*` tokens, falls back to CSS system colours (which follow the reader's OS
+ *      scheme and `color-scheme`), and is drawn with `currentColor` everywhere else. The scanner in
+ *      `packages/ui/test/client.test.js` reads this file, so the rule is mechanical.
+ *   2. **Shape carries meaning, not hue.** The five candidate squares and the four gate states are
+ *      told apart by fill, hatch, notch and stroke — all of which survive a greyscale screenshot.
+ *   3. **One slot grid.** The staircase and the round rail are two views of the same `n+1` slots
+ *      (INIT, then one per round): the plot places its marks at `--reprise-slot` fractions and the
+ *      rail divides the same width into the same number of equal cells. They cannot drift apart
+ *      without one of the two numbers changing.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* Surfaces and ink. The `--dsw-alias-*` names are the host's; the system colours are what a page
+     served on its own has instead of a theme, not a palette of ours. */
+  --reprise-bg: var(--dsw-alias-bg-base, Canvas);
+  --reprise-surface: var(--dsw-alias-bg-layer-1, Canvas);
+  --reprise-surface-raised: var(--dsw-alias-bg-layer-2, Canvas);
+  --reprise-text: var(--dsw-alias-label-primary, CanvasText);
+  --reprise-dim: var(--dsw-alias-label-secondary, GrayText);
+  --reprise-faint: var(--dsw-alias-label-tertiary, GrayText);
+  --reprise-border: var(--dsw-alias-border-l1, ButtonBorder);
+  --reprise-border-weak: var(--dsw-alias-border-l1, ButtonBorder);
+  --reprise-border-strong: var(--dsw-alias-border-l3, currentColor);
+  --reprise-accent: var(--dsw-alias-brand-primary, AccentColor);
+  --reprise-link: var(--dsw-alias-link, AccentColor);
+
+  /* Type. The host serves a system sans; identifiers and numbers are this design's display face. */
+  --reprise-font: var(--dsw-font-family, system-ui, -apple-system, 'PingFang SC', sans-serif);
+  --reprise-mono: var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace);
+
+  /* Spacing and corners: two radii only, and a 4/8/12/16/20/24/28 spacing scale (spec §5.3). */
+  --reprise-radius: var(--dsw-radius-md, 0.75rem);
+  --reprise-radius-sm: 0.375rem;
+  --reprise-gap: 0.75rem;
+  --reprise-gap-lg: 1.75rem;
+
+  /* The staircase's geometry. `--reprise-slot` is set per render: one slot's share of the plot
+     width, shared by the chart's marks and the rail's cells. */
+  --reprise-axis-width: 3.5rem;
+  --reprise-plot-height: 13rem;
+  --reprise-marker: 9px;
+  --reprise-square-width: 9px;
+  --reprise-square-height: 22px;
+}
+
+/* ------------------------------------------------------------------ the page's own chrome */
+
+.reprise {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 1.5rem;
+  background: var(--reprise-bg);
+  color: var(--reprise-text);
+  font-family: var(--reprise-font);
+  font-size: 0.875rem;
+  line-height: 1.55;
+}
+
+.reprise *,
+.reprise *::before,
+.reprise *::after {
+  box-sizing: border-box;
+}
+
+.reprise h1 {
+  margin: 0;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.reprise h2 {
+  margin: 0 0 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.reprise h3 {
+  margin: 1rem 0 0.375rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--reprise-faint);
+}
+
+.reprise p {
+  margin: 0.375rem 0 0;
+}
+
+.reprise a {
+  color: var(--reprise-link);
+}
+
+.reprise .masthead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--reprise-border-weak);
+}
+
+.reprise .masthead .meta {
+  min-width: 0;
+  color: var(--reprise-faint);
+  font-family: var(--reprise-mono);
+  font-size: 0.75rem;
+  /* A workspace path is one long unbroken token: it has to be allowed to break, or it sets the
+     page's minimum width and the 520px page scrolls sideways. */
+  overflow-wrap: anywhere;
+}
+
+.reprise .grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+  gap: var(--reprise-gap);
+  align-items: start;
+}
+
+.reprise .card {
+  padding: 0.875rem 1rem;
+  background: var(--reprise-surface);
+  border: 1px solid var(--reprise-border-weak);
+  border-radius: var(--reprise-radius);
+}
+
+.reprise table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--reprise-mono);
+  font-size: 0.71875rem;
+}
+
+.reprise th,
+.reprise td {
+  padding: 0.25rem 0.5rem 0.25rem 0;
+  border-bottom: 1px solid var(--reprise-border-weak);
+  text-align: left;
+  vertical-align: top;
+}
+
+.reprise th {
+  color: var(--reprise-faint);
+  font-weight: 500;
+}
+
+.reprise button {
+  padding: 0.125rem 0.375rem;
+  color: var(--reprise-text);
+  background: var(--reprise-surface-raised);
+  border: 1px solid var(--reprise-border);
+  border-radius: var(--reprise-radius-sm);
+  font-family: var(--reprise-mono);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.reprise button[aria-pressed='true'] {
+  border-color: var(--reprise-accent);
+}
+
+.reprise button:focus-visible,
+.reprise summary:focus-visible {
+  outline: 2px solid var(--reprise-link);
+  outline-offset: 1px;
+}
+
+.reprise ol,
+.reprise ul {
+  margin: 0;
+  padding-left: 1.125rem;
+}
+
+.reprise li {
+  margin: 0.125rem 0;
+}
+
+.reprise pre,
+.reprise code {
+  font-family: var(--reprise-mono);
+  font-size: 0.75rem;
+}
+
+.reprise pre {
+  overflow-x: auto;
+  margin: 0.375rem 0 0;
+  padding: 0.5rem;
+  border: 1px solid var(--reprise-border-weak);
+  border-radius: var(--reprise-radius-sm);
+  white-space: pre-wrap;
+}
+
+/* --------------------------------------------------------------- the conclusion line */
+
+.reprise .headline {
+  margin: 0 0 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--reprise-border-weak);
+}
+
+.reprise .headline-value {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.reprise .headline-number {
+  font-family: var(--reprise-mono);
+  font-size: 2.5rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.reprise .headline-unit {
+  color: var(--reprise-dim);
+  font-family: var(--reprise-mono);
+  font-size: 0.8125rem;
+}
+
+.reprise .headline-sentence,
+.reprise .headline-empty {
+  max-width: 60rem;
+  margin: 0.5rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.55;
+}
+
+.reprise .headline-empty {
+  color: var(--reprise-dim);
+}
+
+/* --------------------------------------------------------------------- small components */
+
+.reprise .stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+  gap: var(--reprise-gap);
+  margin: 0;
+}
+
+.reprise .stat dt {
+  color: var(--reprise-faint);
+  font-size: 0.6875rem;
+}
+
+.reprise .stat dd {
+  margin: 0.125rem 0 0;
+  font-family: var(--reprise-mono);
+  font-size: 0.9375rem;
+}
+
+/*
+ * The four gate states are told apart by their name and by the weight of their border, never by
+ * hue: `ok` / `missing` / `invalid` / `conflict` has to survive a greyscale screenshot, and
+ * `missing` (never judged) must never look like `invalid` (judged and refused).
+ */
+.reprise .badge {
+  display: inline-block;
+  padding: 0 0.375rem;
+  border: 1px solid var(--reprise-border);
+  border-radius: var(--reprise-radius-sm);
+  font-family: var(--reprise-mono);
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+}
+
+.reprise .badge[data-state='ok'],
+.reprise .badge[data-state='passed'] {
+  border-style: solid;
+}
+
+.reprise .badge[data-state='missing'] {
+  border-style: dashed;
+}
+
+.reprise .badge[data-state='invalid'],
+.reprise .badge[data-state='failed'],
+.reprise .badge[data-state='conflict'] {
+  border-width: 2px;
+  border-color: var(--reprise-border-strong);
+  font-weight: 600;
+}
+
+.reprise .badge[data-state='conflict'] {
+  box-shadow: inset 0 0 0 1px var(--reprise-surface);
+}
+
+.reprise .note {
+  margin: 0.5rem 0 0;
+  padding: 0.375rem 0.5rem;
+  color: var(--reprise-text);
+  border-left: 2px solid var(--reprise-border-strong);
+}
+
+.reprise .warning {
+  margin: 0.5rem 0 0;
+  padding: 0.375rem 0.5rem;
+  font-weight: 600;
+  color: var(--reprise-text);
+  border: 1px solid var(--reprise-border-strong);
+  border-left-width: 2px;
+  border-radius: var(--reprise-radius-sm);
+}
+
+.reprise .empty,
+.reprise .dim {
+  color: var(--reprise-dim);
+}
+
+.reprise .timeline {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.reprise .timeline li {
+  display: grid;
+  grid-template-columns: 4.5rem 1fr;
+  gap: 0.5rem;
+  padding: 0.125rem 0;
+}
+
+.reprise .timeline .seq {
+  color: var(--reprise-faint);
+}
+
+.reprise .calls {
+  padding-left: 0;
+  list-style: none;
+}
+
+.reprise .calls li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.375rem;
+}
+
+/* ================================================================== the staircase
+ *
+ * One slot grid, `n+1` wide: INIT, then one slot per round. `.ladder` is a two-column, two-row
+ * grid — the axis gutter and the plot on the first row, the same gutter and the rail on the
+ * second. `--reprise-slot` (set by the renderer) is one slot's share of the plot width; the chart's
+ * marks are placed with it, and the rail divides the identical width into `n+1` equal cells. Same
+ * number, two views: they cannot drift.
+ */
+
+.reprise .ladder {
+  display: grid;
+  grid-template-columns: var(--reprise-axis-width) minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 0;
+  row-gap: 0.25rem;
+}
+
+.reprise .ladder-summary {
+  margin: 0 0 0.75rem;
+  font-size: 0.8125rem;
+  color: var(--reprise-dim);
+}
+
+.reprise .ladder-summary strong {
+  color: var(--reprise-text);
+  font-family: var(--reprise-mono);
+  font-weight: 600;
+}
+
+.reprise .ladder-axis {
+  grid-column: 1;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  height: var(--reprise-plot-height);
+  padding-right: 0.5rem;
+  text-align: right;
+}
+
+/*
+ * Three labels, one width: `fixed()` pads them, so `0.7200` and `0.7023` are read as one scale
+ * rather than as two coarser quantities around a finer middle.
+ */
+.reprise .ladder-axis-label {
+  color: var(--reprise-faint);
+  font-family: var(--reprise-mono);
+  font-size: 0.65625rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.reprise .ladder-plot {
+  position: relative;
+  grid-column: 2;
+  grid-row: 1;
+  height: var(--reprise-plot-height);
+  overflow: hidden;
+}
+
+/* The INIT baseline: a dashed line across the full plot, one pixel, tertiary ink (spec §5.4). */
+.reprise .ladder-baseline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 1px dashed var(--reprise-faint);
+}
+
+.reprise .ladder-baseline-label {
+  position: absolute;
+  right: 0;
+  bottom: 2px;
+  padding-left: 0.5rem;
+  background: var(--reprise-surface);
+  color: var(--reprise-faint);
+  font-family: var(--reprise-mono);
+  font-size: 0.65625rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The step: a 2px ink line, axis-aligned — horizontal runs and vertical risers, never a curve. */
+.reprise .ladder-step {
+  position: absolute;
+  height: 2px;
+  background: currentColor;
+}
+
+.reprise .ladder-riser {
+  position: absolute;
+  width: 2px;
+  background: currentColor;
+}
+
+/*
+ * The marker: a 9px diamond. Filled only where a round actually raised the best result; hollow where
+ * it held. An empty round gets no marker at all — the absence is the fact, and it reads as a gap.
+ */
+.reprise .ladder-marker {
+  position: absolute;
+  width: var(--reprise-marker);
+  height: var(--reprise-marker);
+  border: 1.5px solid currentColor;
+  background: var(--reprise-surface);
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.reprise .ladder-marker[data-filled='true'] {
+  background: currentColor;
+}
+
+/* --------------------------------------------------------------------------- the rail */
+
+.reprise .rail {
+  display: flex;
+  grid-column: 2;
+  grid-row: 2;
+  align-items: stretch;
+}
+
+.reprise .rail-gutter {
+  grid-column: 1;
+  grid-row: 2;
+  color: var(--reprise-faint);
+  font-size: 0.625rem;
+  text-align: right;
+  padding: 0.25rem 0.5rem 0 0;
+}
+
+.reprise .rail-cell {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0.25rem 2px 0;
+  text-align: center;
+}
+
+.reprise .rail-candidates {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 3px;
+  min-height: var(--reprise-square-height);
+}
+
+.reprise .rail-round {
+  display: block;
+  color: var(--reprise-faint);
+  font-family: var(--reprise-mono);
+  font-size: 0.625rem;
+  line-height: 1.4;
+}
+
+/*
+ * The five shapes a candidate can be. Fill, hatch, notch and stroke — never hue — so a reader who
+ * cannot see colour still tells "rejected" from "in flight" from "invalid artifact":
+ *
+ *   done      solid ink
+ *   frontier  solid ink with a 3px notch cut out of the foot
+ *   rejected  hollow outline
+ *   in-flight diagonal hatch (the one texture in the design: committed, not settled)
+ *   invalid   hollow with one 2px strike through it (the artifact was there and did not comply)
+ */
+.reprise .rail-candidate {
+  display: inline-block;
+  width: var(--reprise-square-width);
+  height: var(--reprise-square-height);
+  padding: 0;
+  border-radius: 1px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.reprise .rail-candidate[data-shape='done'] {
+  border: 1.5px solid currentColor;
+  background: currentColor;
+}
+
+.reprise .rail-candidate[data-shape='frontier'] {
+  border: 1.5px solid currentColor;
+  background: currentColor;
+  box-shadow: inset 0 -3px 0 0 var(--reprise-surface);
+}
+
+.reprise .rail-candidate[data-shape='rejected'] {
+  border: 1.5px solid currentColor;
+  background: transparent;
+}
+
+.reprise .rail-candidate[data-shape='in-flight'] {
+  border: 1.5px solid currentColor;
+  background-image: repeating-linear-gradient(
+    45deg,
+    currentColor 0 1.5px,
+    transparent 1.5px 4px
+  );
+}
+
+.reprise .rail-candidate[data-shape='invalid'] {
+  border: 1.5px solid currentColor;
+  background-image: linear-gradient(
+    to top right,
+    transparent 44%,
+    currentColor 44% 56%,
+    transparent 56%
+  );
+}
+
+.reprise .rail-candidate[aria-pressed='true'] {
+  outline: 2px solid var(--reprise-accent);
+  outline-offset: 1px;
+}
+
+.reprise .rail-verdict {
+  display: block;
+  font-family: var(--reprise-mono);
+  font-size: 0.625rem;
+  line-height: 1.4;
+  color: var(--reprise-dim);
+}
+
+.reprise .rail-verdict[data-verdict='raised'] {
+  color: var(--reprise-text);
+  font-weight: 600;
+}
+
+.reprise .rail-verdict[data-verdict='empty'] {
+  color: var(--reprise-faint);
+  font-style: italic;
+}
+
+/* A key for the shapes and the baseline, because a shape nobody can name is not information. */
+.reprise .ladder-key {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.75rem 0 0;
+  color: var(--reprise-faint);
+  font-size: 0.625rem;
+}
+
+.reprise .ladder-key span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3125rem;
+}
+
+.reprise .ladder-key .rail-candidate {
+  cursor: default;
+}
+
+.reprise .ladder-key-line {
+  display: inline-block;
+  width: 1.25rem;
+  border-top: 1px dashed var(--reprise-faint);
+}
+
+/* The text alternative: a chart cannot be read aloud, so the same rounds are here as a table. */
+.reprise .ladder-aside {
+  margin: 0.875rem 0 0;
+  font-size: 0.75rem;
+}
+
+.reprise .ladder-aside summary {
+  color: var(--reprise-dim);
+  cursor: pointer;
+}
+
+/* Five narrow columns have to fit a 520px page: fixed layout plus wrapping cells, never a table
+   that sets the page's width. */
+.reprise .ladder-aside table {
+  table-layout: fixed;
+}
+
+.reprise .ladder-aside th,
+.reprise .ladder-aside td {
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------------------------ narrow */
+
+@media (max-width: 45rem) {
+  .reprise {
+    padding: 0.875rem;
+  }
+
+  .reprise .ladder {
+    --reprise-axis-width: 2.75rem;
+    --reprise-plot-height: 9.5rem;
+  }
+
+  .reprise .ladder-summary {
+    font-size: 0.75rem;
+  }
+
+  .reprise .ladder-baseline-label {
+    font-size: 0.59375rem;
+  }
+
+  .reprise .rail-round,
+  .reprise .rail-verdict {
+    font-size: 0.5625rem;
+  }
+}

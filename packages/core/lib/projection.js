@@ -289,21 +289,78 @@ export function overview(store, { config, executor, listing } = {}) {
 export function rounds(store, { config } = {}) {
   const rows = view(store, config)
   const byId = new Map(rows.candidates.map((row) => [row.candidate_id, row]))
-  return roundHistory(rows).map((entry) => ({
+  return roundSeries(roundHistory(rows)).map((entry) => ({
+    ...entry,
+    candidates: entry.candidates.map((candidateId) => {
+      const row = byId.get(candidateId)
+      const status = row?.status ?? 'active'
+      const onFrontier = row?.onFrontier ?? false
+      const verdict = verdictStatusOf(store.eventsFor(candidateId))
+      return {
+        candidate_id: candidateId,
+        status,
+        value: row?.vector?.[rows.contract.primary] ?? null,
+        onFrontier,
+        // The four-state name the gate reached, when it reached one. The rail draws the shape; the
+        // word travels with it so the coarse read never replaces the precise one.
+        verdict,
+        shape: shapeOf({ status, onFrontier, verdict }),
+      }
+    }),
+  }))
+}
+
+/**
+ * The fact that carries a candidate's four-state gate conclusion, when it has one.
+ *
+ * Two payloads can carry it — a `gate_result` (the gate ran and passed) and a `candidate_rejected`
+ * (the gate's refusal ended the candidate) — and the *last* one is the one that stands. One reader,
+ * because the candidate page prints this word and the round rail draws it as a shape; two readers
+ * would eventually disagree about which fact is the verdict.
+ */
+function verdictEventOf(events) {
+  const ordered = [...(events ?? [])].reverse()
+  return ordered.find((event) => FOUR_STATES.includes(event.payload?.status))
+}
+
+/** Just the name: `ok` / `missing` / `conflict` / `invalid`, or `null` if no gate concluded. */
+function verdictStatusOf(events) {
+  return verdictEventOf(events)?.payload?.status ?? null
+}
+
+/**
+ * The one square the rail draws for a candidate — five shapes, no hue.
+ *
+ * The map from facts to shapes lives here because it is a reading of facts: the row's status, the
+ * frontier's membership, and the four-state name of the gate that stopped it. `invalid` is its own
+ * shape and not "rejected" with a footnote — an artifact that arrived and broke its schema is a
+ * different thing to look at than a candidate that was refused, which is the whole point of the
+ * four-state vocabulary.
+ */
+function shapeOf({ status, onFrontier, verdict }) {
+  if (status === 'rejected') return verdict === 'invalid' ? 'invalid' : 'rejected'
+  if (status === 'done') return onFrontier ? 'frontier' : 'done'
+  return 'in-flight'
+}
+
+/**
+ * The step series: one row per round, ready to be drawn and read out.
+ *
+ * `cumulative` is the best result standing after the round, and `verdict` is the word for what the
+ * round did to it (`raised` / `held` / `empty`). Both are decided in `roundHistory` and published
+ * here in one shape, so the staircase, the rail and the table under them cannot say three things.
+ */
+function roundSeries(history) {
+  return history.map((entry) => ({
     round: entry.round,
     complete: entry.complete,
     empty: entry.empty,
     improving: entry.improving,
-    best: entry.best,
-    candidates: entry.candidates.map((candidateId) => {
-      const row = byId.get(candidateId)
-      return {
-        candidate_id: candidateId,
-        status: row?.status ?? 'active',
-        value: row?.vector?.[rows.contract.primary],
-        onFrontier: row?.onFrontier ?? false,
-      }
-    }),
+    verdict: entry.improving ? 'raised' : entry.empty ? 'empty' : 'held',
+    best: entry.best ?? null,
+    cumulative: entry.cumulative ?? null,
+    // The candidate ids, in the order the rail draws them.
+    candidates: entry.candidates,
   }))
 }
 
@@ -494,7 +551,7 @@ export function candidateDetail(store, candidateId, { config, artifacts } = {}) 
   // justified. Reading only the last one loses the conclusion whenever the terminal event follows it
   // — which is the normal case, and exactly what makes a dump useless for "why".
   const ordered = [...events].reverse()
-  const verdictEvent = ordered.find((event) => FOUR_STATES.includes(event.payload?.status))
+  const verdictEvent = verdictEventOf(events)
   const terminalEvent = ordered.find(
     (event) => event.payload?.reject_reason !== undefined || event.payload?.blocking_message !== undefined,
   )
@@ -680,6 +737,69 @@ function frozenBaseline(store) {
 }
 
 /**
+ * The frozen baseline, as this run's primary metric may read it — or the reason it may not.
+ *
+ * Two renderers ask "is there a baseline?" (the conclusion sentence, and the staircase's INIT line),
+ * and they must never answer differently: a page that says "beaten the baseline" over a chart with no
+ * baseline line is the kind of contradiction this whole view exists to prevent. `absent` is a
+ * sentence rather than a null because "no baseline" is a state the page has to say out loud.
+ */
+function standingBaseline(store, metric) {
+  const frozen = frozenBaseline(store)
+  if (frozen === undefined) {
+    return { baseline: null, absent: 'this run recorded no frozen baseline, so there is nothing to compare against' }
+  }
+  if (frozen.metric !== null && metric !== null && frozen.metric !== metric) {
+    return { baseline: null, absent: `the frozen baseline records ${frozen.metric}, not ${metric}` }
+  }
+  return { baseline: { value: frozen.value, metric: frozen.metric ?? metric }, absent: null }
+}
+
+/**
+ * The frame the staircase draws in: the y-axis, and the baseline line across it (spec §6.4, §6.9).
+ *
+ * The axis spans every comparable candidate value *and* the baseline — not the cumulative series
+ * alone — so every mark the chart can draw is inside the frame, and it pads 18% at each end so no
+ * step sits on the edge. `null` is a state, not a zero: with nothing comparable there is no axis, and
+ * the page draws the rail alone (§6.9). A flat run (every value identical) is padded by 1% of the
+ * value instead, because a zero-height range would collapse the plot and divide by zero downstream.
+ */
+function ladderFrame(store, { rows, history }) {
+  const metric = rows.contract.primary ?? null
+  const { baseline, absent } = standingBaseline(store, metric)
+  const values = rows.candidates
+    .filter((row) => row.complete && typeof row.vector?.[metric] === 'number')
+    .map((row) => row.vector[metric])
+  if (baseline !== null) values.push(baseline.value)
+
+  let axis = null
+  let axisAbsent = null
+  if (metric === null) {
+    axisAbsent = 'this run recorded no metric contract, so nothing can be ranked'
+  } else if (values.length === 0) {
+    axisAbsent = `no comparable ${metric} has been measured yet, so there is nothing to plot`
+  } else {
+    const round = (value) => Number(value.toFixed(12))
+    const min = Math.min(...values)
+    const max = Math.max(...values)
+    const spread = max - min
+    const pad = spread === 0 ? (Math.abs(max) > 0 ? Math.abs(max) * 0.01 : 1) : spread * 0.18
+    const top = round(max + pad)
+    const bottom = round(min - pad)
+    axis = { top, middle: round((top + bottom) / 2), bottom }
+  }
+
+  return {
+    metric,
+    baseline,
+    baselineAbsent: absent,
+    axis,
+    axisAbsent,
+    rounds: roundSeries(history),
+  }
+}
+
+/**
  * The number the domain published for one metric — read out of the run's own metric contract.
  *
  * This is the "what they published" half of the conclusion line, and it is deliberately *not* a
@@ -766,10 +886,10 @@ function comparison(store, { workspace, config, rows, best, against }) {
   }
 
   const measured = { candidate_id: best.candidate_id, round: best.round ?? null, value: best.value }
-  const baseline = frozenBaseline(store)
+  const baseline = standingBaseline(store, metric).baseline
   const parentId = against?.parent ?? null
   let group
-  if (baseline !== undefined && (baseline.metric === null || baseline.metric === metric)) {
+  if (baseline !== null) {
     group = { kind: 'baseline', candidate_id: parentId, value: baseline.value }
   } else if (against?.best !== undefined) {
     group = { kind: 'previous-best', candidate_id: against.best.candidate_id ?? null, value: against.best.value }
@@ -830,6 +950,10 @@ export function conclusion(store, { config } = {}) {
     best,
     // What we measured, against what, and against what the domain published — see `comparison()`.
     comparison: comparison(store, { workspace, config, rows, best, against }),
+    // The staircase's own frame: where the INIT line sits, the axis it spans, and the step series
+    // between them. Published as one block so the chart, its axis labels and its text alternative are
+    // read from a single account of the run.
+    ladder: ladderFrame(store, { rows, history }),
     objectives: rows.contract.objectives,
     metricContract: { ok: rows.contract.ok, status: rows.contract.status, error: rows.contract.error },
     frontier: { members: rows.frontier, size: rows.frontier.length },

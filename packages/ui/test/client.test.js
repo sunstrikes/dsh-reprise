@@ -26,10 +26,24 @@ const CLIENT_DIR = join(dirname(dirname(fileURLToPath(import.meta.url))), 'clien
 const read = (name) => readFileSync(join(CLIENT_DIR, name), 'utf8')
 
 /**
+ * A client file with its comments removed, for the scans that are about what the file *does*.
+ *
+ * A comment paints nothing and compiles to nothing, so scanning prose only forbids explaining a rule
+ * — the stylesheet has to be able to say "not a hex triple, not rgb(), not hsl()" in the very header
+ * that explains the colour constraint.
+ */
+const withoutComments = (source, name) =>
+  name.endsWith('.html') ? source.replace(/<!--[\s\S]*?-->/g, '') : source.replace(/\/\*[\s\S]*?\*\//g, '')
+
+/** One client file's code, comments stripped. */
+const code = (name) => withoutComments(read(name), name)
+
+
+/**
  * Every file the browser loads from `client/`. Written out rather than read from `ASSETS`: a test that
  * scans the list it is asserting proves nothing about a file nobody added to the list.
  */
-const CLIENT_MODULES = ['index.html', 'dashboard.js', 'format.js']
+const CLIENT_MODULES = ['index.html', 'dashboard.js', 'format.js', 'dashboard.css']
 
 test('the page and its modules are served by the host at the asset routes', async () => {
   const connection = fakeConnection()
@@ -51,6 +65,15 @@ test('the page and its modules are served by the host at the asset routes', asyn
     assert.equal(format.status, 200)
     assert.match(format.contentType, /javascript/)
     assert.match(format.text, /export function clock/, 'the one formatting source, importable by both clients')
+
+    // The stylesheet, at the URL the page's `<link href="./dashboard.css">` resolves to. It is a
+    // separate file (not an inline `<style>`) because the Web UI panel injects this exact file in
+    // ticket #6, and two copies of a token block is how two clients end up with two palettes.
+    const stylesheet = await connection.dispatch('GET', '/api/reprise/dashboard.css')
+    assert.equal(stylesheet.status, 200)
+    assert.match(stylesheet.contentType, /text\/css/)
+    assert.match(stylesheet.text, /--reprise-/, 'the shared token block lives here')
+    assert.match(stylesheet.text, /\.ladder\b/, 'and the staircase it was added for')
   } finally {
     dispose()
   }
@@ -69,19 +92,35 @@ test('the module reads all four views and follows the incremental cursor instead
 test('no colour is hard-coded: the page follows the host theme tokens and nothing else', () => {
   // Every file the browser loads is scanned, including the formatting module: a shared module that
   // carried a colour would put the palette back on both clients at once.
+  //
+  // Comments are stripped first (see `code()`): a scan that reads prose would forbid explaining the
+  // rule it enforces.
   for (const name of CLIENT_MODULES) {
-    const source = read(name)
+    const source = code(name)
     assert.doesNotMatch(source, /#[0-9a-fA-F]{3,8}\b/, `${name} must not carry a hex colour`)
     assert.doesNotMatch(source, /\brgba?\(/, `${name} must not carry an rgb() colour`)
     assert.doesNotMatch(source, /\bhsla?\(/, `${name} must not carry an hsl() colour`)
+    // A named colour is a colour too, and `currentColor` is the one we do want: it is the ink the
+    // host's theme chose, which is what makes the shapes survive a light/dark flip.
+    assert.doesNotMatch(
+      source,
+      /:\s*(red|green|blue|black|white|gray|grey|orange|yellow|amber)\b/,
+      `${name} must not carry a named colour`,
+    )
   }
 
-  const page = read('index.html')
-  assert.match(page, /--dsw-alias-/, 'it paints through the host theme tokens')
+  const stylesheet = read('dashboard.css')
+  assert.match(stylesheet, /--dsw-alias-/, 'it paints through the host theme tokens')
   for (const token of ['--dsw-alias-bg-base', '--dsw-alias-label-primary', '--dsw-alias-border-l1']) {
-    assert.ok(page.includes(token), `the page consumes ${token}`)
+    assert.ok(stylesheet.includes(token), `the page consumes ${token}`)
   }
-  assert.match(page, /color-scheme:\s*light dark/, 'and falls back to the OS scheme (system colours) only when no host token is present')
+  assert.match(stylesheet, /color-scheme:\s*light dark/, 'and falls back to the OS scheme (system colours) only when no host token is present')
+
+  // The page paints from that one file and from nothing else: no inline `<style>`, and every rule in
+  // the stylesheet scoped so the panel can inject it into the host document without repainting it.
+  const page = code('index.html')
+  assert.match(page, /<link rel="stylesheet" href="\.\/dashboard\.css"\s*\/>/, 'the page links the shared stylesheet')
+  assert.doesNotMatch(page, /<style/, 'and carries no styles of its own — one file, two clients')
 })
 
 test('the page states the read-only contract it renders under', () => {
@@ -129,7 +168,7 @@ test('the severity the page branches on is the one the producer actually emits',
   }
 
   // A class the stylesheet does not define is a class that cannot make a warning look like one.
-  assert.match(read('index.html'), /\.warning\s*\{/, 'the page defines the class it puts on a warning')
+  assert.match(read('dashboard.css'), /\.warning\s*\{/, 'the stylesheet defines the class it puts on a warning')
 })
 
 test('the page draws the four observability panels, because a value nobody renders is not a panel', () => {
@@ -162,9 +201,10 @@ test('the page draws the four observability panels, because a value nobody rende
 
   const page = read('index.html')
   assert.match(page, /id="audit"/, 'the page has a place for the audit panel')
-  assert.match(page, /\.badge\[data-state='missing'\]/, 'and a style that tells "missing" apart from "failed"')
-  assert.match(page, /\.badge\[data-state='failed'\]/)
-  assert.match(page, /\.calls\s*\{/, 'and a style for the call list')
+  const stylesheet = read('dashboard.css')
+  assert.match(stylesheet, /\.badge\[data-state='missing'\]/, 'and a style that tells "missing" apart from "failed"')
+  assert.match(stylesheet, /\.badge\[data-state='failed'\]/)
+  assert.match(stylesheet, /\.calls\s*\{/, 'and a style for the call list')
 })
 
 // --------------------------------------------------------------- the conclusion line
@@ -174,7 +214,7 @@ test('the conclusion line is the first thing on the page, not the middle of the 
   const headline = page.indexOf('id="headline"')
   assert.ok(headline > 0, 'the page has a place for the conclusion line')
   assert.ok(headline < page.indexOf('id="overview"'), 'and it is above every card — the first screen decides whether the run is worth believing')
-  assert.match(page, /\.headline-number\s*\{/, 'the best result gets a size of its own, not a cell in a stats grid')
+  assert.match(read('dashboard.css'), /\.headline-number\s*\{/, 'the best result gets a size of its own, not a cell in a stats grid')
 })
 
 test('the conclusion line reads the comparison block the projection publishes, and does no arithmetic of its own', () => {
@@ -215,4 +255,117 @@ test('the rounds table and the fact stream print what they mean: a metric, and a
   assert.doesNotMatch(source, /text: `\$\{event\.wall_clock_ms\}`/, 'and never the raw milliseconds')
   // One formatting path for every instant: no renderer formats a date itself.
   assert.doesNotMatch(source, /toISOString|toLocaleTimeString|toTimeString/, 'instants go through format.js, not through Date')
+})
+
+// ------------------------------------------------- the staircase and the round rail (ticket #3)
+
+test('the staircase is drawn from the published series: the page never accumulates a best of its own', () => {
+  const source = read('dashboard.js')
+
+  // Every number the chart places comes from the projection: the axis, the baseline, the running best
+  // per round, and the flag that says which round raised it.
+  assert.match(source, /ladder\?\.axis|data\?\.ladder/, 'the axis is read from the conclusion view')
+  assert.match(source, /ladder\.baseline|baseline\.value/, 'and so is the baseline line')
+  assert.match(source, /entry\.cumulative/, 'the step series is the projection\'s cumulative best')
+  assert.match(source, /entry\.improving/, 'and "this round raised it" is a published flag')
+
+  // A running maximum in the renderer would be a second derivation of the same number, and the first
+  // thing to disagree with `dump`. Reductions over a series are how that starts.
+  assert.doesNotMatch(source, /Math\.(max|min|abs)\(\.\.\./, 'no reduction over a series in the page')
+  assert.doesNotMatch(source, /\.reduce\(/, 'and no fold that could accumulate a best')
+  assert.doesNotMatch(source, /\.value\s*[<>]|\.value\s*[<>]=?\s*[\w.]*\.value/, 'two results are never compared here — the projection decides which is better')
+})
+
+test('each candidate gets the shape the projection chose, and the five shapes are told apart without hue', () => {
+  const source = read('dashboard.js')
+  const css = read('dashboard.css')
+
+  // The rail is made of real buttons: keyboard reachable, `aria-pressed` for the one the inspector is
+  // showing, and a click that re-points the inspector.
+  assert.match(source, /class: 'rail-candidate'/, 'a candidate is a button with a class of its own')
+  assert.match(source, /'data-shape': candidate\.shape/, 'the shape is the projection\'s decision, not the page\'s')
+  assert.match(source, /'aria-pressed'/, 'the selected candidate says so')
+  assert.match(source, /onclick: \(\) => select\(candidate\.candidate_id\)/, 'and clicking it moves the inspector')
+
+  // The five shapes of spec §6.5, each a rule in the stylesheet. `currentColor` and gradients over it
+  // are the whole palette here: a shape has to survive a greyscale screenshot.
+  for (const shape of ['done', 'frontier', 'rejected', 'in-flight', 'invalid']) {
+    assert.ok(
+      css.includes(`.rail-candidate[data-shape='${shape}']`),
+      `the stylesheet draws the "${shape}" square`,
+    )
+  }
+  assert.match(css, /box-shadow: inset 0 -3px 0 0 var\(--reprise-surface\)/, 'the frontier square carries a notch the others do not')
+  assert.match(css, /repeating-linear-gradient\(\s*45deg,\s*currentColor/, 'in-flight is a hatch — a texture, not a hue')
+  assert.match(css, /linear-gradient\(\s*to top right,\s*transparent 44%,\s*currentColor/, 'invalid is struck through, which is not a hatch and not a hollow box')
+})
+
+test('the chart and the rail are laid out from one slot count, so a mark cannot drift from its round', () => {
+  const source = read('dashboard.js')
+  const css = read('dashboard.css')
+
+  // One slot per round plus INIT, computed once and handed to both views as `--reprise-slot`.
+  assert.equal(
+    [...code('dashboard.js').matchAll(/--reprise-slot/g)].length,
+    1,
+    'the slot width is written once — a second copy is a second scale',
+  )
+  assert.match(source, /rounds\.length \+ 1/, 'the slot count is the number of rounds plus the INIT slot')
+  assert.match(source, /grid\.append\(rail\(/, 'the rail is placed inside the staircase\'s own grid')
+
+  // Both live in the grid's second column: the same left edge, the same width, the same division.
+  assert.match(css, /\.ladder-plot\s*\{[^}]*grid-column: 2;/, 'the plot starts where the axis gutter ends')
+  assert.match(css, /\.rail\s*\{[^}]*grid-column: 2;/, 'and the rail starts at the same place')
+  assert.match(css, /\.rail-cell\s*\{[^}]*flex: 1 1 0;/, 'the cells divide that width into equal slots')
+})
+
+test('the staircase is readable without being seen: a sentence, a role, and the rounds as a table', () => {
+  const source = read('dashboard.js')
+
+  assert.match(source, /role: 'img'/, 'the plot is an image to a screen reader')
+  assert.match(source, /'aria-label': summary/, 'carrying the one sentence that says what it shows')
+  assert.match(source, /ladder-summary/, 'and the same sentence is on screen, not only on the image')
+  // The rail replaces the old Rounds table, so the table moves under `<details>` — a chart cannot be
+  // read aloud, and a reader who wants the numbers should not have to ask for a screenshot.
+  assert.match(source, /el\('details'/, 'the per-round table is expandable')
+  assert.match(source, /Read it as a table/, 'and says what it is for')
+  assert.match(source, /entry\.best\.metric/, 'it prints the round best with its metric')
+  assert.match(source, /candidate\.verdict \?\? candidate\.status/, 'and names each candidate with the four-state word it has')
+})
+
+test('the chart says what is missing instead of drawing a zero: no axis, no baseline', () => {
+  const source = read('dashboard.js')
+
+  // Spec §6.9: no comparable result → no axis, and the page says why rather than drawing an empty
+  // frame; no recorded baseline → no line, and the key says it was not recorded. `0` appears in
+  // neither place, because a zero baseline is a number somebody would act on.
+  assert.match(source, /axis === null/, 'an absent axis is a state the page branches on')
+  assert.match(source, /ladder\?\.axisAbsent/, 'with the projection\'s own sentence for it')
+  assert.match(source, /baseline === null/, 'and so is an absent baseline')
+  assert.match(source, /baseline not recorded/, 'which the key spells out in words')
+  assert.doesNotMatch(source, /baseline[^\n]*\?\?\s*0/, 'a missing baseline is never defaulted to zero')
+})
+
+test('the stylesheet is scoped, so the panel can inject it without repainting the host document', () => {
+  // Ticket #6 injects this file verbatim into the Web UI panel. A bare `table`, `button` or `body`
+  // rule would restyle the host's own chrome, which is why every rule is scoped under `.reprise`
+  // (or is the `:root` token block, which only declares `--reprise-*` custom properties).
+  const css = read('dashboard.css').replace(/\/\*[\s\S]*?\*\//g, '')
+  const selectors = []
+  for (const match of css.matchAll(/([^{}]+)\{/g)) {
+    for (const part of match[1].split(',')) {
+      const selector = part.trim()
+      if (selector === '' || selector.startsWith('@')) continue
+      selectors.push(selector)
+    }
+  }
+  assert.ok(selectors.length > 40, 'the scan found the stylesheet, not an empty file')
+  for (const selector of selectors) {
+    assert.match(selector, /^(\.reprise\b|:root$)/, `"${selector}" is not scoped under .reprise`)
+  }
+  // And the tokens it declares are ours, so injecting them onto the host's `:root` collides with
+  // nothing the host already defines.
+  for (const match of read('dashboard.css').matchAll(/^\s+(--[a-z0-9-]+):/gm)) {
+    assert.match(match[1], /^--reprise-/, `${match[1]} is not a --reprise-* token`)
+  }
 })

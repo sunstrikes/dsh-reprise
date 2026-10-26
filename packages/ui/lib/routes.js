@@ -146,11 +146,16 @@ export const ROUTES = [
  * `format.js` sits beside `dashboard.js` on purpose: the page imports it as `./format.js`, which the
  * browser resolves against the module's own URL, so the two files are one unit that cannot be served
  * out of step. The Web UI panel imports the same URL later (spec §9.1) — one formatter, two clients.
+ *
+ * `dashboard.css` is here for the same reason. It holds the `--reprise-*` token block and the
+ * component styles as one file with no page-specific glue, so ticket #6's panel injects it verbatim
+ * and the two surfaces cannot drift into two palettes.
  */
 export const ASSETS = [
   { path: '/api/reprise/page', file: 'index.html', contentType: 'text/html; charset=utf-8' },
   { path: '/api/reprise/dashboard.js', file: 'dashboard.js', contentType: 'text/javascript; charset=utf-8' },
   { path: '/api/reprise/format.js', file: 'format.js', contentType: 'text/javascript; charset=utf-8' },
+  { path: '/api/reprise/dashboard.css', file: 'dashboard.css', contentType: 'text/css; charset=utf-8' },
 ]
 
 /** `?after=…&candidate=…` → a plain object; absent parameters stay absent rather than null. */
