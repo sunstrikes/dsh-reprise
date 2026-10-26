@@ -31,6 +31,7 @@ import {
   modelCall,
   modelCalls,
   overview,
+  searchTree,
   summariseEvent,
 } from '../projection.js'
 import { ranking, rebuildRanking } from '../ranking.js'
@@ -281,6 +282,93 @@ function codeBaseLines(store) {
     lines.push(`  ${pad('failed', 11)}${failed.candidate_id}: ${failed.message}  (${iso(failed.at_ms)})`)
   }
   return lines
+}
+
+/** The word for why a branch ends, in `dump`'s voice: the same kinds the page draws. */
+function continuationWords(node, tree) {
+  const continuation = node.continuation ?? { kind: 'unknown' }
+  const parents = `${continuation.slots ?? '?'} parent(s)`
+  const rotation =
+    continuation.offset === null || continuation.offset === undefined
+      ? ''
+      : `, ${continuation.axis ?? 'an axis'} led, offset ${continuation.offset}`
+  switch (continuation.kind) {
+    case 'continued':
+      return `continued -> ${node.children.join(', ')}`
+    case 'rejected':
+      return `rejected at ${node.rejection?.phase ?? 'a gate'}: ${node.rejection?.message ?? 'no message recorded'}`
+    case 'in-flight':
+      return 'in flight — it may still become a parent'
+    case 'passed-over':
+      return `passed over in round ${continuation.round} (${parents}${rotation})`
+    case 'roster-unused':
+      return `named for round ${continuation.round}, and that round created fewer candidates than slots`
+    case 'off-frontier':
+      return `not on round ${continuation.round}'s frontier`
+    case 'no-roster':
+      return `round ${continuation.round} recorded no parent roster`
+    case 'no-later-round':
+      return tree.stop?.stopped === true ? `no later round — the run stopped (${tree.stop.rule ?? 'recorded rule'})` : 'no later round yet'
+    case 'root':
+      return 'frozen reference point'
+    default:
+      return ''
+  }
+}
+
+/**
+ * The tree page: the search as a lineage, one line per candidate, each with the reason its branch ends.
+ *
+ * The same three questions the `--candidate` page answers for one candidate, asked of the whole run:
+ * who was branched from whom, which branch the next round carried, and why the others were left
+ * behind. It is rendered from `searchTree()`, which the page reads too — so "passed over in round 2"
+ * reads the same in a terminal and on screen, and a disagreement is a bug in one derivation rather
+ * than in two.
+ */
+export function renderTreeDump(store, { config } = {}) {
+  const tree = searchTree(store, { config })
+  const metric = tree.metric ?? 'value'
+  const lines = [`workspace  ${store.path}`]
+  lines.push(`tree       ${tree.rounds.length} round(s), ${tree.nodes.length} candidate(s), ${tree.edges.length} edge(s)`)
+  lines.push(
+    `baseline   ${
+      tree.baseline.value === null
+        ? 'not recorded — nothing to measure a candidate against'
+        : `${metric}=${tree.baseline.value}`
+    }`,
+  )
+
+  const byId = new Map([[tree.baseline.candidate_id, tree.baseline], ...tree.nodes.map((node) => [node.candidate_id, node])])
+  const describe = (node) =>
+    `${pad(node.shape ?? 'baseline', 10)}${node.value === null ? '' : `${metric}=${node.value}  `}${continuationWords(node, tree)}`
+
+  const printed = new Set()
+  const print = (node, prefix, last) => {
+    printed.add(node.candidate_id)
+    lines.push(`${prefix}${last ? '└─ ' : '├─ '}${pad(node.candidate_id, 10)}${describe(node)}`)
+    const children = node.children.map((id) => byId.get(id)).filter((child) => child !== undefined)
+    children.forEach((child, index) => print(child, prefix + (last ? '   ' : '│  '), index === children.length - 1))
+  }
+
+  const roots = tree.baseline.children.map((id) => byId.get(id)).filter((node) => node !== undefined)
+  roots.forEach((node, index) => print(node, '', index === roots.length - 1))
+
+  // Every candidate the walk did not reach, with the reason it has no line of its own: no parent
+  // recorded (a person proposed it, or the run predates parent selection), or a parent id with no
+  // facts behind it. Both are printed rather than dropped — a header that counts three candidates
+  // over a tree that shows two is a wrong answer to the question this page exists for.
+  const unreached = tree.nodes.filter((node) => !printed.has(node.candidate_id))
+  if (unreached.length > 0) {
+    lines.push('', 'outside the tree')
+    for (const node of unreached) {
+      const why = node.parent === null ? 'no parent recorded' : `parent ${node.parent} has no facts of its own`
+      lines.push(`  ${pad(node.candidate_id, 10)}${describe(node)}  (${why})`)
+    }
+  }
+  // The orphan is already named by the projection's own note, printed below: a second sentence here
+  // would be the same finding twice, and the two could drift.
+  for (const note of tree.notes) lines.push('', `note       ${note}`)
+  return lines.join('\n')
 }
 
 /**
@@ -539,16 +627,17 @@ export function runDump(argv) {
   const rebuild = argv.includes('--rebuild')
   const configPath = get('--config')
   const workspacePage = argv.includes('--overview')
+  const treePage = argv.includes('--tree')
   const calls = argv.includes('--calls')
   const callRef = get('--call')
   const callSite = get('--site')
 
-  if (candidateId === undefined && !rebuild && !workspacePage && !calls && callRef === undefined) {
+  if (candidateId === undefined && !rebuild && !workspacePage && !treePage && !calls && callRef === undefined) {
     return {
       code: 2,
       output:
         'usage: dump --candidate <id> [--workspace <dir>] [--config <file>] [--rebuild]\n' +
-        '       dump --workspace <dir> --overview | --rebuild [--config <file>]\n' +
+        '       dump --workspace <dir> --overview | --tree | --rebuild [--config <file>]\n' +
         '       dump --workspace <dir> --calls [--site <call-site>]\n' +
         '       dump --workspace <dir> --call <model_call:site:subject[:ref]>',
     }
@@ -565,6 +654,7 @@ export function runDump(argv) {
 
     const sections = []
     if (workspacePage) sections.push(renderWorkspaceDump(store, { config }))
+    if (treePage) sections.push(renderTreeDump(store, { config }))
     if (candidateId !== undefined) sections.push(renderDump(store, candidateId, { config }))
     if (calls) sections.push(renderCallsDump(store, { callSite, config }))
     if (callRef !== undefined) sections.push(renderCallDump(store, callRef))

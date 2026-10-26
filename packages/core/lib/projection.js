@@ -700,6 +700,58 @@ function phasePathOf({ events, state, status, gates }) {
 }
 
 /**
+ * Why a candidate stopped, when it stopped: the four-state conclusion and the terminal event that
+ * justified it, read as one answer.
+ *
+ * The verdict and the terminal event are two facts, and reading only the last one loses the
+ * conclusion whenever the terminal event follows it — which is the normal case, and exactly what
+ * makes a dump useless for "why". Two readers ask this question (the candidate inspector and the
+ * search tree's rejected node), so it is one function: two copies would be two answers about one
+ * stop.
+ *
+ * "Why it stopped" is a question only a candidate that stopped answers. `verdictEventOf` is the last
+ * four-state fact, and a gate that *passed* records one too — so without the `stopped` guard a
+ * healthy candidate reported a reason it had never given, naming the phase whose gate it had just
+ * cleared. A stop is a `candidate_rejected` fact (or a state row that already says REJECTED);
+ * anything else that happens to carry a four-state word is evidence, not a decision.
+ */
+function rejectionOf(events, state) {
+  const ordered = [...events].reverse()
+  const verdictEvent = verdictEventOf(events)
+  const terminalEvent = ordered.find(
+    (event) => event.payload?.reject_reason !== undefined || event.payload?.blocking_message !== undefined,
+  )
+  const stopping = verdictEvent ?? terminalEvent
+  const stopped = events.some((event) => event.event_type === 'candidate_rejected') || state?.phase === 'REJECTED'
+  if (stopping === undefined || !stopped) return undefined
+  return {
+    phase: verdictEvent?.payload?.phase ?? terminalEvent?.payload?.phase ?? state?.phase,
+    status: verdictEvent?.payload?.status,
+    message:
+      verdictEvent?.payload?.blocking_message ??
+      verdictEvent?.payload?.message ??
+      terminalEvent?.payload?.blocking_message ??
+      terminalEvent?.payload?.reject_reason ??
+      '',
+    reason: terminalEvent?.payload?.reject_reason ?? terminalEvent?.payload?.blocking_message,
+    seq: stopping.local_seq,
+    eventType: stopping.event_type,
+    atMs: stopping.wall_clock_ms,
+    artifact: verdictEvent?.payload?.artifact,
+    // The terminal event matters separately only when it is not the verdict itself — the normal
+    // case, and the one where a reader would otherwise take the message for the whole decision.
+    terminal:
+      terminalEvent === undefined || terminalEvent === stopping
+        ? undefined
+        : {
+            seq: terminalEvent.local_seq,
+            eventType: terminalEvent.event_type,
+            atMs: terminalEvent.wall_clock_ms,
+          },
+  }
+}
+
+/**
  * One candidate's page: the timeline, every gate conclusion, the failure text, the artifacts it
  * names, and where it sits on the frontier.
  *
@@ -719,50 +771,7 @@ export function candidateDetail(store, candidateId, { config, artifacts } = {}) 
   const gates = gateConclusions(events, state)
   const phasePath = phasePathOf({ events, state, status, gates })
 
-  // The verdict and the terminal event are two facts: the four-state conclusion, and the decision it
-  // justified. Reading only the last one loses the conclusion whenever the terminal event follows it
-  // — which is the normal case, and exactly what makes a dump useless for "why".
-  const ordered = [...events].reverse()
-  const verdictEvent = verdictEventOf(events)
-  const terminalEvent = ordered.find(
-    (event) => event.payload?.reject_reason !== undefined || event.payload?.blocking_message !== undefined,
-  )
-  const stopping = verdictEvent ?? terminalEvent
-  // "Why it stopped" is a question only a candidate that stopped answers. `verdictEvent` is the last
-  // four-state fact, and a gate that *passed* records one too — so without this guard a healthy
-  // candidate reported a reason it had never given, naming the phase whose gate it had just cleared.
-  // A stop is a `candidate_rejected` fact (or a state row that already says REJECTED); anything else
-  // that happens to carry a four-state word is evidence, not a decision.
-  const stopped = events.some((event) => event.event_type === 'candidate_rejected') || state?.phase === 'REJECTED'
-  const rejection =
-    stopping === undefined || !stopped
-      ? undefined
-      : {
-          phase: verdictEvent?.payload?.phase ?? terminalEvent?.payload?.phase ?? state?.phase,
-          status: verdictEvent?.payload?.status,
-          message:
-            verdictEvent?.payload?.blocking_message ??
-            verdictEvent?.payload?.message ??
-            terminalEvent?.payload?.blocking_message ??
-            terminalEvent?.payload?.reject_reason ??
-            '',
-          reason: terminalEvent?.payload?.reject_reason ?? terminalEvent?.payload?.blocking_message,
-          seq: stopping.local_seq,
-          eventType: stopping.event_type,
-          atMs: stopping.wall_clock_ms,
-          artifact: verdictEvent?.payload?.artifact,
-          // The terminal event matters separately only when it is not the verdict itself — the
-          // normal case, and the one where a reader would otherwise take the message for the whole
-          // decision.
-          terminal:
-            terminalEvent === undefined || terminalEvent === stopping
-              ? undefined
-              : {
-                  seq: terminalEvent.local_seq,
-                  eventType: terminalEvent.event_type,
-                  atMs: terminalEvent.wall_clock_ms,
-                },
-        }
+  const rejection = rejectionOf(events, state)
 
   const referenced = new Set()
   for (const event of events) {
@@ -824,6 +833,277 @@ export function candidateDetail(store, candidateId, { config, artifacts } = {}) 
       position:
         position === undefined ? 'unknown' : position.complete ? (position.onFrontier ? 'frontier' : 'dominated') : 'unranked',
     },
+  }
+}
+
+// ------------------------------------------------------------- the search tree
+
+/** The baseline's node id — the same word `frontier.js` gives the frozen reference point. */
+const TREE_ROOT = 'baseline'
+
+/** Every way a branch can end, in the order the summary lists them. */
+const KIND_ORDER = Object.freeze([
+  'continued',
+  'passed-over',
+  'rejected',
+  'in-flight',
+  'roster-unused',
+  'off-frontier',
+  'no-roster',
+  'no-later-round',
+])
+
+/**
+ * One round's frozen parent roster, or `null` when that round recorded none.
+ *
+ * The roster is the round's own decision (`round-<n>/parents`, content-addressed): whom it started
+ * from, which frontier it chose from, and which axis led the rotation. Reading it back rather than
+ * re-deriving it from today's numbers is what makes "why was this branch not continued" answerable:
+ * a candidate that is dominated *now* may have led the frontier when the round was planned, and the
+ * reason it was not picked belongs to the round that did the picking.
+ *
+ * A workspace whose run predates parent selection has no such file. `null` is that answer, and the
+ * tree says so rather than inventing a roster.
+ */
+function readParentRoster(artifacts, round) {
+  const record = artifacts?.read?.(`round-${round}/parents`)
+  const content = record?.content
+  if (content === null || content === undefined) return null
+  const names = (value) => (Array.isArray(value) ? value.filter((id) => typeof id === 'string' && id !== '') : [])
+  const axes = names(content.rotation?.axes)
+  const offset = Number.isSafeInteger(content.rotation?.offset) ? content.rotation.offset : null
+  return {
+    // The parents this round started from, in the order it assigned them to hypotheses.
+    parents: names(content.parents),
+    // The non-dominated set it chose from, frozen — so "it was eligible and was not picked" is a
+    // fact of that round and not a comparison this page performs.
+    frontier: names((content.frontier ?? []).map((member) => member?.candidate_id)),
+    empty: content.empty === true,
+    offset,
+    // Which axis led the rotation, because "offset 1" on its own is an index into a list nobody
+    // holds. `null` when the round recorded neither, and the sentence then says only what it has.
+    axis: axes.length === 0 || offset === null ? null : (axes[offset % axes.length] ?? null),
+    axes,
+  }
+}
+
+/**
+ * Why this node has no child — the one question a tree answers that a candidate page cannot.
+ *
+ * Each kind is a different fact and they are not interchangeable:
+ *
+ *   continued      it has at least one child: some later round started from it
+ *   rejected       a gate refused it; `parentsOf` never continues from a refused change
+ *   in-flight      it has not finished, so "did this branch continue" has no answer yet
+ *   roster-unused  a later round named it as a parent and created fewer candidates than slots
+ *   passed-over    a later round's frozen frontier held it and that round's roster did not name it
+ *   off-frontier   a later round recorded a roster and this candidate was not on its frontier
+ *   no-roster      a later round exists but recorded no roster, so the reason is not in the facts
+ *   no-later-round nothing after this candidate's round has been planned
+ *
+ * The middle three are facts about a *decision*, and the last two are the absence of one. None is a
+ * model's opinion: the roster is `parentsOf`'s arithmetic, and CONTEXT.md §8 is why the model cannot
+ * hold this verdict.
+ *
+ * `slots` and `offset` ride along for the sentence a reader gets ("2 slots, axis offset 1"), because
+ * a rotation that passes a candidate over is the round's reason, not the candidate's defect.
+ */
+function continuationOf(node, { rosters, laterRounds }) {
+  if (node.children.length > 0) return { kind: 'continued', round: null }
+  if (node.status === 'rejected') return { kind: 'rejected', round: node.round }
+  if (node.status !== 'done') return { kind: 'in-flight', round: node.round }
+  if (laterRounds.length === 0) return { kind: 'no-later-round', round: node.round }
+
+  let firstRecorded = null
+  let missing = null
+  for (const round of laterRounds) {
+    const roster = rosters.get(round) ?? null
+    if (roster === null) {
+      if (missing === null) missing = round
+      continue
+    }
+    if (firstRecorded === null) firstRecorded = round
+    const slots = roster.parents.length
+    const rotation = { slots, offset: roster.offset, axis: roster.axis }
+    if (roster.parents.includes(node.candidate_id)) return { kind: 'roster-unused', round, ...rotation }
+    if (roster.frontier.includes(node.candidate_id)) return { kind: 'passed-over', round, ...rotation }
+  }
+  // `firstRecorded`, not the earliest later round: an earlier round whose roster is missing says
+  // nothing about this candidate, and naming it would put a fact on the wrong round.
+  if (firstRecorded !== null) return { kind: 'off-frontier', round: firstRecorded }
+  return { kind: 'no-roster', round: missing }
+}
+
+/**
+ * The search as a tree: one node per candidate, the parent it started from, and why a branch ends.
+ *
+ * This is a *view* of the facts, not a second account of them. The edges are `parent_id` (written by
+ * the round planner when it created the candidate), the round columns are the candidates' own
+ * `round`, and the reason a node has no child comes from that round's frozen roster plus the
+ * candidate's terminal state. Nothing here is a model's judgement — `cand_analyze` and
+ * `round_reflect` write prose a reader may consult, but who continues and who stops is arithmetic
+ * (`parentsOf`, the gate, the stop rules).
+ *
+ * What the shape is *not*: a DAG. Each candidate names exactly one parent, so the genealogy is a
+ * forest whose roots are the baseline and any candidate a person proposed without one. Two
+ * candidates of one round may share a parent; no candidate has two.
+ *
+ * `notes` are the sentences a reader owes themselves before reading the shape — a workspace with no
+ * parent recorded at all, a round whose roster is missing, a parent id with no facts behind it. They
+ * are published rather than rendered by one surface, so `dump` and the page cannot disagree about
+ * which gaps exist.
+ *
+ * @param {import('./store.js').Store} store the fact plane, read-only
+ * @param {{ config?: object }} [options] the metric contract, as the caller resolved it
+ */
+export function searchTree(store, { config, artifacts } = {}) {
+  const rows = view(store, config)
+  const metric = rows.contract.primary ?? null
+  const workspace = store.getState(undefined, 'workspace', {}) ?? {}
+  const reader = artifacts ?? workspaceArtifacts(store)
+  const known = new Set(rows.candidates.map((row) => row.candidate_id))
+
+  const phases = new Map()
+  const events = new Map()
+  for (const row of rows.candidates) {
+    phases.set(row.candidate_id, store.getState(row.candidate_id, 'phase') ?? {})
+    events.set(row.candidate_id, store.eventsFor(row.candidate_id))
+  }
+
+  const parentOf = (candidateId) => {
+    const parent = phases.get(candidateId)?.parent_id
+    return typeof parent === 'string' && parent !== '' ? parent : null
+  }
+
+  const childrenOf = new Map()
+  const orphans = new Set()
+  for (const candidateId of phases.keys()) {
+    const parent = parentOf(candidateId)
+    if (parent === null) continue
+    if (!childrenOf.has(parent)) childrenOf.set(parent, [])
+    childrenOf.get(parent).push(candidateId)
+    if (parent !== TREE_ROOT && !known.has(parent)) orphans.add(parent)
+  }
+
+  const rounds = [...new Set(rows.candidates.map((row) => row.round).filter((round) => Number.isSafeInteger(round) && round > 0))].sort(
+    (left, right) => left - right,
+  )
+  const rosters = new Map()
+  for (const round of rounds) rosters.set(round, readParentRoster(reader, round))
+
+  const nodes = [...rows.candidates]
+    .sort((left, right) => (left.candidate_id < right.candidate_id ? -1 : 1))
+    .map((row) => {
+      const candidateId = row.candidate_id
+      const phase = phases.get(candidateId) ?? {}
+      const list = events.get(candidateId) ?? []
+      const node = {
+        candidate_id: candidateId,
+        round: row.round ?? phase.round ?? null,
+        // `null` is the honest answer for a candidate a person proposed, or one whose run predates
+        // parent selection; the tree draws it as a root and the note says which case this is.
+        parent: parentOf(candidateId),
+        hypothesis:
+          list.find((event) => event.event_type === 'candidate_created')?.payload?.hypothesis ?? phase.hypothesis ?? null,
+        status: row.status,
+        shape: shapeOf({ status: row.status, onFrontier: row.onFrontier === true, verdict: verdictStatusOf(list) }),
+        value: metric === null ? null : typeof row.vector?.[metric] === 'number' ? row.vector[metric] : null,
+        vector: { ...row.vector },
+        complete: row.complete === true,
+        onFrontier: row.onFrontier === true,
+        dominatedBy: row.dominatedBy ?? null,
+        rejection: rejectionOf(list, phase) ?? null,
+        children: [...(childrenOf.get(candidateId) ?? [])].sort(),
+      }
+      node.continuation = continuationOf(node, { rosters, laterRounds: rounds.filter((round) => round > (node.round ?? 0)) })
+      return node
+    })
+
+  // The baseline as *this run's primary metric may read it* — the same reader the conclusion page
+  // uses, so a baseline frozen in another metric is a `null` value and a sentence, not `loss 0.7`.
+  const standing = standingBaseline(store, metric)
+  const frozenMetric = standing.baseline?.metric ?? null
+  const baseline = {
+    candidate_id: TREE_ROOT,
+    round: 0,
+    parent: null,
+    hypothesis: null,
+    status: 'baseline',
+    // A root is neither on the frontier nor a candidate: `shape` is null on purpose, so a renderer
+    // cannot mistake it for one of the five candidate shapes.
+    shape: null,
+    value: standing.baseline?.value ?? null,
+    metric: frozenMetric,
+    vector: standing.baseline === null || frozenMetric === null ? {} : { [frozenMetric]: standing.baseline.value },
+    complete: standing.baseline !== null,
+    onFrontier: standing.baseline !== null,
+    dominatedBy: null,
+    rejection: null,
+    children: [...(childrenOf.get(TREE_ROOT) ?? [])].sort(),
+    continuation: { kind: 'root', round: null },
+  }
+
+  const notes = []
+  if (nodes.length > 0 && nodes.every((node) => node.parent === null)) {
+    notes.push(
+      'no candidate in this workspace records a parent: the run predates parent selection, or every candidate was proposed by a person — either way there are no edges to draw',
+    )
+  }
+  // Round 1 has no predecessor to be chosen from, so a missing roster there explains nothing that
+  // the "no parent recorded" note above does not already say.
+  const noRoster = rounds.filter((round) => round > 1 && rosters.get(round) === null)
+  if (noRoster.length > 0) {
+    const which = noRoster.length === 1 ? `round ${noRoster[0]}` : `rounds ${noRoster.slice(0, -1).join(', ')} and ${noRoster.at(-1)}`
+    notes.push(
+      `${which} recorded no parent roster, so "why this branch was not continued" is not in this workspace's facts for it`,
+    )
+  }
+  if (orphans.size > 0) {
+    const who = [...orphans].sort().join(', ')
+    notes.push(
+      `${who} is named as a parent but has no facts of its own: the edge is not drawn, and the candidates that name it are drawn without one`,
+    )
+  }
+  if (standing.absent !== null && frozenBaseline(store) !== undefined) {
+    notes.push(`the frozen baseline cannot be drawn on this metric: ${standing.absent}`)
+  }
+
+  // One tally, in one order, published: a renderer that counted again would be a second derivation
+  // of a number the summary calls the map's text alternative.
+  const tally = new Map()
+  for (const node of nodes) tally.set(node.continuation.kind, (tally.get(node.continuation.kind) ?? 0) + 1)
+  const counts = KIND_ORDER.filter((kind) => (tally.get(kind) ?? 0) > 0).map((kind) => ({ kind, count: tally.get(kind) }))
+  for (const [kind, count] of tally) {
+    // A kind this module does not know yet still appears, under its own name, rather than counting
+    // for nothing: the summary must add up to the candidate count beside it.
+    if (!KIND_ORDER.includes(kind)) counts.push({ kind, count })
+  }
+
+  return {
+    metric,
+    contract: {
+      ok: rows.contract.ok === true,
+      status: rows.contract.status ?? null,
+      primary: metric,
+      objectives: (rows.contract.objectives ?? []).map((objective) => ({ name: objective.name, direction: objective.direction })),
+    },
+    baseline,
+    nodes,
+    counts,
+    // An edge needs two nodes. A parent id with no facts of its own is a finding, not a line: it is
+    // listed in `orphans`, named in `notes`, and the candidate that pointed at it is drawn without an
+    // edge — because a count of branch edges that exceeds the lines on the map is a lie a reader can
+    // see.
+    edges: nodes
+      .filter((node) => node.parent !== null && (node.parent === TREE_ROOT || known.has(node.parent)))
+      .map((node) => ({ from: node.parent, to: node.candidate_id })),
+    rounds: rounds.map((round) => ({ round, roster: rosters.get(round) })),
+    orphans: [...orphans].sort(),
+    notes,
+    stop:
+      workspace.stopped === undefined
+        ? { stopped: false }
+        : { stopped: true, rule: workspace.stopped.rule ?? null, message: workspace.stopped.message ?? null },
   }
 }
 

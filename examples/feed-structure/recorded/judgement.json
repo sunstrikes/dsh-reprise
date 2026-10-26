@@ -1,5 +1,5 @@
 {
-  "note": "Recorded model answers, one per judgement call site. This is the honest part of the laptop path: no provider, no key, no GPU — the four judgement phases replay these, and the kernel validates each one exactly as it would validate a live model's answer.",
+  "note": "Recorded model answers, one per judgement call site. This is the honest part of the laptop path: no provider, no key, no GPU — the four judgement phases replay these, and the kernel validates each one exactly as it would validate a live model's answer. Round 2 replays round 1's hypotheses, so its analyses are recorded here too: a two-round run is the shortest one that draws a tree.",
   "verify": {
     "verdict": "accept",
     "rationale": "only model/structure.json changed; metric.mjs and the seeded data generator are untouched, so the comparison against the baseline stays honest",
@@ -14,6 +14,12 @@
     },
     "r1-h3": {
       "root_cause": "l2 changes the calibration of the fit and not its ranking, so auc lands back at the baseline"
+    },
+    "r2-h1": {
+      "root_cause": "a second hidden layer on top of the explicit crosses adds capacity the interaction already covers, so the ranking does not move; the instrument is still the wrong one"
+    },
+    "r2-h2": {
+      "root_cause": "re-crossing the same four fields spends parameters on an interaction the parent already represents, which is why the second round reproduces the first instead of extending it"
     }
   },
   "round_reflect": {

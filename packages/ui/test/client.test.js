@@ -107,10 +107,16 @@ test('the page and its modules are served by the host at the asset routes', asyn
   }
 })
 
-test('the module reads all four views and follows the incremental cursor instead of re-reading everything', () => {
+test('the module reads every view and follows the incremental cursor instead of re-reading everything', () => {
   const source = read('dashboard.js')
 
-  for (const path of ['/api/reprise/overview', '/api/reprise/rounds', '/api/reprise/candidate', '/api/reprise/conclusion']) {
+  for (const path of [
+    '/api/reprise/overview',
+    '/api/reprise/rounds',
+    '/api/reprise/candidate',
+    '/api/reprise/conclusion',
+    '/api/reprise/tree',
+  ]) {
     assert.match(source, new RegExp(path.replaceAll('/', '\\/')), `the page shows ${path}`)
   }
   assert.match(source, /after=/, 'it polls with the cursor the answer handed back')
@@ -243,8 +249,11 @@ test('the page draws the four observability panels, because a value nobody rende
 // ------------------------------- the seven regions, and the cards that retired (ticket #7)
 
 /**
- * The information architecture is seven questions and seven regions (spec §4.1). This is that list,
- * written out: a region added or removed on purpose should have to come here and say so.
+ * The information architecture is the questions a reader asks, and one region per question. This is
+ * that list, written out: a region added or removed on purpose should have to come here and say so.
+ *
+ * `tree` is the ninth: "which branch did the search carry forward, and why did the others end?" is a
+ * question the round rail and the candidate inspector can only answer one node at a time.
  *
  * The page shipped with two pre-redesign cards at the bottom — `Overview` (a six-cell field list) and
  * `Measured / published` — whose facts the regions above them now each say once. Ticket #7 retires
@@ -252,7 +261,7 @@ test('the page draws the four observability panels, because a value nobody rende
  * and notes into a strip under the conclusion, tokens and the names in flight into the readings row,
  * the absolute change and the published number into the conclusion region.
  */
-const REGIONS = ['headline', 'strips', 'stop', 'ladder', 'readings', 'candidate', 'audit', 'stream']
+const REGIONS = ['headline', 'strips', 'stop', 'ladder', 'tree', 'readings', 'candidate', 'audit', 'stream']
 
 test('the page is the seven regions and nothing else: the two pre-redesign cards are gone', () => {
   const page = code('index.html')
@@ -268,6 +277,26 @@ test('the page is the seven regions and nothing else: the two pre-redesign cards
   // left anywhere on the page, and the stylesheet stops paying for it.
   assert.doesNotMatch(source, /class: 'stats'/, 'the equal-weight field list is not drawn anywhere else')
   assert.doesNotMatch(code('dashboard.css'), /\.reprise \.stats?\b/, 'and its styles went with it')
+})
+
+test('the tree sits under the staircase, and every node it draws opens the candidate it names', () => {
+  const page = code('index.html')
+  const ladder = page.indexOf('id="ladder"')
+  const tree = page.indexOf('id="tree"')
+  const readings = page.indexOf('id="readings"')
+  assert.ok(tree > ladder, 'the structure behind the staircase comes after it')
+  assert.ok(tree > readings, 'and under the readings band: the shape first, its numbers, then the structure')
+
+  const source = code('dashboard.js')
+  assert.match(source, /function renderTree\(/, 'the region has a renderer')
+  assert.match(source, /class: 'tree-map'/, 'the map is its own box, because it scrolls sideways')
+  assert.match(source, /data-continuation/, 'every node carries why its branch ends')
+  assert.match(source, /onclick: \(\) => select\(node\.candidate_id\)/, 'a node opens the candidate it names')
+  assert.match(source, /class: 'rail-candidate tree-node-shape'/, 'and wears the rail\'s shape square, not a second vocabulary')
+
+  const stylesheet = code('dashboard.css')
+  assert.match(stylesheet, /\.reprise \.tree-node\b/, 'the node is a component')
+  assert.match(stylesheet, /\.reprise \.tree-node\[data-shape='baseline'\]/, 'the root is drawn as a root, not as a candidate')
 })
 
 test('the workspace phase lives in the masthead capsule, is announced when it changes, and is printed nowhere else', () => {

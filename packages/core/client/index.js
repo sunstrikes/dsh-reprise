@@ -28,7 +28,7 @@
  *      is pinned to `states.js` for the words that module owns, so a candidate cannot be "rejected"
  *      on one surface and something else on the other.
  *
- * Read-only, like the page: every request is a `GET` against the six routes the Host half already
+ * Read-only, like the page: every request is a `GET` against the routes the Host half already
  * mounts, and this module never sends anything back. v1 has no write endpoint, so there is no button
  * here that could change a run.
  *
@@ -64,6 +64,7 @@ window.__ModuleLoader__.load({
       rounds: '/api/reprise/rounds',
       candidate: '/api/reprise/candidate',
       conclusion: '/api/reprise/conclusion',
+      tree: '/api/reprise/tree',
       calls: '/api/reprise/calls',
       call: '/api/reprise/call',
     }
@@ -187,6 +188,53 @@ window.__ModuleLoader__.load({
       'ladder.noneDeclared': 'none declared',
       'ladder.result': 'result',
       'ladder.value': 'value',
+
+      'tree.title': 'The search, as a tree',
+      'tree.empty': 'no facts yet, so there is no tree to draw',
+      'tree.noCandidates': 'no candidate has facts yet, so there is no tree to draw',
+      'tree.summary': '{rounds} round(s), {candidates} candidate(s), {edges} branch edge(s)',
+      'tree.summaryWithCounts': '{summary} — {counts}.',
+      'tree.count.continued': '{n} continued',
+      'tree.count.passed-over': '{n} passed over',
+      'tree.count.rejected': '{n} rejected',
+      'tree.count.in-flight': '{n} in flight',
+      'tree.count.roster-unused': '{n} named but unused',
+      'tree.count.off-frontier': '{n} off a later frontier',
+      'tree.count.no-roster': '{n} with no roster recorded',
+      'tree.count.no-later-round': '{n} with no later round',
+      'tree.keyNote':
+        "The square is the round rail's vocabulary: five shapes, no hue. A row under a candidate means a later round started from it.",
+      'tree.round': 'R{n}',
+      'tree.aGate': 'a gate',
+      'tree.noMessage': 'no message recorded',
+      'tree.aRecordedRule': 'a recorded rule',
+      'tree.parents': '{n} parent(s)',
+      'tree.rotation': ' ({axis} led, offset {offset})',
+      'tree.axis': 'an axis',
+      'tree.root': 'frozen reference point',
+      'tree.baseline': 'frozen baseline',
+      'tree.noParent': 'no parent recorded',
+      'tree.reason.fromBaseline': 'the frozen reference point every candidate is measured against',
+      'tree.why.continuedOne': 'branched: {child}',
+      'tree.why.continuedMany': 'branched: {count} candidates',
+      'tree.why.rejected': 'rejected at {phase}',
+      'tree.why.inFlight': 'in flight',
+      'tree.why.passedOver': 'passed over in {round}',
+      'tree.why.rosterUnused': 'named for {round}, unused',
+      'tree.why.offFrontier': "not on {round}'s frontier",
+      'tree.why.noRoster': '{round} recorded no roster',
+      'tree.why.noLaterRound': 'no later round yet',
+      'tree.why.noLaterRoundStopped': 'no later round — stopped',
+      'tree.reason.continued': 'continued into {children}',
+      'tree.reason.rejected': 'rejected at {phase}: {message}',
+      'tree.reason.inFlight': 'still running, so it may still become a parent',
+      'tree.reason.passedOver':
+        "round {round} started from {parents}{rotation} and this candidate was on that round's frontier but not in the roster",
+      'tree.reason.rosterUnused': 'round {round} named it as a parent and created fewer candidates than slots',
+      'tree.reason.offFrontier': 'round {round} chose from a frontier this candidate was not on',
+      'tree.reason.noRoster': 'round {round} recorded no parent roster, so the reason is not in the facts',
+      'tree.reason.noLaterRound': 'no round after this one has been planned yet',
+      'tree.reason.noLaterRoundStopped': 'the run stopped ({rule}), so no later round was planned',
 
       'readings.title': 'Readings',
       'readings.noFacts': 'no facts recorded yet',
@@ -387,6 +435,51 @@ window.__ModuleLoader__.load({
       'ladder.noneDeclared': '未声明',
       'ladder.result': '结果',
       'ladder.value': '值',
+
+      'tree.title': '搜索树',
+      'tree.empty': '还没有任何事实，所以没有树可画',
+      'tree.noCandidates': '还没有任何候选的事实，所以没有树可画',
+      'tree.summary': '{rounds} 轮、{candidates} 个候选、{edges} 条分支边',
+      'tree.summaryWithCounts': '{summary} —— {counts}。',
+      'tree.count.continued': '{n} 个继续',
+      'tree.count.passed-over': '{n} 个被跳过',
+      'tree.count.rejected': '{n} 个被拒绝',
+      'tree.count.in-flight': '{n} 个执行中',
+      'tree.count.roster-unused': '{n} 个列进名单但没用上',
+      'tree.count.off-frontier': '{n} 个不在后续一轮的帕累托前沿上',
+      'tree.count.no-roster': '{n} 个所在轮次没有记录名单',
+      'tree.count.no-later-round': '{n} 个还没有更晚的一轮',
+      'tree.keyNote': '方块用的是轮次条那五个形状，靠形状而不是颜色区分；候选下面还压着一行，说明有更晚的一轮从它出发。',
+      'tree.round': '第 {n} 轮',
+      'tree.aGate': '某道闸门',
+      'tree.noMessage': '没有记录说明',
+      'tree.aRecordedRule': '一条已记录的规则',
+      'tree.parents': '{n} 个父候选',
+      'tree.rotation': '（{axis} 轴领先，偏移 {offset}）',
+      'tree.axis': '某条轴',
+      'tree.root': '冻结的参照点',
+      'tree.baseline': '冻结基线',
+      'tree.noParent': '没有记录父候选',
+      'tree.reason.fromBaseline': '每个候选都以它衡量自己的那个冻结参照点',
+      'tree.why.continuedOne': '分支：{child}',
+      'tree.why.continuedMany': '分支：{count} 个候选',
+      'tree.why.rejected': '在{phase}被拒绝',
+      'tree.why.inFlight': '执行中',
+      'tree.why.passedOver': '{round}被跳过',
+      'tree.why.rosterUnused': '列进{round}的名单，没被使用',
+      'tree.why.offFrontier': '不在{round}的帕累托前沿上',
+      'tree.why.noRoster': '{round}没有记录名单',
+      'tree.why.noLaterRound': '还没有更晚的一轮',
+      'tree.why.noLaterRoundStopped': '没有更晚的一轮——已停止',
+      'tree.reason.continued': '继续到 {children}',
+      'tree.reason.rejected': '在{phase}被拒绝：{message}',
+      'tree.reason.inFlight': '还在运行，所以它仍可能成为父候选',
+      'tree.reason.passedOver': '第 {round} 轮从 {parents}{rotation} 出发，这个候选在该轮的前沿上，但不在该轮名单里',
+      'tree.reason.rosterUnused': '第 {round} 轮把它列为父候选，但创建的候选少于名额',
+      'tree.reason.offFrontier': '第 {round} 轮从一个不含这个候选的帕累托前沿里挑选',
+      'tree.reason.noRoster': '第 {round} 轮没有记录父候选名单，所以事实里没有这条原因',
+      'tree.reason.noLaterRound': '这一轮之后还没有规划过任何一轮',
+      'tree.reason.noLaterRoundStopped': '运行已停止（{rule}），所以没有再规划更晚的一轮',
 
       'readings.title': '读数',
       'readings.noFacts': '还没有任何事实',
@@ -800,10 +893,11 @@ window.__ModuleLoader__.load({
       const poll = useCallback(async (candidateId) => {
         const mine = ++gen.current
         try {
-          const [overview, rounds, conclusion, calls] = await Promise.all([
+          const [overview, rounds, conclusion, tree, calls] = await Promise.all([
             readView('overview', book.current),
             readView('rounds', book.current),
             readView('conclusion', book.current),
+            readView('tree', book.current),
             readView('calls', book.current),
           ])
           const candidate =
@@ -817,6 +911,7 @@ window.__ModuleLoader__.load({
             overview,
             rounds,
             conclusion,
+            tree,
             calls,
             candidate,
             events: [...book.current.events],
@@ -860,7 +955,16 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
-      const answers = snapshot ?? { overview: null, rounds: null, conclusion: null, calls: null, candidate: null, events: [], factTotal: 0 }
+      const answers = snapshot ?? {
+        overview: null,
+        rounds: null,
+        conclusion: null,
+        tree: null,
+        calls: null,
+        candidate: null,
+        events: [],
+        factTotal: 0,
+      }
 
       return h('div', { className: 'reprise', 'data-mount': 'panel' }, [
         h(RegionMasthead, { key: 'masthead', t, shared, snapshot: answers, readAt, failure }),
@@ -877,6 +981,14 @@ window.__ModuleLoader__.load({
           onSelect: select,
         }),
         h(RegionReadings, { key: 'readings', t, shared, overview: answers.overview }),
+        h(RegionTree, {
+          key: 'tree',
+          t,
+          shared,
+          tree: answers.tree,
+          selected,
+          onSelect: select,
+        }),
         h('div', { className: 'lower', key: 'lower' }, [
           h(RegionInspector, { key: 'candidate', t, shared, candidate: answers.candidate, selected }),
           h('div', { className: 'lower-side', key: 'side' }, [
@@ -1477,6 +1589,330 @@ window.__ModuleLoader__.load({
             : say(t, 'ladder.noBaselineWhy', { why: baselineAbsent })
           : say(t, 'ladder.againstBaseline', { value: fmt.number(baseline.value) })
       return what + against
+    }
+
+    // ------------------------------------------------------------------- the tree
+
+    /**
+     * The tree's drawing grid, in CSS pixels: the page's own constants.
+     *
+     * Duplicated number for number on purpose, and the only duplication in this region: one stylesheet
+     * draws both surfaces, and a node whose box were a different size on the panel would put every edge
+     * end in the wrong place on one of them. The alternative — serving the constants from the page's
+     * module — would make the panel import a renderer, which is the coupling ticket #6 removed.
+     */
+    const TREE_GRID = Object.freeze({ column: 184, row: 108, nodeWidth: 160, nodeHeight: 82, header: 22 })
+
+    /** `R2` in the dictionary's words — the same string the page prints. */
+    function treeRound(t, fmt, round) {
+      return say(t, 'tree.round', { n: fmt.number(round) })
+    }
+
+    /**
+     * Why this node has no child, in the fewest words that stay true.
+     *
+     * The projection published the kind and the round; this turns it into one scannable line. The full
+     * sentence (with the rotation and the slot count) is the node's title and accessible name.
+     */
+    function treeWhy(t, fmt, tree, node) {
+      const continuation = node.continuation ?? { kind: 'unknown' }
+      switch (continuation.kind) {
+        case 'continued':
+          return node.children.length === 1
+            ? say(t, 'tree.why.continuedOne', { child: node.children[0] })
+            : say(t, 'tree.why.continuedMany', { count: fmt.number(node.children.length) })
+        case 'rejected':
+          return say(t, 'tree.why.rejected', { phase: node.rejection?.phase ?? say(t, 'tree.aGate') })
+        case 'in-flight':
+          return say(t, 'tree.why.inFlight')
+        case 'passed-over':
+          return say(t, 'tree.why.passedOver', { round: treeRound(t, fmt, continuation.round) })
+        case 'roster-unused':
+          return say(t, 'tree.why.rosterUnused', { round: treeRound(t, fmt, continuation.round) })
+        case 'off-frontier':
+          return say(t, 'tree.why.offFrontier', { round: treeRound(t, fmt, continuation.round) })
+        case 'no-roster':
+          return say(t, 'tree.why.noRoster', { round: treeRound(t, fmt, continuation.round) })
+        case 'no-later-round':
+          return tree.stop?.stopped === true ? say(t, 'tree.why.noLaterRoundStopped') : say(t, 'tree.why.noLaterRound')
+        case 'root':
+          return say(t, 'tree.root')
+        default:
+          // A kind this panel has not learnt yet reads as its own name rather than vanishing.
+          return continuation.kind ?? ''
+      }
+    }
+
+    /**
+     * The whole sentence a node carries as its tooltip and accessible name: who it is, where it sits,
+     * what it measured, and why it has no child.
+     */
+    function treeReason(t, fmt, tree, node) {
+      const metric = tree.metric ?? 'value'
+      const continuation = node.continuation ?? { kind: 'unknown' }
+      const parts = [node.candidate_id]
+      parts.push(node.shape === null || node.shape === undefined ? say(t, 'tree.baseline') : say(t, `shape.${node.shape}`))
+      if (node.value !== null && node.value !== undefined) parts.push(`${metric} ${fmt.number(node.value)}`)
+      // A root that is not the baseline: a person proposed it, or the run predates parent selection.
+      if (node.parent === null && node.candidate_id !== 'baseline') parts.push(say(t, 'tree.noParent'))
+      if (continuation.kind === 'root') {
+        parts.push(say(t, 'tree.reason.fromBaseline'))
+        return parts.join(' · ')
+      }
+      const parents =
+        continuation.slots === null || continuation.slots === undefined
+          ? ''
+          : say(t, 'tree.parents', { n: fmt.number(continuation.slots) })
+      const rotation =
+        continuation.offset === null || continuation.offset === undefined
+          ? ''
+          : say(t, 'tree.rotation', {
+              axis: continuation.axis ?? say(t, 'tree.axis'),
+              offset: fmt.number(continuation.offset),
+            })
+      switch (continuation.kind) {
+        case 'continued':
+          parts.push(say(t, 'tree.reason.continued', { children: node.children.join(', ') }))
+          break
+        case 'rejected':
+          parts.push(
+            say(t, 'tree.reason.rejected', {
+              phase: node.rejection?.phase ?? say(t, 'tree.aGate'),
+              message: node.rejection?.message ?? say(t, 'tree.noMessage'),
+            }),
+          )
+          break
+        case 'in-flight':
+          parts.push(say(t, 'tree.reason.inFlight'))
+          break
+        case 'passed-over':
+          parts.push(say(t, 'tree.reason.passedOver', { round: fmt.number(continuation.round), parents, rotation }))
+          break
+        case 'roster-unused':
+          parts.push(say(t, 'tree.reason.rosterUnused', { round: fmt.number(continuation.round) }))
+          break
+        case 'off-frontier':
+          parts.push(say(t, 'tree.reason.offFrontier', { round: fmt.number(continuation.round) }))
+          break
+        case 'no-roster':
+          parts.push(say(t, 'tree.reason.noRoster', { round: fmt.number(continuation.round) }))
+          break
+        case 'no-later-round':
+          parts.push(
+            tree.stop?.stopped === true
+              ? say(t, 'tree.reason.noLaterRoundStopped', { rule: tree.stop.rule ?? say(t, 'tree.aRecordedRule') })
+              : say(t, 'tree.reason.noLaterRound'),
+          )
+          break
+        default:
+          parts.push(continuation.kind)
+          break
+      }
+      return parts.join(' · ')
+    }
+
+    /**
+     * Where every node sits: columns by round, rows below the parent.
+     *
+     * The same rule the page uses, in the same order (round, then id), so the two surfaces draw the same
+     * picture from the same facts. A candidate with no parent is a root in its own round and starts a
+     * fresh row; the tree does not invent an edge to the baseline.
+     */
+    function treeLayout(tree) {
+      const columns = [0, ...tree.rounds.map((entry) => entry.round)]
+      const columnOf = new Map(columns.map((round, index) => [round, index]))
+      const placed = new Map()
+      const used = new Set()
+      const place = (candidateId, column, row) => {
+        placed.set(candidateId, { column, row })
+        used.add(`${column}|${row}`)
+      }
+      place(tree.baseline.candidate_id, 0, 0)
+      const ordered = [...tree.nodes].sort(
+        (left, right) => (left.round ?? 0) - (right.round ?? 0) || (left.candidate_id < right.candidate_id ? -1 : 1),
+      )
+      for (const node of ordered) {
+        const column = columnOf.get(node.round ?? 0) ?? 0
+        const parent = node.parent === null ? undefined : placed.get(node.parent)
+        let row = parent === undefined ? 1 : parent.row + 1
+        while (used.has(`${column}|${row}`)) row += 1
+        place(node.candidate_id, column, row)
+      }
+      return { columns, placed }
+    }
+
+    /** Where a node's box goes, and where an edge should leave and enter it. */
+    function treeBox({ column, row }) {
+      return {
+        left: column * TREE_GRID.column + (TREE_GRID.column - TREE_GRID.nodeWidth) / 2,
+        top: TREE_GRID.header + row * TREE_GRID.row,
+      }
+    }
+
+    /**
+     * Every way a branch can end, in the order the summary prints them.
+     *
+     * All of them are counted and a kind with no node is skipped, so the parts add up to the candidate
+     * count beside them. The page prints the same list in the same order — a summary that dropped a
+     * kind would be the fastest way to make a reader distrust the picture.
+     */
+    const TREE_COUNT_KEYS = Object.freeze({
+      continued: 'tree.count.continued',
+      'passed-over': 'tree.count.passed-over',
+      rejected: 'tree.count.rejected',
+      'in-flight': 'tree.count.in-flight',
+      'roster-unused': 'tree.count.roster-unused',
+      'off-frontier': 'tree.count.off-frontier',
+      'no-roster': 'tree.count.no-roster',
+      'no-later-round': 'tree.count.no-later-round',
+    })
+
+    /**
+     * The search as a tree: one column per round, one node per candidate, the edges the planner wrote.
+     *
+     * The region that answers a question no other region can — which branch the search carried forward,
+     * and why each one it left behind ended. The reasons are the projection's (`continuation.kind`);
+     * this surface chooses words and geometry and nothing else. Clicking a node opens it in the
+     * inspector; the baseline is drawn but not clickable, because it has no facts of its own.
+     */
+    function RegionTree({ t, shared, tree, selected, onSelect }) {
+      const fmt = shared.format
+      const words = shared.words
+      const data = tree?.data
+      const title = h('h2', { key: 'title' }, say(t, 'tree.title'))
+
+      if (data === null || data === undefined) {
+        return h('section', { className: 'card' }, [
+          title,
+          h('p', { className: 'empty', key: 'empty' }, tree?.reason ?? say(t, 'tree.empty')),
+        ])
+      }
+      const notes = (data.notes ?? []).map((note, index) => h('p', { className: 'note', key: `note-${index}` }, note))
+      if (data.nodes.length === 0) {
+        return h('section', { className: 'card' }, [title, ...notes, h('p', { className: 'empty', key: 'empty' }, say(t, 'tree.noCandidates'))])
+      }
+
+      const base = say(t, 'tree.summary', {
+        rounds: fmt.number(data.rounds.length),
+        candidates: fmt.number(data.nodes.length),
+        edges: fmt.number(data.edges.length),
+      })
+      // The projection counted and ordered the kinds; this only chooses the words.
+      const counted = (data.counts ?? []).map(({ kind, count }) =>
+        Object.hasOwn(TREE_COUNT_KEYS, kind)
+          ? say(t, TREE_COUNT_KEYS[kind], { n: fmt.number(count) })
+          : `${fmt.number(count)} ${kind}`,
+      )
+      const summary =
+        counted.length === 0 ? `${base}.` : say(t, 'tree.summaryWithCounts', { summary: base, counts: counted.join(' · ') })
+
+      const { columns, placed } = treeLayout(data)
+      let deepest = 0
+      for (const entry of placed.values()) if (entry.row > deepest) deepest = entry.row
+      const width = columns.length * TREE_GRID.column
+      const height = TREE_GRID.header + (deepest + 1) * TREE_GRID.row
+
+      const heads = columns.map((round, index) =>
+        h(
+          'span',
+          {
+            className: 'tree-column',
+            key: `column-${index}`,
+            style: { left: index * TREE_GRID.column, width: TREE_GRID.column },
+          },
+          index === 0 ? say(t, 'ladder.init') : treeRound(t, fmt, round),
+        ),
+      )
+
+      const edges = h(
+        'svg',
+        { className: 'tree-edges', key: 'edges', width, height, 'aria-hidden': 'true' },
+        data.edges.map((edge) => {
+          const from = placed.get(edge.from)
+          const to = placed.get(edge.to)
+          if (from === undefined || to === undefined) return null
+          const start = treeBox(from)
+          const end = treeBox(to)
+          const x1 = start.left + TREE_GRID.nodeWidth / 2
+          const y1 = start.top + TREE_GRID.nodeHeight
+          const x2 = end.left + TREE_GRID.nodeWidth / 2
+          const y2 = end.top
+          return h('path', {
+            className: 'tree-edge',
+            key: `${edge.from}->${edge.to}`,
+            d: `M ${x1} ${y1} C ${x1} ${y1 + 26}, ${x2} ${y2 - 26}, ${x2} ${y2}`,
+            'data-from': edge.from,
+            'data-to': edge.to,
+          })
+        }),
+      )
+
+      const nodes = [data.baseline, ...data.nodes].map((node) => {
+        const at = placed.get(node.candidate_id)
+        if (at === undefined) return null
+        const box = treeBox(at)
+        const root = node.shape === null
+        const name = treeReason(t, fmt, data, node)
+        const style = { left: box.left, top: box.top, width: TREE_GRID.nodeWidth, height: TREE_GRID.nodeHeight }
+        const children = [
+          h('span', { className: 'tree-node-head', key: 'head' }, [
+            h('i', {
+              className: 'rail-candidate tree-node-shape',
+              key: 'shape',
+              'data-shape': root ? 'baseline' : node.shape,
+            }),
+            h('span', { className: 'tree-node-id', key: 'id' }, node.candidate_id),
+          ]),
+          h(
+            'span',
+            { className: 'tree-node-value', key: 'value' },
+            node.value === null || node.value === undefined
+              ? fmt.EM_DASH
+              : `${node.metric ?? data.metric ?? 'value'} ${fmt.number(node.value)}`,
+          ),
+          h('span', { className: 'tree-node-why', key: 'why' }, treeWhy(t, fmt, data, node)),
+        ]
+        if (root) {
+          // The root has no facts of its own: a button that opens nothing is a trap.
+          return h('div', { className: 'tree-node', key: node.candidate_id, 'data-shape': 'baseline', style, title: name }, children)
+        }
+        return h(
+          'button',
+          {
+            type: 'button',
+            className: 'tree-node',
+            key: node.candidate_id,
+            'data-shape': node.shape,
+            'data-continuation': node.continuation?.kind ?? 'unknown',
+            style,
+            title: name,
+            'aria-label': name,
+            'aria-pressed': selected === node.candidate_id ? 'true' : 'false',
+            onClick: () => onSelect(node.candidate_id),
+          },
+          children,
+        )
+      })
+
+      const key = h(
+        'p',
+        { className: 'ladder-key', key: 'key' },
+        Object.keys(words.SHAPE_WORDS).map((shape) =>
+          h('span', { key: `shape-${shape}` }, [
+            h('i', { className: 'rail-candidate', key: 'swatch', 'data-shape': shape }),
+            say(t, `shape.${shape}`),
+          ]),
+        ),
+      )
+
+      return h('section', { className: 'card' }, [
+        title,
+        ...notes,
+        h('p', { className: 'tree-summary', key: 'summary' }, summary),
+        h('div', { className: 'tree-map', key: 'map', style: { width, height } }, [...heads, edges, ...nodes]),
+        key,
+        h('p', { className: 'tree-key-note', key: 'key-note' }, say(t, 'tree.keyNote')),
+      ])
     }
 
     /**

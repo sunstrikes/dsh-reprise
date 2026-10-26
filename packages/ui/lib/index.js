@@ -2,7 +2,7 @@
  * `@dsh-reprise/ui` — the read-only dashboard's composition root.
  *
  * The display layer has exactly one thing to wire: a workspace directory and the host's connection
- * service go in, six mounted read routes and their disposer come out.
+ * service go in, seven mounted read routes and their disposer come out.
  *
  * ```js
  * export const inject = ['connection']           // the host service, read from our own ctx
@@ -33,6 +33,7 @@ export {
   queryOf,
   registerRoutes,
   roundsHandler,
+  treeHandler,
   withStore,
 } from './routes.js'
 export {
@@ -45,4 +46,5 @@ export {
   cursorOf,
   overviewView,
   roundsView,
+  treeView,
 } from './views.js'

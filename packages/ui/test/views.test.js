@@ -24,8 +24,9 @@ import test from 'node:test'
 
 import { CANDIDATE_PHASES } from '@dsh-reprise/contract'
 
+import { fileArtifacts } from '../../core/lib/artifacts.js'
 import { tick } from '../../core/lib/loop.js'
-import { candidateHandler, conclusionHandler, overviewHandler, roundsHandler } from '../lib/routes.js'
+import { candidateHandler, conclusionHandler, overviewHandler, roundsHandler, treeHandler } from '../lib/routes.js'
 import { AT, fakeJudge, forgetRecordedConfig, openWorkspace, runCandidate, seedConfig } from '../../core/test/support/fake-ports.js'
 
 const config = (objectives, primary, extra = {}) => ({ metrics: { primary, objectives }, ...extra })
@@ -196,6 +197,61 @@ test('the conclusion view names the best candidate and what it is compared again
   assert.equal(answer.data.against.best.metric, 'auc', 'a previous best without its metric is a bare number')
   assert.equal(answer.data.stopped.stopped, true)
   assert.equal(answer.data.stopped.rule, 'max_rounds', 'the conclusion is the recorded rule, in the words recorded then')
+})
+
+/**
+ * A workspace that recorded parents: round 2 started from `r1-c1`, and `r1-c2` was on the frontier
+ * that round chose from and was not picked. Written through the same two seams the planner writes —
+ * `parent_id` in the phase state and the round's frozen roster artifact — so the route reads facts
+ * and not a fixture shaped like the answer.
+ */
+async function treeWorkspace() {
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 0 } }) })
+  seed(ports.store, ports.config)
+  const assign = (candidateId, parentId) => {
+    const phase = ports.store.getState(candidateId, 'phase') ?? {}
+    ports.store.setState(candidateId, 'phase', { ...phase, parent_id: parentId })
+  }
+  await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.72 } })
+  await runCandidate(ports, { candidateId: 'r1-c2', round: 1, metrics: { auc: 0.7 } })
+  assign('r1-c1', 'baseline')
+  assign('r1-c2', 'baseline')
+  fileArtifacts(join(dirname(ports.store.path), 'artifacts')).write('round-2/parents', {
+    address: 'test-address-2',
+    content: {
+      round: 2,
+      parents: ['r1-c1'],
+      empty: false,
+      frontier: [{ candidate_id: 'r1-c1' }, { candidate_id: 'r1-c2' }],
+      rotation: { axes: ['auc'], offset: 0 },
+    },
+  })
+  await runCandidate(ports, { candidateId: 'r2-c1', round: 2, metrics: { auc: 0.73 } })
+  assign('r2-c1', 'r1-c1')
+  const dir = dirname(ports.store.path)
+  ports.store.close()
+  return dir
+}
+
+test('the tree route answers who branched from whom, and which branch the round passed over', async () => {
+  const dir = await treeWorkspace()
+
+  const answer = treeHandler(dir, {})
+  const nodes = new Map(answer.data.nodes.map((node) => [node.candidate_id, node]))
+
+  assert.equal(answer.view, 'tree')
+  assert.deepEqual(answer.data.edges, [
+    { from: 'baseline', to: 'r1-c1' },
+    { from: 'baseline', to: 'r1-c2' },
+    { from: 'r1-c1', to: 'r2-c1' },
+  ])
+  assert.deepEqual(nodes.get('r1-c1').children, ['r2-c1'])
+  assert.deepEqual(
+    nodes.get('r1-c2').continuation,
+    { kind: 'passed-over', round: 2, slots: 1, offset: 0, axis: 'auc' },
+    'the round drew a one-slot roster from a two-member frontier, and the page can say so',
+  )
+  assert.equal(answer.data.rounds[1].roster.parents[0], 'r1-c1', 'the round column carries the roster it chose from')
 })
 
 /**

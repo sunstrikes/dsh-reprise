@@ -1,7 +1,7 @@
 /**
  * The dashboard page — a viewer of one workspace, and nothing else.
  *
- * It talks to the four read-only routes the host already serves, every request is a `GET`, and it
+ * It talks to the read-only routes the host already serves, every request is a `GET`, and it
  * never sends anything back: v1 has no write endpoint, so there is no button here that could change a
  * run. The increment protocol is the cursor the answer handed back — `?after=<cursor>` — so a poll
  * costs the new facts and not the whole history, and the same protocol can become a stream later
@@ -36,6 +36,7 @@ const ROUTES = {
   rounds: '/api/reprise/rounds',
   candidate: '/api/reprise/candidate',
   conclusion: '/api/reprise/conclusion',
+  tree: '/api/reprise/tree',
   calls: '/api/reprise/calls',
   call: '/api/reprise/call',
 }
@@ -849,12 +850,22 @@ function rail({ rounds, metric, slots }) {
   return el('div', { class: 'rail', 'data-slots': String(slots) }, cells)
 }
 
-/** The key: five shapes and the baseline line, because a shape nobody can name is not information. */
-function ladderKey({ baseline, baselineAbsent }) {
+/**
+ * The five shapes and their words, with no sentence of its own: a shape nobody can name is not
+ * information, and two regions draw these squares (the staircase's key and the tree's), so the list
+ * lives in one function and each caller adds only what its own region has to say.
+ */
+function shapeKey() {
   const key = el('p', { class: 'ladder-key' })
   for (const [shape, word] of Object.entries(SHAPE_WORDS)) {
     key.append(el('span', {}, [el('i', { class: 'rail-candidate', 'data-shape': shape }), word]))
   }
+  return key
+}
+
+/** The key: the five shapes, and the baseline line the staircase draws. */
+function ladderKey({ baseline, baselineAbsent }) {
+  const key = shapeKey()
   key.append(
     baseline === null
       ? el('span', {
@@ -1245,6 +1256,336 @@ function renderCandidate(answer) {
   root.append(renderTimeline(detail.timeline), renderCandidateAside(detail))
 }
 
+// --------------------------------------------------------------------- the tree
+
+/**
+ * The tree's drawing grid, in CSS pixels: one column per round, one row per branch level.
+ *
+ * Pixels rather than percentages because a tree is not a staircase: an edge has to end where its
+ * child begins, and a fractional layout would put the child's top edge somewhere the edge does not
+ * know. The map is allowed to be wider than the card — `.tree-map` scrolls sideways, which is the
+ * honest way to show a wide search on a narrow screen.
+ */
+const TREE = Object.freeze({ column: 184, row: 108, nodeWidth: 160, nodeHeight: 82, header: 22 })
+
+/** The SVG namespace: the edges are one `<path>` each, and `el()` builds HTML elements only. */
+const SVG_NS = 'http://www.w3.org/2000/svg'
+
+/** An SVG element with its attributes set. Text never goes through it — the nodes are HTML. */
+function svgEl(tag, attributes = {}) {
+  const node = document.createElementNS(SVG_NS, tag)
+  for (const [name, value] of Object.entries(attributes)) node.setAttribute(name, String(value))
+  return node
+}
+
+/**
+ * Why this node has no child, in the fewest words that stay true.
+ *
+ * The projection published the *kind* and the round; this turns it into a line a reader can scan
+ * down the tree. The full sentence (with the rotation and the slot count) is the node's `title` and
+ * accessible name — the short line is the same fact compressed, never a different one.
+ */
+function treeWhy(node, tree) {
+  const continuation = node.continuation ?? { kind: 'unknown' }
+  const at = `R${number(continuation.round)}`
+  switch (continuation.kind) {
+    case 'continued':
+      return node.children.length === 1 ? `branched: ${node.children[0]}` : `branched: ${number(node.children.length)} candidates`
+    case 'rejected':
+      return `rejected at ${node.rejection?.phase ?? 'a gate'}`
+    case 'in-flight':
+      return 'in flight'
+    case 'passed-over':
+      return `passed over in ${at}`
+    case 'roster-unused':
+      return `named for ${at}, unused`
+    case 'off-frontier':
+      return `not on ${at}'s frontier`
+    case 'no-roster':
+      return `${at} recorded no roster`
+    case 'no-later-round':
+      return tree.stop?.stopped === true ? 'no later round — stopped' : 'no later round yet'
+    case 'root':
+      return 'frozen reference point'
+    default:
+      return continuation.kind ?? ''
+  }
+}
+
+/**
+ * The whole sentence a node carries as its tooltip and accessible name.
+ *
+ * It says who the candidate is, where it sits, what it measured, and why it has no child — the four
+ * questions a node answers. `passed over` names the round's own numbers (how many parents it picked,
+ * which axis led the rotation), because "the rotation went the other way" is a fact about the round
+ * and not a defect of the candidate.
+ */
+function treeReason(node, tree) {
+  const metric = tree.metric ?? 'value'
+  const parts = [node.candidate_id]
+  if (node.shape !== null && node.shape !== undefined) parts.push(SHAPE_WORDS[node.shape] ?? node.shape)
+  else parts.push('frozen baseline')
+  if (node.value !== null && node.value !== undefined) parts.push(`${metric} ${number(node.value)}`)
+  // A root that is not the baseline: a person proposed it, or the run predates parent selection. The
+  // node floats in its round's column for that reason, and the sentence says which fact is missing
+  // rather than leaving the reader to assume an edge was lost.
+  if (node.parent === null && node.candidate_id !== 'baseline') parts.push('no parent recorded')
+  const continuation = node.continuation ?? { kind: 'unknown' }
+  const parents = continuation.slots === null || continuation.slots === undefined ? '' : `${number(continuation.slots)} parent(s)`
+  // "offset 1" is an index into a list the reader cannot see; the axis that led is the fact the
+  // rotation actually decided, and the offset stays beside it for a reader who wants the number.
+  const rotation =
+    continuation.offset === null || continuation.offset === undefined
+      ? ''
+      : ` ${continuation.axis ?? 'axis'} led, offset ${number(continuation.offset)}`
+  switch (continuation.kind) {
+    case 'continued':
+      parts.push(`continued into ${node.children.join(', ')}`)
+      break
+    case 'rejected':
+      parts.push(`rejected at ${node.rejection?.phase ?? 'a gate'}: ${node.rejection?.message ?? 'no message recorded'}`)
+      break
+    case 'in-flight':
+      parts.push('still running, so it may still become a parent')
+      break
+    case 'passed-over':
+      parts.push(
+        `round ${number(continuation.round)} started from ${parents || 'its roster'}${rotation === '' ? '' : ` (${rotation})`} and this candidate was on that round's frontier but not in the roster`,
+      )
+      break
+    case 'roster-unused':
+      parts.push(`round ${number(continuation.round)} named it as a parent and created fewer candidates than slots`)
+      break
+    case 'off-frontier':
+      parts.push(`round ${number(continuation.round)} chose from a frontier this candidate was not on`)
+      break
+    case 'no-roster':
+      parts.push(`round ${number(continuation.round)} recorded no parent roster, so the reason is not in the facts`)
+      break
+    case 'no-later-round':
+      parts.push(
+        tree.stop?.stopped === true
+          ? `the run stopped (${tree.stop.rule ?? 'a recorded rule'}), so no later round was planned`
+          : 'no round after this one has been planned yet',
+      )
+      break
+    case 'root':
+      parts.push('the frozen reference point every candidate is measured against')
+      break
+    default:
+      // A kind this page has not learnt yet reads as its own name — visible and ugly, which is the
+      // honest failure, rather than a node whose reason silently disappeared.
+      parts.push(continuation.kind)
+      break
+  }
+  return parts.join(' · ')
+}
+
+/**
+ * Where every node sits: columns by round, rows below the parent.
+ *
+ * The one layout rule that carries meaning is the vertical one — a child sits under its parent — so a
+ * reader traces a lineage downward instead of following edges across columns. Rows are allocated in
+ * (round, id) order, which makes the picture a function of the facts: two reads of one workspace draw
+ * the same tree.
+ *
+ * A candidate with no parent (a person's proposal, or a run that predates parent selection) is a root
+ * in its own round and starts a fresh row: the tree does not invent an edge to the baseline.
+ */
+function treeLayout(tree) {
+  const columns = [0, ...tree.rounds.map((entry) => entry.round)]
+  const columnOf = new Map(columns.map((round, index) => [round, index]))
+  const placed = new Map()
+  const used = new Set()
+  const place = (candidateId, column, row) => {
+    placed.set(candidateId, { column, row })
+    used.add(`${column}|${row}`)
+  }
+  place(tree.baseline.candidate_id, 0, 0)
+  const ordered = [...tree.nodes].sort(
+    (left, right) => (left.round ?? 0) - (right.round ?? 0) || (left.candidate_id < right.candidate_id ? -1 : 1),
+  )
+  for (const node of ordered) {
+    const column = columnOf.get(node.round ?? 0) ?? 0
+    const parent = node.parent === null ? undefined : placed.get(node.parent)
+    let row = parent === undefined ? 1 : parent.row + 1
+    while (used.has(`${column}|${row}`)) row += 1
+    place(node.candidate_id, column, row)
+  }
+  return { columns, placed }
+}
+
+/**
+ * The words for each way a branch can end. The *order* and the *counts* are the projection's
+ * (`tree.counts`): a renderer that sorted or counted again would be the second derivation this page
+ * is not allowed to make.
+ */
+const TREE_COUNT_WORDS = Object.freeze({
+  continued: (n) => `${number(n)} continued`,
+  'passed-over': (n) => `${number(n)} passed over`,
+  rejected: (n) => `${number(n)} rejected`,
+  'in-flight': (n) => `${number(n)} in flight`,
+  'roster-unused': (n) => `${number(n)} named but unused`,
+  'off-frontier': (n) => `${number(n)} off a later frontier`,
+  'no-roster': (n) => `${number(n)} with no roster recorded`,
+  'no-later-round': (n) => `${number(n)} with no later round`,
+})
+
+/**
+ * The one sentence above the map: how big the search is, and how its branches end.
+ *
+ * Every kind the projection counted is printed, in the order it published, so the parts add up to the
+ * candidate count beside them. The sentence is also the map's text alternative for a reader who
+ * cannot see the boxes; the shapes and the row-lines are the visual half of the same answer.
+ */
+function treeSummary(tree) {
+  const parts = (tree.counts ?? []).map(({ kind, count }) => {
+    const word = TREE_COUNT_WORDS[kind]
+    return word === undefined ? `${number(count)} ${kind}` : word(count)
+  })
+  return (
+    `${number(tree.rounds.length)} round(s), ${number(tree.nodes.length)} candidate(s), ${number(tree.edges.length)} branch edge(s)` +
+    (parts.length === 0 ? '.' : ` — ${parts.join(' · ')}.`)
+  )
+}
+
+/** Where a node's box goes, and where an edge should leave and enter it. */
+function treeBox({ column, row }) {
+  return {
+    left: column * TREE.column + (TREE.column - TREE.nodeWidth) / 2,
+    top: TREE.header + row * TREE.row,
+  }
+}
+
+/**
+ * One candidate as a node: the round rail's shape square, the id, the number, and the reason.
+ *
+ * The square is the rail's vocabulary verbatim (`data-shape`, same stylesheet rule) so a reader who
+ * has learnt the shapes once reads them on both regions — and the word for the shape is in the node's
+ * accessible name, because a shape alone asks the reader to remember a legend.
+ */
+function treeNode(node, box, tree) {
+  // The projection publishes `shape: null` for the root so a renderer cannot mistake it for one of
+  // the five candidate shapes; this reads that, not a literal somebody could rename.
+  const root = node.shape === null
+  const name = treeReason(node, tree)
+  const children = [
+    el('span', { class: 'tree-node-head' }, [
+      el('i', { class: 'rail-candidate tree-node-shape', 'data-shape': root ? 'baseline' : node.shape }),
+      el('span', { class: 'tree-node-id', text: node.candidate_id }),
+    ]),
+    el('span', {
+      class: 'tree-node-value',
+      text:
+        node.value === null || node.value === undefined
+          ? EM_DASH
+          : `${node.metric ?? tree.metric ?? 'value'} ${number(node.value)}`,
+    }),
+    el('span', { class: 'tree-node-why', text: treeWhy(node, tree) }),
+  ]
+  const style = `left: ${box.left}px; top: ${box.top}px; width: ${TREE.nodeWidth}px; height: ${TREE.nodeHeight}px`
+  if (root) {
+    // The root has no facts of its own, so it is drawn and not opened: a button that opens nothing is
+    // a trap, and the baseline's number is the conclusion line's subject, not a candidate's.
+    return el('div', { class: 'tree-node', 'data-shape': 'baseline', style, title: name }, children)
+  }
+  return el(
+    'button',
+    {
+      type: 'button',
+      class: 'tree-node',
+      'data-shape': node.shape,
+      'data-continuation': node.continuation?.kind ?? 'unknown',
+      style,
+      title: name,
+      'aria-label': name,
+      'aria-pressed': state.selected === node.candidate_id ? 'true' : 'false',
+      onclick: () => select(node.candidate_id),
+    },
+    children,
+  )
+}
+
+/**
+ * The search as a tree: one column per round, one node per candidate, the edges the planner wrote.
+ *
+ * This is the region that answers a question no other region can: *which branch did the search carry
+ * forward, and which one did it leave behind* — and, for every node it left behind, which fact says
+ * so. The reasons are the projection's (`continuation.kind`), computed from the round's frozen roster
+ * and the candidate's terminal state; the page only chooses the words and the geometry.
+ *
+ * Clicking a node opens it in the candidate inspector. The baseline is not clickable: it has no
+ * facts of its own, and a button that opens nothing is a trap.
+ */
+function renderTree(answer) {
+  const region = document.getElementById('tree')
+  region.replaceChildren(el('h2', { text: 'The search, as a tree' }))
+  const tree = answer?.data
+  if (tree === null || tree === undefined) {
+    region.append(el('p', { class: 'empty', text: answer?.reason ?? 'no facts yet, so there is no tree to draw' }))
+    return
+  }
+  for (const note of tree.notes ?? []) region.append(el('p', { class: 'note', text: note }))
+  if (tree.nodes.length === 0) {
+    region.append(el('p', { class: 'empty', text: 'no candidate has facts yet, so there is no tree to draw' }))
+    return
+  }
+
+  region.append(el('p', { class: 'tree-summary', text: treeSummary(tree) }))
+
+  const { columns, placed } = treeLayout(tree)
+  // The deepest row, counted rather than reduced: the page is not allowed to run a reduction over a
+  // series (that is where a second derivation of a fact starts), and a loop over row indices is the
+  // same answer without the shape `client.test.js` forbids.
+  let deepest = 0
+  for (const entry of placed.values()) if (entry.row > deepest) deepest = entry.row
+  const width = columns.length * TREE.column
+  const height = TREE.header + (deepest + 1) * TREE.row
+  const map = el('div', { class: 'tree-map', style: `width: ${width}px; height: ${height}px` })
+
+  columns.forEach((round, index) => {
+    map.append(
+      el('span', {
+        class: 'tree-column',
+        style: `left: ${index * TREE.column}px; width: ${TREE.column}px`,
+        text: index === 0 ? 'INIT' : `R${number(round)}`,
+      }),
+    )
+  })
+
+  const edges = svgEl('svg', { class: 'tree-edges', width, height, 'aria-hidden': 'true' })
+  for (const edge of tree.edges) {
+    const from = placed.get(edge.from)
+    const to = placed.get(edge.to)
+    if (from === undefined || to === undefined) continue
+    const start = treeBox(from)
+    const end = treeBox(to)
+    const x1 = start.left + TREE.nodeWidth / 2
+    const y1 = start.top + TREE.nodeHeight
+    const x2 = end.left + TREE.nodeWidth / 2
+    const y2 = end.top
+    // A vertical control point on each end: the edge leaves the parent downward and enters the child
+    // from above, so a reader can tell which way the branch runs even where two lines cross.
+    edges.append(
+      svgEl('path', {
+        class: 'tree-edge',
+        d: `M ${x1} ${y1} C ${x1} ${y1 + 26}, ${x2} ${y2 - 26}, ${x2} ${y2}`,
+        'data-from': edge.from,
+        'data-to': edge.to,
+      }),
+    )
+  }
+  map.append(edges)
+
+  for (const node of [tree.baseline, ...tree.nodes]) {
+    const at = placed.get(node.candidate_id)
+    if (at === undefined) continue
+    map.append(treeNode(node, treeBox(at), tree))
+  }
+
+  region.append(map, shapeKey(), el('p', { class: 'tree-key-note', text: 'The square is the round rail\'s vocabulary: five shapes, no hue. A row under a candidate means a later round started from it.' }))
+}
+
 /**
  * The sentence under the big number: what we measured, what against, and how much — in words.
  *
@@ -1593,10 +1934,11 @@ async function select(candidateId) {
 async function refresh() {
   const mine = ++state.gen
   try {
-    const [overview, rounds, conclusion, audit] = await Promise.all([
+    const [overview, rounds, conclusion, tree, audit] = await Promise.all([
       read('overview'),
       read('rounds'),
       read('conclusion'),
+      read('tree'),
       read('calls'),
     ])
     // A newer read started while these were in flight: it describes the page as it is now, and
@@ -1620,6 +1962,9 @@ async function refresh() {
     renderStop(overview)
     renderLadder(rounds, conclusion)
     renderReadings(overview)
+    // The structure behind the staircase: who branched from whom, and why each branch ended. It sits
+    // after the readings band and before the inspector, in the page's own order.
+    renderTree(tree)
     renderAudit()
 
     if (state.selected !== null) {

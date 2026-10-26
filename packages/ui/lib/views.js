@@ -1,5 +1,5 @@
 /**
- * The four dashboard views, computed from the core projection.
+ * The dashboard views, computed from the core projection.
  *
  * This module is the display layer's whole data half. Each view is a thin envelope around the
  * function `packages/core/lib/projection.js` already exposes, and `dump` renders through those same
@@ -25,6 +25,7 @@ import {
   modelCalls,
   overview,
   rounds,
+  searchTree,
   summariseEvent,
 } from '../../core/lib/projection.js'
 
@@ -192,6 +193,18 @@ export function overviewView(store, query = {}, { listing, now } = {}) {
 /** The rounds page: who ran in each round, how each finished, whether the round moved the best. */
 export function roundsView(store, query = {}) {
   return envelope(store, 'rounds', { data: rounds(store, { config: configFrom(store) }) }, query)
+}
+
+/**
+ * The search tree: who was branched from whom, and why a branch has no child.
+ *
+ * The only page whose unit is the *search* rather than a round or a candidate — it is what makes
+ * "this direction was passed over in round 3" answerable from the dashboard, which no per-candidate
+ * page can say. Read-only and fact-derived like the rest: the edges are `parent_id`, the reasons are
+ * the rounds' own frozen rosters, and the view is the same body `dump --tree` prints.
+ */
+export function treeView(store, query = {}) {
+  return envelope(store, 'tree', { data: searchTree(store, { config: configFrom(store) }) }, query)
 }
 
 /** One candidate's page — the same facts `dump --candidate` prints. */

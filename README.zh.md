@@ -42,7 +42,7 @@ kind: "package-bundle"
 
 挂载这个插件包只新增三个面（surface），别的什么也不加：一个在没有会话打开的工作区里推进阶段机的
 tick，一个在会话内读取同一份投影的 `reprise_status` 工具，以及侧边栏里的 **Reprise** 面板（背后是
-六个只读 GET 路由）。它不碰你的仓库，不开端口，也不调用模型——除非你在 `model.command` 里点名一个。
+下面那些只读 GET 路由）。它不碰你的仓库，不开端口，也不调用模型——除非你在 `model.command` 里点名一个。
 
 如果你要的是 prompt 搜索、超参数扫描，或者一个可以手动操作的看板，就不要用它：v1 完全没有写端点，
 浏览器那一半在构造上就是只读的，而且循环每轮只优化一个声明过的指标，而不是优化一批 prompt 组成的种群。
@@ -209,10 +209,11 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 |---|---|---|
 | 模型工具 | `reprise_status` | 运行进度以 JSON 返回，只读，取自页面绘制所用的同一份投影 |
 | 侧边栏面板 | `sidebar.panellist` id `reprise`，order `25`，外加 `main` key `reprise` | **Reprise** 按钮（中英同名：产品名不翻译）以及它打开的页面；文案跟随当前语言（`en`、`zh`） |
-| HTTP 路由 | `GET /api/reprise/{overview,rounds,candidate,conclusion,calls,call}` | 四个视图与模型调用审计，各自通过自己的只读句柄读取 |
+| HTTP 路由 | `GET /api/reprise/{overview,rounds,candidate,tree,conclusion,calls,call}` | 四个视图、搜索树与模型调用审计，各自通过自己的只读句柄读取 |
 | 静态资源 | `GET /api/reprise/page`、`/api/reprise/dashboard.js`、`/api/reprise/format.js` | 给没有客户端 slot 的宿主用的独立页面，以及页面与面板共用的格式化模块 |
 | CLI | `node packages/core/lib/cli/run.js --workspace <dir> --config <file>` | 与宿主 tick 的同一套接线，由循环驱动；退出码 0 表示有结论、1 表示没有可比的指标、2 用法错误、3 超时 |
 | CLI | `node packages/core/lib/cli/dump.js --candidate <id>` | 时间线、每个闸门的结论、候选工作树路径以及它是否还在磁盘上、身份绑定、前沿（frontier）位置，以及运行为什么停下来 |
+| CLI | `node packages/core/lib/cli/dump.js --tree` | 整次搜索作为一棵血统树：谁从谁分出来，以及每条分支为什么结束 |
 | CLI | `node packages/core/lib/cli/worktrees.js list` / `prune --candidate <id>` | `list`：每个候选一行——轮次、阶段、落地文件数、树是否还在磁盘上、以及它的路径。`prune`：唯一能删掉工作树的方式（`git worktree remove` 加一条 `worktree_pruned` 事实），且只在运行为 `runner.keep: false` 时可用 |
 | CLI | `node packages/core/lib/cli/intents.js place <kind>` / `list` | 人的意图（`proposal`、`grant`、`anchor`、`pause`、`resume`、`approval`、`experience`）写入 `<workspace>/pending/` |
 | Skills | `<domain>/prompts/{land,verify,cand-analyze,round-plan,round-reflect}/SKILL.md` | 模型在五个调用点各自被告知什么；磁盘上的 markdown，属于领域包，每次调用都重新读取——**不是** DSH skills，也没有按 DSH skill 注册 |
@@ -323,7 +324,7 @@ ln -s ~/.dsh/profiles/node_modules node_modules
 - **事实先于状态，永远如此。** 一条事实是由 `(candidate_id, local_seq)` 标识的追加行，在它所支撑的
   状态*之前*、在自己的事务里写入，所以崩溃留下的是可检测的滞后，而不是静默的偏差。用相同 payload
   重放一条事实是 `duplicate`；同一身份、不同 payload 是 `conflict`，会被拒绝。
-- **视图要么可推导，要么就是错的。** 前沿、轮次历史和看板的四个页面全部由事实算出。
+- **视图要么可推导，要么就是错的。** 前沿、轮次历史和看板的四个页面（外加把整次搜索画成一棵树的搜索树页）全部由事实算出。
   `dump --rebuild` 拒绝认可一个不再能从事实推出的视图。
 - **模型只有五个调用点，没有别的。** `land`、`verify`、`cand_analyze`、`round_plan`、
   `round_reflect`。每次调用是一个独立进程，prompt 由一份 markdown skill 加上作为 JSON 的事实渲染而

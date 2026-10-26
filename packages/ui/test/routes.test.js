@@ -36,6 +36,8 @@ const DATA_PATHS = [
   '/api/reprise/overview',
   '/api/reprise/rounds',
   '/api/reprise/candidate',
+  // The search as a tree: the one page whose unit is the search, not a round or a candidate.
+  '/api/reprise/tree',
   '/api/reprise/conclusion',
   // The model-call audit (ticket 29): the list, and one record opened.
   '/api/reprise/calls',

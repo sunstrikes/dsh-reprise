@@ -94,6 +94,22 @@
     </dl>
 
     <!--
+      The search, as a tree: one column per round, one node per candidate, and an edge wherever a
+      round started from a candidate. It is the one region that answers "which branch did the search
+      carry forward, and which one did it leave behind" — and, under every node it left behind, the
+      reason the facts give (rejected at a gate, passed over by a later round's roster, not on that
+      round's frontier, or no later round yet).
+
+      The nodes are the same squares the round rail draws, in the same five shapes and no hue; the
+      map scrolls sideways rather than shrinking, because an edge has to end where its child begins.
+      Clicking a node opens it in the inspector below.
+    -->
+    <section class="card" id="tree" aria-live="polite">
+      <h2>The search, as a tree</h2>
+      <p class="empty">waiting for facts…</p>
+    </section>
+
+    <!--
       The lower half: the candidate inspector on the left, and on the right the two things a reader
       consults rather than reads — the model-call audit folded into one line, and the fact stream
       under it. Wide screens get two columns; below 45rem they stack, in the same order.

@@ -643,16 +643,73 @@ test('the panel says why the baseline line is missing, not only that it is', asy
 test('the panel is the page\'s regions in the page\'s order', () => {
   const source = panelCode()
   const root = source.slice(source.indexOf("className: 'reprise'"))
-  const regions = ['RegionMasthead', 'RegionHeadline', 'RegionStrips', 'RegionStop', 'RegionLadder', 'RegionReadings', 'RegionInspector', 'RegionAudit', 'RegionStream']
+  const regions = ['RegionMasthead', 'RegionHeadline', 'RegionStrips', 'RegionStop', 'RegionLadder', 'RegionReadings', 'RegionTree', 'RegionInspector', 'RegionAudit', 'RegionStream']
   const at = regions.map((name) => root.indexOf(name))
   assert.ok(at.every((index) => index >= 0), `every region is rendered by the root (${regions.filter((_, index) => at[index] < 0).join(', ')})`)
-  assert.deepEqual([...at].sort((left, right) => left - right), at, 'masthead → conclusion → strips → stop → staircase → readings → inspector → audit → stream')
+  assert.deepEqual([...at].sort((left, right) => left - right), at, 'masthead → conclusion → strips → stop → staircase → readings → tree → inspector → audit → stream')
 })
 
-test('the panel asks the page\'s six routes, always with GET, and polls at five seconds', () => {
+test('the tree region draws the lineage the projection published, and a node opens its candidate', () => {
   const source = panelCode()
 
-  for (const path of ['overview', 'rounds', 'candidate', 'conclusion', 'calls', 'call']) {
+  assert.match(source, /function RegionTree\(/, 'the panel has the page\'s tree region')
+  assert.match(source, /continuation\?\.kind/, 'the reason a branch ends is the projection\'s, not the panel\'s guess')
+  assert.match(source, /className: 'tree-map'/, 'the map scrolls sideways, so it is its own box')
+  assert.match(source, /'data-continuation'/, 'every node carries why its branch ends')
+  assert.match(source, /onClick: \(\) => onSelect\(node\.candidate_id\)/, 'a node opens the candidate it names')
+  assert.match(source, /className: 'rail-candidate tree-node-shape'/, 'it wears the rail\'s square, not a second vocabulary')
+  assert.match(source, /say\(t, `shape\.\$\{node\.shape\}`\)/, 'and the word for a shape is the dictionary\'s')
+  assert.doesNotMatch(source, /Math\.(max|min|abs)\(\.\.\./, 'the layout allocates rows; it never reduces a series')
+})
+
+test('the two clients draw the same regions in the same order — the page\'s DOM order is the panel\'s component order', () => {
+  const page = readFileSync(PAGE_HTML, 'utf8')
+  // `readings` is a `<dl>`, not a `<section>`: the row is one line of five cells, and the markup says so.
+  const ids = [...page.matchAll(/<(?:section|dl)[^>]*\sid="([^"]+)"/g)].map((match) => match[1])
+  const source = panelCode()
+  const root = source.slice(source.indexOf("className: 'reprise'"))
+  const regions = [...root.matchAll(/h\((Region[A-Za-z]+),/g)].map((match) => match[1])
+
+  // The masthead is a `<header>` on the page and a region in the panel, so it is the one name that
+  // does not appear in the `<section>` list; every other region has one id on each side.
+  const NAMES = {
+    RegionHeadline: 'headline',
+    RegionStrips: 'strips',
+    RegionStop: 'stop',
+    RegionLadder: 'ladder',
+    RegionReadings: 'readings',
+    RegionTree: 'tree',
+    RegionInspector: 'candidate',
+    RegionAudit: 'audit',
+    RegionStream: 'stream',
+  }
+  assert.deepEqual(
+    regions.filter((name) => name !== 'RegionMasthead').map((name) => NAMES[name]),
+    ids,
+    'a region added, dropped or moved on one surface and not the other is two designs, and the two suites must not disagree about which order is right',
+  )
+})
+
+test('both clients draw the tree on the same grid, with the same class names', () => {
+  const page = readFileSync(PAGE_JS, 'utf8')
+  const panel = panelCode()
+  const grid = (source, name) => {
+    const match = new RegExp(`const ${name} = Object\\.freeze\\(\\{([^}]*)\\}\\)`).exec(source)
+    assert.ok(match !== null, `${name} is declared`)
+    return Object.fromEntries(
+      [...match[1].matchAll(/(\w+):\s*(\d+)/g)].map((entry) => [entry[1], Number(entry[2])]),
+    )
+  }
+
+  assert.deepEqual(grid(page, 'TREE'), grid(panel, 'TREE_GRID'), 'one grid, or the same node is a different size on each surface')
+  const classes = (source) => new Set([...source.matchAll(/'(tree-[a-z-]+)'/g)].map((match) => match[1]))
+  assert.deepEqual([...classes(panel)].sort(), [...classes(page)].sort(), 'and one vocabulary of tree class names')
+})
+
+test('the panel asks the page\'s routes, always with GET, and polls at five seconds', () => {
+  const source = panelCode()
+
+  for (const path of ['overview', 'rounds', 'candidate', 'conclusion', 'tree', 'calls', 'call']) {
     assert.ok(source.includes(`/api/reprise/${path}`), `the panel reads /api/reprise/${path}`)
   }
   assert.match(source, /POLL_MS\s*=\s*5_000/, 'the panel polls at the page\'s cadence, not its own slower one')

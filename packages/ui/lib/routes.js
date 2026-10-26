@@ -1,7 +1,7 @@
 /**
  * The dashboard's routes — registered on the host's existing HTTP surface, never on a port of ours.
  *
- * `registerRoutes({ connection, workspace, platform, notice })` mounts six exact Fetch routes through
+ * `registerRoutes({ connection, workspace, platform, notice })` mounts seven exact Fetch routes through
  * `connection.fetch.register` and returns the disposer that unmounts them. There is no server here,
  * no launcher, no liveness probe: the host already owns the listener, and a dashboard that opened a
  * second one would be the detached FastAPI process this rewrite exists to delete.
@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url'
 
 import { readListing } from '../../core/lib/jobs.js'
 import { DB_FILENAME, Store } from '../../core/lib/store.js'
-import { ViewError, callView, callsView, candidateView, conclusionView, overviewView, roundsView } from './views.js'
+import { ViewError, callView, callsView, candidateView, conclusionView, overviewView, roundsView, treeView } from './views.js'
 
 export { ViewError }
 
@@ -157,6 +157,11 @@ export function candidateHandler(workspace, query = {}) {
   return answer(workspace, 'candidate', candidateView, query)
 }
 
+/** The search-tree route's plain handler: the whole search as nodes, edges and reasons. */
+export function treeHandler(workspace, query = {}) {
+  return answer(workspace, 'tree', treeView, query)
+}
+
 /** The conclusion route's plain handler. */
 export function conclusionHandler(workspace, query = {}) {
   return answer(workspace, 'conclusion', conclusionView, query)
@@ -175,7 +180,7 @@ export function callHandler(workspace, query = {}) {
 /**
  * The declared routes, in registration order.
  *
- * The four view routes come first so a failed registration cannot leave the page mounted without
+ * The view routes come first so a failed registration cannot leave the page mounted without
  * the data it fetches; the page and its module are static files read from `client/` per request
  * (no build step, nothing to watch, and a stale bundle cannot outlive an edit).
  */
@@ -183,6 +188,8 @@ export const ROUTES = [
   { name: 'overview', path: '/api/reprise/overview', handler: overviewHandler },
   { name: 'rounds', path: '/api/reprise/rounds', handler: roundsHandler },
   { name: 'candidate', path: '/api/reprise/candidate', handler: candidateHandler },
+  // The search as a tree: the one page whose unit is the search, not a round or a candidate.
+  { name: 'tree', path: '/api/reprise/tree', handler: treeHandler },
   { name: 'conclusion', path: '/api/reprise/conclusion', handler: conclusionHandler },
   // The audit is what makes a model's answer checkable: which judgement, what prompt, what came back.
   { name: 'calls', path: '/api/reprise/calls', handler: callsHandler },

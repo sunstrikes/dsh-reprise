@@ -6,8 +6,12 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
+import { dirname } from 'node:path'
+
+import { fileArtifacts } from '../lib/artifacts.js'
 import { Store } from '../lib/store.js'
 import { renderDump, runDump } from '../lib/cli/dump.js'
+import { openWorkspace, runCandidate } from './support/fake-ports.js'
 
 const AT = 1_761_091_200_000
 const DUMP = fileURLToPath(new URL('../lib/cli/dump.js', import.meta.url))
@@ -129,4 +133,50 @@ test('a paused run says which kind of pause it is: one clears itself, one does n
   const manual = renderDump(Store.openReadOnly(dir), 'c1')
   assert.match(manual, /source {5}manual — only a resume intent clears this/)
   assert.match(manual, /from {7}intent p-1/, 'a manual pause names the file that asked for it')
+})
+
+/** A two-round run that recorded parents: `r2-c1` started from `r1-c1`, and `r1-c2` was left behind. */
+async function branchWorkspace() {
+  const config = { metrics: { primary: 'auc', objectives: { auc: 'up' } } }
+  const ports = openWorkspace({ config })
+  const assign = (candidateId, parentId) => {
+    const phase = ports.store.getState(candidateId, 'phase') ?? {}
+    ports.store.setState(candidateId, 'phase', { ...phase, parent_id: parentId })
+  }
+  await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.72 } })
+  await runCandidate(ports, { candidateId: 'r1-c2', round: 1, metrics: { auc: 0.7 } })
+  assign('r1-c1', 'baseline')
+  assign('r1-c2', 'baseline')
+  fileArtifacts(join(dirname(ports.store.path), 'artifacts')).write('round-2/parents', {
+    address: 'test-address-2',
+    content: {
+      round: 2,
+      parents: ['r1-c1'],
+      empty: false,
+      frontier: [{ candidate_id: 'r1-c1' }, { candidate_id: 'r1-c2' }],
+      rotation: { axes: ['auc'], offset: 0 },
+    },
+  })
+  await runCandidate(ports, { candidateId: 'r2-c1', round: 2, metrics: { auc: 0.73 } })
+  assign('r2-c1', 'r1-c1')
+  const dir = dirname(ports.store.path)
+  ports.store.close()
+  return dir
+}
+
+test('dump --tree prints the lineage, and the reason each branch ends', async () => {
+  const dir = await branchWorkspace()
+
+  const { code, output } = runDump(['--tree', '--workspace', dir])
+
+  assert.equal(code, 0)
+  assert.match(output, /tree\s+2 round\(s\), 3 candidate\(s\), 3 edge\(s\)/, 'two rounds of facts, and an edge for every parent recorded')
+  assert.match(output, /r1-c1\s+done\s+auc=0\.72\s+continued -> r2-c1/, 'a node with a child names it')
+  assert.match(
+    output,
+    /r1-c2\s+done\s+auc=0\.7\s+passed over in round 2 \(1 parent\(s\), auc led, offset 0\)/,
+    'and the round that passed it over says on what roster, and which axis led it',
+  )
+  assert.match(output, /r2-c1\s+frontier\s+auc=0\.73\s+no later round yet/)
+  assert.match(output, /└─ r1-c2/, 'the lineage is drawn, not just listed')
 })
