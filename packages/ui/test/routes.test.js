@@ -43,6 +43,7 @@ const ASSET_PATHS = [
   '/api/reprise/page',
   '/api/reprise/dashboard.js',
   '/api/reprise/format.js',
+  '/api/reprise/states.js',
   '/api/reprise/dashboard.css',
 ]
 

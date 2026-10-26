@@ -22,6 +22,8 @@ import { writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
 
+import { CANDIDATE_PHASES } from '@dsh-reprise/contract'
+
 import { tick } from '../../core/lib/loop.js'
 import { candidateHandler, conclusionHandler, overviewHandler, roundsHandler } from '../lib/routes.js'
 import { AT, fakeJudge, forgetRecordedConfig, openWorkspace, runCandidate, seedConfig } from '../../core/test/support/fake-ports.js'
@@ -321,4 +323,35 @@ test('the rounds view carries the step series and a shape per candidate; the con
   assert.ok(ladder.axis.bottom < Math.min(...plotted), 'the lowest mark sits above the bottom edge')
   assert.ok(ladder.axis.top > Math.max(...plotted), 'and the highest sits below the top edge')
   assert.equal(ladder.rounds.length, rows.length, 'the chart and the rail are the same rounds, not two lists')
+})
+
+// ---------------------------------- the candidate inspector's payload (ticket #5)
+
+test('the candidate route hands the page the whole path, the shape word and the hypothesis', async () => {
+  // The page cannot import the contract, so the phase order has to arrive in the payload; and it must
+  // not keep a second copy of "which shape is this candidate" either. Both are asserted here at the
+  // route, because the route is what the browser actually reads.
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 0 } }) })
+  seed(ports.store, ports.config)
+  await runCandidate(ports, {
+    candidateId: 'r1-c2',
+    round: 1,
+    judge: fakeJudge({
+      verify: ({ candidateId, now }) => ({ candidate_id: candidateId, passed: 'yes-please', checks: [], decided_at_ms: now }),
+    }),
+  })
+  const dir = dirname(ports.store.path)
+  ports.store.close()
+
+  const detail = candidateHandler(dir, { candidate: 'r1-c2' }).data
+
+  assert.deepEqual(detail.phasePath.map((step) => step.phase), CANDIDATE_PHASES, 'all eight phases, in the kernel\'s order')
+  assert.deepEqual(
+    detail.phasePath.filter((step) => step.reached).map((step) => step.phase),
+    ['LAND', 'BUILD', 'VERIFY'],
+    'walked, here, and never reached are three answers the payload keeps apart',
+  )
+  assert.equal(detail.phasePath.find((step) => step.phase === 'VERIFY').status, 'invalid')
+  assert.equal(detail.shape, 'invalid', 'the coarse square the rail draws travels with the detail, decided once')
+  assert.equal(detail.hypothesis, 'hypothesis of r1-c2', 'and the identity row has the sentence to open with')
 })

@@ -21,6 +21,8 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
+import { CANDIDATE_PHASES } from '@dsh-reprise/contract'
+
 import { fileArtifacts } from './artifacts.js'
 import { budgetOf, spendOf } from './budget.js'
 import { GATE_CHECKS } from './gate.js'
@@ -623,6 +625,88 @@ export function gateChain(store, candidateId, { artifacts } = {}) {
 }
 
 /**
+ * Every phase conclusion, one entry per phase.
+ *
+ * A gate that refuses a candidate leaves *two* facts carrying the same conclusion: the `gate_result`
+ * written while it lived, and the `candidate_rejected` that ended it. Drawing both printed one phase
+ * twice (`VERIFY:invalid` twice on the fixture's `r3-k1`, ticket #1's fifth defect), and a reader
+ * counting squares read two refusals where the run recorded one.
+ *
+ * The gate's own result is the entry kept: it is the fact that judged, and the rejection is the
+ * decision made from it — the rejection block tells that half of the story. A phase whose only
+ * conclusion is the rejection (the kernel stops at LAND with no hypothesis, or at MONITOR_POLL with
+ * no job row, without ever writing a gate result) keeps the rejection's word, because dropping it
+ * would erase a four-state conclusion that really was recorded. Absence of the *other* fact is not
+ * absence of this one — the rule the whole chain exists for.
+ *
+ * @param {object[]} events one candidate's facts, in seq order
+ * @param {object | undefined} state that candidate's phase state row
+ */
+function gateConclusions(events, state) {
+  /** A gate's result outranks the decision recorded from it; among equals, the later fact wins. */
+  const rank = (eventType) => (eventType === 'gate_result' ? 1 : 0)
+  const byPhase = new Map()
+  for (const event of events) {
+    if (!FOUR_STATES.includes(event.payload?.status)) continue
+    const phase = event.payload?.phase ?? state?.phase
+    const previous = byPhase.get(phase)
+    if (previous !== undefined && rank(event.event_type) < rank(previous.eventType)) continue
+    byPhase.set(phase, {
+      seq: event.local_seq,
+      atMs: event.wall_clock_ms,
+      phase,
+      status: event.payload.status,
+      message: event.payload?.blocking_message ?? event.payload?.message ?? '',
+      artifact: event.payload?.artifact,
+      eventType: event.event_type,
+    })
+  }
+  return [...byPhase.values()].sort((left, right) => left.seq - right.seq)
+}
+
+/**
+ * The candidate's whole path: the kernel's eight phases, in the kernel's order.
+ *
+ * Three situations have to stay apart on the page, and they can only stay apart if the path carries
+ * all three:
+ *
+ *   - **walked** (`reached`): a fact says the candidate got this far;
+ *   - **here** (`current`): the state row names this phase;
+ *   - **not reached**: no fact says it ever arrived — which is a different statement from "it arrived
+ *     and did not pass", and the reason ticket 29 kept `missing` away from `failed`.
+ *
+ * `status` is the four-state word recorded at the phase, or `null` when nothing judged it there. An
+ * unreached phase always has `null`: no verdict can be recorded about a phase nobody entered.
+ *
+ * The order comes from `CANDIDATE_PHASES` — the kernel's own list, imported rather than restated —
+ * because the page cannot import the contract and must not be handed a second, hand-kept order.
+ */
+function phasePathOf({ events, state, status, gates }) {
+  const index = (phase) => CANDIDATE_PHASES.indexOf(phase)
+  // Reached is monotone: a candidate cannot be past a phase it never entered, so the furthest fact
+  // wins. Two kinds of fact say how far it got — the state row's current phase, and the events that
+  // name the phase they judged (`gate_result`, `candidate_rejected`) — plus a finished analysis,
+  // which the ranking row has already folded into `done`.
+  let furthest = index(state?.phase)
+  for (const event of events) furthest = Math.max(furthest, index(event.payload?.phase))
+  if (status === 'done') furthest = Math.max(furthest, index('DONE'))
+
+  return CANDIDATE_PHASES.map((phase, at) => {
+    const gate = gates.find((entry) => entry.phase === phase)
+    return {
+      phase,
+      reached: at <= furthest,
+      current: index(state?.phase) === at,
+      status: gate?.status ?? null,
+      seq: gate?.seq ?? null,
+      atMs: gate?.atMs ?? null,
+      eventType: gate?.eventType ?? null,
+      message: gate?.message ?? null,
+    }
+  })
+}
+
+/**
  * One candidate's page: the timeline, every gate conclusion, the failure text, the artifacts it
  * names, and where it sits on the frontier.
  *
@@ -637,17 +721,10 @@ export function candidateDetail(store, candidateId, { config, artifacts } = {}) 
 
   const rows = view(store, config)
   const position = rows.candidates.find((row) => row.candidate_id === candidateId)
+  const status = position?.status ?? 'active'
 
-  const gates = events
-    .filter((event) => FOUR_STATES.includes(event.payload?.status))
-    .map((event) => ({
-      seq: event.local_seq,
-      atMs: event.wall_clock_ms,
-      phase: event.payload?.phase ?? state?.phase,
-      status: event.payload.status,
-      message: event.payload?.blocking_message ?? event.payload?.message ?? '',
-      artifact: event.payload?.artifact,
-    }))
+  const gates = gateConclusions(events, state)
+  const phasePath = phasePathOf({ events, state, status, gates })
 
   // The verdict and the terminal event are two facts: the four-state conclusion, and the decision it
   // justified. Reading only the last one loses the conclusion whenever the terminal event follows it
@@ -658,8 +735,14 @@ export function candidateDetail(store, candidateId, { config, artifacts } = {}) 
     (event) => event.payload?.reject_reason !== undefined || event.payload?.blocking_message !== undefined,
   )
   const stopping = verdictEvent ?? terminalEvent
+  // "Why it stopped" is a question only a candidate that stopped answers. `verdictEvent` is the last
+  // four-state fact, and a gate that *passed* records one too — so without this guard a healthy
+  // candidate reported a reason it had never given, naming the phase whose gate it had just cleared.
+  // A stop is a `candidate_rejected` fact (or a state row that already says REJECTED); anything else
+  // that happens to carry a four-state word is evidence, not a decision.
+  const stopped = events.some((event) => event.event_type === 'candidate_rejected') || state?.phase === 'REJECTED'
   const rejection =
-    stopping === undefined
+    stopping === undefined || !stopped
       ? undefined
       : {
           phase: verdictEvent?.payload?.phase ?? terminalEvent?.payload?.phase ?? state?.phase,
@@ -703,7 +786,14 @@ export function candidateDetail(store, candidateId, { config, artifacts } = {}) 
     candidate_id: candidateId,
     phase: state?.phase ?? null,
     round: state?.round ?? position?.round ?? null,
-    status: position?.status ?? 'active',
+    status,
+    // The one square the rail draws for this candidate, decided here so the inspector's sentence and
+    // the rail's shape are two readings of one value rather than two readings of a run.
+    shape: shapeOf({ status, onFrontier: position?.onFrontier ?? false, verdict: verdictStatusOf(events) }),
+    // What this candidate set out to do. It is in the `candidate_created` payload and nowhere else,
+    // and the inspector's identity row opens with it: "why does this candidate exist" is the first
+    // question a reader has about a candidate that stopped somewhere.
+    hypothesis: events.find((event) => event.event_type === 'candidate_created')?.payload?.hypothesis ?? null,
     // Who this candidate was branched from. Written by the round planner from the frontier when it
     // created the candidate (`parent_id` in the phase state), so "this round started from whom" is
     // answerable per candidate and not only per round. `null` is the honest answer for a candidate a
@@ -720,6 +810,9 @@ export function candidateDetail(store, candidateId, { config, artifacts } = {}) 
       summary: summariseEvent(event),
     })),
     gates,
+    // The whole path, all eight phases, so the page can draw "walked / here / never reached" without
+    // importing the contract or keeping a phase list of its own.
+    phasePath,
     // The gate chain, step by step, with the three-way status the panel exists for. See `gateChain()`
     // for why `missing` (the gate never reached this step) is kept apart from `failed` (it ran and
     // refused).
