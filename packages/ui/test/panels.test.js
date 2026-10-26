@@ -29,6 +29,7 @@ import { loadDomainPack } from '../../core/lib/domain.js'
 import { buildQuestion, modelCallName, modelCallRecord } from '@dsh-reprise/exec/model'
 import { fileArtifacts } from '../../core/lib/artifacts.js'
 import { openWorkspace, runCandidate, seedMetrics } from '../../core/test/support/fake-ports.js'
+import * as stopRules from '../../core/lib/stop.js'
 import { callHandler, callsHandler, candidateHandler, conclusionHandler, overviewHandler, registerRoutes } from '../lib/routes.js'
 import { fakeConnection } from './support/fake-connection.js'
 
@@ -313,8 +314,8 @@ function judgeWithAttempts(answers, artifacts) {
 //   - the **plugin object** its factory returns, driven here through a fake `ctx`: the dictionaries
 //     it registers, and the one `<style>` its effect puts in the document head.
 //
-// The rendering itself is proved by the browser harness outside the repo
-// (`notes-spec1/harness/panel/`), whose screenshots sit beside the page's.
+// The rendering itself is proved by a throwaway harness outside the repo, whose screenshots sit
+// beside the page's — a browser is the only thing that can show either surface painting.
 
 const PANEL_PATH = fileURLToPath(new URL('../../core/client/index.js', import.meta.url))
 const PAGE_JS = fileURLToPath(new URL('../client/dashboard.js', import.meta.url))
@@ -537,8 +538,11 @@ test('the panel speaks the page\'s words for a shape, a verdict and a mark', asy
   // The families whose key is built from a payload word: every word the projection can send has an
   // entry in both languages, or a reader meets a raw `rule.max_windows` where a sentence should be.
   const zh = loaded.dictionaries.get('zh')
+  // The rule names come from the kernel, not from this file: a rule added to `STOP_RULES` used to
+  // leave the suite green while the panel met a reader with a raw `rule.max_cost`. Now the family is
+  // derived, so a new rule fails here until both languages have a word for it.
   const families = {
-    'rule.': ['max_rounds', 'max_no_improvement_rounds', 'consecutive_empty_rounds', 'max_wall_hours', 'max_windows'],
+    'rule.': stopRules.STOP_RULES,
     'hold.': ['budget', 'single_job_gpu', 'none'],
     'shape.': Object.keys(states.SHAPE_WORDS),
     'verdict.': Object.keys(states.VERDICT_WORDS),
@@ -551,6 +555,75 @@ test('the panel speaks the page\'s words for a shape, a verdict and a mark', asy
       assert.ok(Object.hasOwn(zh, `${prefix}${word}`), `ZH is missing ${prefix}${word}`)
     }
   }
+
+  // The kernel's *candidate* rules are the other half of that vocabulary, and no surface draws them:
+  // the inspector prints the rejection's own reason instead. So they get no dictionary entry — a word
+  // nobody reads is the copy item 13 of this pass deleted — and the fallback is what a reader would
+  // meet if one ever is drawn: the identifier the payload carried, not a raw `rule.` key.
+  assert.ok(stopRules.CANDIDATE_STOP_RULES.length > 0, 'the kernel still declares candidate rules')
+  for (const name of stopRules.CANDIDATE_STOP_RULES) {
+    assert.equal(
+      Object.hasOwn(en, `rule.${name}`),
+      false,
+      `${name} is not drawn anywhere, so it must not carry copy in either language`,
+    )
+  }
+})
+
+test('a word built from a payload identifier falls back to the identifier, never to its key', () => {
+  // `rule.*` and `hold.*` are the two families whose key is assembled at run time, so no scan can
+  // prove the dictionary has the entry. `hold.*` already answered with the raw identifier when the
+  // dictionary had none; `rule.*` printed the whole key, so a rule the kernel adds met a reader as
+  // `rule.max_cost` — wrong, and unreadable with it. Both now go through one reader.
+  const source = panelCode()
+
+  assert.match(source, /const wordFor = \(t, family, id\)/, 'one reader for both families')
+  assert.match(source, /word === key \? String\(id\) : word/, 'the fallback is the identifier the payload carried')
+  assert.doesNotMatch(source, /say\(t, `rule\.\$\{/, 'and no rule word is assembled straight into the dictionary lookup')
+  assert.doesNotMatch(source, /say\(t, `hold\.\$\{/, 'nor a hold word')
+
+  // The two places that name a rule: the gauge row and the note under it.
+  assert.equal([...source.matchAll(/wordFor\(t, 'rule'/g)].length, 2, 'both rule labels go through it')
+})
+
+test('the panel\'s styles are geometry objects: no string style, no presentation attribute', () => {
+  // `style: { … }` was the only spelling the whitelist knew, so `style: 'color:#f00'` and an SVG
+  // `stroke` passed it. Both are design decisions wearing a different shape.
+  const source = panelCode()
+
+  assert.doesNotMatch(source, /style:\s*['"`]/, 'no string style: it cannot be checked property by property')
+  for (const attribute of ['boxShadow', 'textShadow', 'filter']) {
+    assert.equal(source.includes(`${attribute}:`), false, `${attribute} is a design decision, and design decisions live in dashboard.css`)
+  }
+  // The one SVG is the sidebar glyph, which lives in the host's rail — outside any `.reprise`
+  // container, so no rule of ours can reach it. Its presentation attributes may therefore only say
+  // "no paint" or "inherit the host's ink"; a literal here is a colour the token sheet never sees.
+  for (const match of source.matchAll(/\b(stroke|fill|color|stopColor)\s*:\s*'([^']+)'/g)) {
+    assert.match(match[2], /^(none|currentColor|inherit)$/, `${match[1]}: "${match[2]}" is a colour literal`)
+  }
+})
+
+test('the panel does not paint over a newer read with an older one', () => {
+  const source = panelCode()
+
+  assert.match(source, /const gen = useRef\(0\)/, 'the panel keeps a generation for the read in flight')
+  assert.match(source, /const mine = \+\+gen\.current/, 'each read takes the next one when it starts')
+  assert.equal(
+    [...source.matchAll(/if \(!alive\.current \|\| mine !== gen\.current\) return/g)].length,
+    2,
+    'and checks it before applying an answer or a failure',
+  )
+})
+
+test('the panel says why the baseline line is missing, not only that it is', async () => {
+  const source = panelCode()
+  const en = (await loadPanel()).dictionaries.get('en')
+
+  assert.match(source, /ladder\?\.baselineAbsent/, 'the panel reads the projection\'s reason')
+  assert.match(source, /ladder\.baselineMissingWhy/, 'and prints it in the key')
+  assert.match(source, /ladder\.noBaselineWhy/, 'and in the sentence the chart is read aloud by')
+  assert.ok(Object.hasOwn(en, 'ladder.baselineMissingWhy') && Object.hasOwn(en, 'ladder.noBaselineWhy'), 'both keys exist')
+  assert.match(en['ladder.baselineMissingWhy'], /\{why\}/, 'and take the reason as a parameter')
 })
 
 test('the panel is the page\'s regions in the page\'s order', () => {

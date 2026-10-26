@@ -145,7 +145,10 @@ test('the rounds projection publishes the step series and one shape per candidat
       { round: 1, verdict: 'raised', after: 0.7 },
       { round: 2, verdict: 'empty', after: 0.7 },
       { round: 4, verdict: 'held', after: 0.7 },
-      { round: 5, verdict: 'empty', after: 0.7 },
+      // Round 5 is still running: it has produced nothing *yet*, which is not the same claim as a
+      // finished round that produced nothing comparable. Its squares are drawn as in flight, so its
+      // word says "running" — the two would otherwise contradict each other in one cell.
+      { round: 5, verdict: 'running', after: 0.7 },
     ],
     'the step series is the best standing after each round, and the word for how the round ended',
   )
@@ -154,6 +157,48 @@ test('the rounds projection publishes the step series and one shape per candidat
     'missing',
     'the four-state name travels with the shape, because a shape is a coarse read of it',
   )
+  ports.store.close()
+})
+
+test('the readings cell counts the rounds the stop gauge measures — not one more', async () => {
+  // A live run: one finished round, and a second whose candidate is still in flight, so that round has
+  // produced nothing comparable *yet*. The cell used to walk every round in the history and print
+  // "empty streak 1" while the gauge measured 0 over the completed ones: one number, two counters.
+  const ports = openWorkspace({
+    config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 0, consecutive_empty_rounds: 2, max_no_improvement_rounds: 2 } }),
+  })
+  await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
+  createCandidate(ports, { candidateId: 'r2-c1', round: 2, hypothesis: 'still in flight' })
+
+  const page = overview(ports.store, { config: ports.config })
+  const gauge = (name) => page.stop.rules.find((rule) => rule.rule === name).observed
+
+  assert.equal(page.rounds.emptyStreak, 0, 'the in-flight round has not produced nothing — it has not finished')
+  assert.equal(gauge('consecutive_empty_rounds'), 0)
+  assert.equal(page.rounds.emptyStreak, gauge('consecutive_empty_rounds'), 'one derivation, so the two cannot disagree')
+  assert.equal(page.rounds.noImprovementStreak, gauge('max_no_improvement_rounds'))
+  ports.store.close()
+})
+
+test('a gain smaller than the contract\'s tolerance is a round without improvement, on the cell as on the gauge', async () => {
+  // The two counters also have to agree about *what counts as an improvement*: `roundHistory` says
+  // "raised" for any strictly better number, while the stop rule measures against the contract's
+  // `minimum_effective_delta`. The cell follows the rule, because the gauge is the number a reader
+  // compares it to.
+  const ports = openWorkspace({
+    config: {
+      metrics: { primary: 'auc', objectives: { auc: 'up' }, minimum_effective_delta: 0.01 },
+      stop: { max_rounds: 0, max_no_improvement_rounds: 3 },
+    },
+  })
+  await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7 } })
+  await runCandidate(ports, { candidateId: 'r2-c1', round: 2, metrics: { auc: 0.705 } })
+
+  const page = overview(ports.store, { config: ports.config })
+  const gauge = page.stop.rules.find((rule) => rule.rule === 'max_no_improvement_rounds')
+
+  assert.equal(page.rounds.noImprovementStreak, 1, 'a 0.005 gain under a 0.01 tolerance did not clear the contract')
+  assert.equal(page.rounds.noImprovementStreak, gauge.observed, 'and the cell prints the number the gauge measures')
   ports.store.close()
 })
 

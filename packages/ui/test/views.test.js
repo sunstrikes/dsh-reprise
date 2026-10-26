@@ -377,6 +377,24 @@ test('the rounds view carries the step series and a shape per candidate; the con
   assert.equal(ladder.rounds.length, rows.length, 'the chart and the rail are the same rounds, not two lists')
 })
 
+test('a baseline recorded in another metric is not the same absence as no baseline, and says which it is', async () => {
+  // `standingBaseline()` is the one reader of "is there a baseline", and it refuses a baseline measured
+  // in a different metric rather than comparing two quantities. The two cases read differently on
+  // both surfaces: "no frozen baseline" sends a reader looking for a file that is not there, and
+  // "the frozen baseline records logloss, not auc" sends them to the file that *is* there.
+  const ports = openWorkspace({ config: config({ auc: 'up' }, 'auc', { stop: { max_rounds: 0 } }) })
+  seedConfig(ports.store, ports.config)
+  await runCandidate(ports, { candidateId: 'r1-c1', round: 1, metrics: { auc: 0.7401 } })
+  const dir = dirname(ports.store.path)
+  ports.store.close()
+  writeFileSync(join(dir, 'baseline.json'), JSON.stringify({ metric: 'logloss', value: 0.62 }))
+
+  const ladder = conclusionHandler(dir, {}).data.ladder
+
+  assert.equal(ladder.baseline, null, 'a baseline in another metric is not a baseline for this one')
+  assert.match(ladder.baselineAbsent, /records logloss, not auc/, 'and the sentence names both metrics')
+})
+
 // ---------------------------------- the candidate inspector's payload (ticket #5)
 
 test('the candidate route hands the page the whole path, the shape word and the hypothesis', async () => {

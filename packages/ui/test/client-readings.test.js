@@ -13,8 +13,8 @@
  *   - the words over `reserved − settled` say what the number is — a reservation, including what a
  *     finished candidate did not spend — and never "in flight".
  *
- * The screenshots are the other half (`notes-spec1/shots/issue-4-*.png`); this file is what fails in
- * CI when the two drift apart.
+ * The screenshots are the other half — a throwaway harness outside the repo, and the screenshots
+ * taken beside this suite; this file is what fails in CI when the two drift apart.
  */
 
 import assert from 'node:assert/strict'

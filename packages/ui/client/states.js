@@ -43,8 +43,14 @@ export const SHAPE_WORDS = Object.freeze({
   invalid: 'invalid artifact',
 })
 
-/** What a round did to the best result — the projection decides which one applies, this names it. */
-export const VERDICT_WORDS = Object.freeze({ raised: 'raised', held: 'held', empty: 'empty round' })
+/**
+ * What a round did to the best result — the projection decides which one applies, this names it.
+ *
+ * `running` is the unfinished round: its candidates are still spending, so it has not produced nothing
+ * (that is `empty`), it simply has not concluded. A rail that called it "empty round" while drawing
+ * its squares as in flight said two things about one cell.
+ */
+export const VERDICT_WORDS = Object.freeze({ raised: 'raised', held: 'held', empty: 'empty round', running: 'running' })
 
 /** The two facts about a phase that are not states: never entered, and entered but never judged. */
 export const MARK_WORDS = Object.freeze({ 'no-verdict': 'no verdict', 'not-reached': 'not reached' })

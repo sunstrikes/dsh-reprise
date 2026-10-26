@@ -243,6 +243,50 @@ function trailing(rounds, predicate) {
   return streak
 }
 
+/**
+ * The two streaks the round rules measure, over the rounds that have **finished**.
+ *
+ * Exported because two surfaces print them: the stop gauges here, and the readings row the projection
+ * publishes (`overview.rounds.emptyStreak` / `noImprovementStreak`). They used to be two loops — one
+ * over the completed rounds, one over the whole history — and on a live run the row said "empty
+ * streak 1" while the gauge measured "0/2", because the round still in flight has produced nothing
+ * *yet* and the whole-history loop counted that as an empty round. One loop, one number.
+ *
+ * `flat` is the no-improvement streak *as the rule measures it*: an improvement is a gain of at least
+ * the contract's `minimum_effective_delta`, not merely a strictly better number. `roundHistory`'s
+ * `improving` flag answers a different question (did the running best rise at all), so it cannot be
+ * used here without the two counters disagreeing on a gain smaller than the tolerance.
+ *
+ * @param {{ rounds?: object[], contract?: object }} facts
+ * @returns {{ empty: number, flat: number, best?: object }} `best` is the result the streak is up against, for the message
+ */
+export function roundStreaks({ rounds = [], contract } = {}) {
+  const completed = rounds.filter((entry) => entry.complete)
+  const ok = contract?.status === 'ok'
+  const rule = ok ? primaryRule(contract) : undefined
+  const direction = ok ? rule?.direction : undefined
+  const tolerance = ok ? (rule?.minimum_effective_delta ?? 0) : 0
+
+  let best
+  let flat = 0
+  for (const entry of completed) {
+    // An empty round is the other rule's phenomenon; it neither improves nor "fails to improve".
+    if (entry.best === undefined) continue
+    if (best === undefined) {
+      best = { ...entry.best, round: entry.round }
+      continue
+    }
+    if (effectiveImprovement(entry.best.value, best.value, direction, tolerance)) {
+      best = { ...entry.best, round: entry.round }
+      flat = 0
+    } else {
+      flat += 1
+    }
+  }
+
+  return { empty: trailing(completed, (entry) => entry.empty), flat, best }
+}
+
 /** How many windows the run has measured, taken from the longest series any subject recorded. */
 function windowsMeasured(samples) {
   const lengths = [samples?.baseline, ...Object.values(samples?.candidates ?? {})].map((series) =>
@@ -318,37 +362,21 @@ function measureRules({ limits, view, rounds, contract = view.contract, samples,
         : {}),
     })
   } else {
-    const direction = rule?.direction
-    let bestSoFar
-    let streak = 0
-    for (const entry of completed) {
-      // An empty round is the other rule's phenomenon; it neither improves nor "fails to improve".
-      if (entry.best === undefined) continue
-      if (bestSoFar === undefined) {
-        bestSoFar = { ...entry.best, round: entry.round }
-        continue
-      }
-      if (effectiveImprovement(entry.best.value, bestSoFar.value, direction, tolerance)) {
-        bestSoFar = { ...entry.best, round: entry.round }
-        streak = 0
-      } else {
-        streak += 1
-      }
-    }
+    // The same function the readings row reads, so the gauge and the cell are one number rather than
+    // two loops that happen to agree on a finished run.
+    const { empty, flat, best } = roundStreaks({ rounds, contract })
     const held =
-      bestSoFar === undefined
+      best === undefined
         ? `${primary} (no result yet)`
-        : `${primary}=${bestSoFar.value} set by ${bestSoFar.candidate_id} in round ${bestSoFar.round}`
+        : `${primary}=${best.value} set by ${best.candidate_id} in round ${best.round}`
     const by = tolerance > 0 ? ` by at least ${tolerance}` : ''
     measured.set('max_no_improvement_rounds', {
-      observed: streak,
-      message: `${streak} completed round(s) without beating ${held}${by} (stop.max_no_improvement_rounds=${limits.max_no_improvement_rounds})`,
+      observed: flat,
+      message: `${flat} completed round(s) without beating ${held}${by} (stop.max_no_improvement_rounds=${limits.max_no_improvement_rounds})`,
     })
-
-    const emptyStreak = trailing(completed, (entry) => entry.empty)
     measured.set('consecutive_empty_rounds', {
-      observed: emptyStreak,
-      message: `${emptyStreak} consecutive completed round(s) produced no comparable ${primary} result (stop.consecutive_empty_rounds=${limits.consecutive_empty_rounds})`,
+      observed: empty,
+      message: `${empty} consecutive completed round(s) produced no comparable ${primary} result (stop.consecutive_empty_rounds=${limits.consecutive_empty_rounds})`,
     })
   }
 

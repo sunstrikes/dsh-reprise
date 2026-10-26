@@ -170,6 +170,10 @@ window.__ModuleLoader__.load({
       'ladder.init': 'INIT',
       'ladder.baseline': 'baseline',
       'ladder.baselineMissing': 'baseline not recorded — no INIT line',
+      // Why there is no line: a run that froze no baseline and a baseline recording another metric are
+      // two different reasons, and the projection publishes which one it is.
+      'ladder.baselineMissingWhy': 'no INIT line — {why}',
+      'ladder.noBaselineWhy': ' No INIT line: {why}.',
       'ladder.keyBaseline': 'baseline {value} · INIT frozen',
       'ladder.asTable': 'Read it as a table',
       'ladder.round': 'round',
@@ -195,7 +199,6 @@ window.__ModuleLoader__.load({
       'readings.gpu': 'GPU hours',
       'readings.gpuUnit': '/ {limit} GPU h',
       'readings.gpuUnitUnlimited': 'GPU h, no cap',
-      'readings.gpuHours': 'GPU h',
       'readings.reserved':
         'reserved, not yet settled {n} — held against the ledger, including what a finished candidate did not spend',
       'readings.tokens': 'tokens {n}',
@@ -284,6 +287,7 @@ window.__ModuleLoader__.load({
       'verdict.raised': 'raised',
       'verdict.held': 'held',
       'verdict.empty': 'empty round',
+      'verdict.running': 'running',
 
       'mark.no-verdict': 'no verdict',
       'mark.not-reached': 'not reached',
@@ -372,6 +376,8 @@ window.__ModuleLoader__.load({
       'ladder.init': 'INIT',
       'ladder.baseline': '基线',
       'ladder.baselineMissing': '基线未记录——没有 INIT 线',
+      'ladder.baselineMissingWhy': '没有 INIT 线 — {why}',
+      'ladder.noBaselineWhy': ' 没有 INIT 线：{why}。',
       'ladder.keyBaseline': '基线 {value} · INIT 冻结',
       'ladder.asTable': '读成表',
       'ladder.round': '轮次',
@@ -396,7 +402,6 @@ window.__ModuleLoader__.load({
       'readings.gpu': 'GPU 小时',
       'readings.gpuUnit': '/ {limit} GPU h',
       'readings.gpuUnitUnlimited': 'GPU h，无上限',
-      'readings.gpuHours': 'GPU h',
       'readings.reserved': '预留未结算 {n} —— 记在账上，含已完成候选没花掉的部分',
       'readings.tokens': 'tokens {n}',
       'readings.frontier': '前沿',
@@ -483,6 +488,7 @@ window.__ModuleLoader__.load({
       'verdict.raised': '改进',
       'verdict.held': '持平',
       'verdict.empty': '空轮',
+      'verdict.running': '进行中',
 
       'mark.no-verdict': '无判定',
       'mark.not-reached': '未到',
@@ -531,6 +537,20 @@ window.__ModuleLoader__.load({
     }
 
     const say = (t, key, params) => fill(t(key), params)
+
+    /**
+     * The word for a payload identifier, and the identifier itself when the dictionary has none.
+     *
+     * A key built out of a payload word (`rule.max_windows`) is one the dictionary cannot be checked
+     * for at build time. `hold.*` already reads its answer this way; `rule.*` used to print the raw
+     * *key* instead, so a rule the kernel added met a reader as `rule.max_cost`. Both families now
+     * answer with `rule.max_cost` -> `max_cost`: wrong and legible, rather than wrong and unreadable.
+     */
+    const wordFor = (t, family, id) => {
+      const key = `${family}.${id}`
+      const word = say(t, key)
+      return word === key ? String(id) : word
+    }
 
     /** A fact's stamp on screen: `#9`. One spelling, because a reader quotes it back. */
     const seqStamp = (seq) => `#${seq}`
@@ -610,7 +630,7 @@ window.__ModuleLoader__.load({
      * is *stopping*, not succeeding, so the gauge is a distance and never a progress bar.
      */
     function stopRule(t, fmt, rule, { fired = false } = {}) {
-      const name = say(t, `rule.${rule.rule}`)
+      const name = wordFor(t, 'rule', rule.rule)
       const reading =
         rule.enabled !== true
           ? say(t, 'stop.off')
@@ -654,7 +674,7 @@ window.__ModuleLoader__.load({
           h(
             'p',
             { className: 'note', key: `note-${rule.rule}` },
-            `${say(t, `rule.${rule.rule}`)}: ${rule.reason ?? rule.unmeasured ?? say(t, 'stop.noReading')}`,
+            `${wordFor(t, 'rule', rule.rule)}: ${rule.reason ?? rule.unmeasured ?? say(t, 'stop.noReading')}`,
           ),
         )
     }
@@ -733,11 +753,20 @@ window.__ModuleLoader__.load({
       const book = useRef(null)
       if (book.current === null) book.current = newBook()
       const alive = useRef(true)
+      /**
+       * The generation of the read in flight. Two reads can be outstanding at once — a poll and the
+       * click that re-points the inspector — and they finish in whatever order the Host answers, so
+       * the last *response* to land used to win rather than the last one *started*: click two squares
+       * quickly and the inspector flipped back to the earlier candidate for one read while the newer
+       * square stayed pressed. A read applies its answer only while it is still the newest.
+       */
+      const gen = useRef(0)
       // What the poll should ask for on its next tick. A ref, so changing the selection does not tear
       // down and rebuild the interval (which would also reset its phase).
       const chosen = useRef(null)
 
       const poll = useCallback(async (candidateId) => {
+        const mine = ++gen.current
         try {
           const [overview, rounds, conclusion, calls] = await Promise.all([
             readView('overview', book.current),
@@ -749,7 +778,9 @@ window.__ModuleLoader__.load({
             candidateId === null || candidateId === undefined
               ? null
               : await readView('candidate', book.current, { candidate: candidateId })
-          if (!alive.current) return
+          // A newer read started while this one was in flight: its answer is the one that describes the
+          // page now, and applying this one would overwrite it with an older selection.
+          if (!alive.current || mine !== gen.current) return
           setSnapshot({
             overview,
             rounds,
@@ -762,7 +793,7 @@ window.__ModuleLoader__.load({
           setFailure(null)
           setReadAt(Date.now())
         } catch (error) {
-          if (!alive.current) return
+          if (!alive.current || mine !== gen.current) return
           // The last good page stays up (spec §6.9's 500 row); what changes is the strip that says why.
           setFailure(error instanceof Error ? error.message : String(error))
         }
@@ -888,7 +919,7 @@ window.__ModuleLoader__.load({
           stamp('readAt', say(t, 'stamp.readAt'), fmt.clock(readAt)),
           // The instant the cursor names — one published value, rendered twice.
           stamp('lastFact', say(t, 'stamp.lastFact'), fmt.clock(fmt.cursorAt(cursorKey))),
-          stamp('cursor', say(t, 'stamp.cursor'), cursorKey === null ? '—' : fmt.cursor(cursorKey)),
+          stamp('cursor', say(t, 'stamp.cursor'), cursorKey === null ? fmt.EM_DASH : fmt.cursor(cursorKey)),
         ]),
       ])
     }
@@ -1157,10 +1188,14 @@ window.__ModuleLoader__.load({
       const metric = ladder?.metric ?? null
       const axis = ladder?.axis ?? null
       const baseline = ladder?.baseline ?? null
+      // The projection distinguishes "no frozen baseline was recorded" from "the frozen baseline
+      // records another metric"; the key and the sentence say which, because "not recorded" over the
+      // second case would send a reader looking for a file that is right there.
+      const baselineAbsent = ladder?.baselineAbsent ?? null
       const best = conclusion?.data?.best ?? null
       const slots = rows.length + 1
       const slot = 100 / slots
-      const summary = ladderSentence(t, fmt, { rows, best, baseline, metric })
+      const summary = ladderSentence(t, fmt, { rows, best, baseline, baselineAbsent, metric })
 
       const grid = h('div', { className: 'ladder', 'data-slots': String(slots), style: { '--reprise-slot': `${slot}%` } }, [
         axis === null
@@ -1179,7 +1214,7 @@ window.__ModuleLoader__.load({
           ? h('p', { className: 'note', key: 'no-axis' }, ladder?.axisAbsent ?? say(t, 'ladder.noAxis'))
           : null,
         grid,
-        ladderKey(t, fmt, words, { baseline }),
+        ladderKey(t, fmt, words, { baseline, baselineAbsent }),
         ladderTable(t, fmt, { rows, metric }),
       ])
     }
@@ -1308,7 +1343,7 @@ window.__ModuleLoader__.load({
     }
 
     /** The key: the five shapes and the baseline line, because a shape nobody can name is decoration. */
-    function ladderKey(t, fmt, words, { baseline }) {
+    function ladderKey(t, fmt, words, { baseline, baselineAbsent }) {
       const key = []
       for (const shape of Object.keys(words.SHAPE_WORDS)) {
         key.push(
@@ -1320,7 +1355,13 @@ window.__ModuleLoader__.load({
       }
       key.push(
         baseline === null
-          ? h('span', { key: 'baseline' }, say(t, 'ladder.baselineMissing'))
+          ? h(
+              'span',
+              { key: 'baseline' },
+              baselineAbsent === null
+                ? say(t, 'ladder.baselineMissing')
+                : say(t, 'ladder.baselineMissingWhy', { why: baselineAbsent }),
+            )
           : h('span', { key: 'baseline' }, [
               h('span', { className: 'ladder-key-line', key: 'line' }),
               say(t, 'ladder.keyBaseline', { value: fmt.number(baseline.value) }),
@@ -1387,7 +1428,7 @@ window.__ModuleLoader__.load({
      * round it was set in, and whether a baseline was recorded at all. "No baseline" is a sentence here,
      * never a zero and never an em dash.
      */
-    function ladderSentence(t, fmt, { rows, best, baseline, metric }) {
+    function ladderSentence(t, fmt, { rows, best, baseline, baselineAbsent, metric }) {
       const what =
         best === null || best === undefined
           ? say(t, 'ladder.nothingYet', { rounds: rows.length, metric: metric ?? say(t, 'ladder.result') })
@@ -1399,7 +1440,9 @@ window.__ModuleLoader__.load({
             })
       const against =
         baseline === null
-          ? say(t, 'ladder.noBaseline')
+          ? baselineAbsent === null
+            ? say(t, 'ladder.noBaseline')
+            : say(t, 'ladder.noBaselineWhy', { why: baselineAbsent })
           : say(t, 'ladder.againstBaseline', { value: fmt.number(baseline.value) })
       return what + against
     }
@@ -1530,9 +1573,7 @@ window.__ModuleLoader__.load({
                       `${entry.candidate_id} — ${
                         entry.reason === null || entry.reason === undefined
                           ? say(t, 'hold.none')
-                          : say(t, `hold.${entry.reason}`) === `hold.${entry.reason}`
-                            ? entry.reason
-                            : say(t, `hold.${entry.reason}`)
+                          : wordFor(t, 'hold', entry.reason)
                       }`,
                     ),
                   ),

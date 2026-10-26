@@ -26,6 +26,8 @@ Two rules hold the package together:
 | `GET /api/reprise/page` | the page itself (plain ESM module next to it; no build step) |
 | `GET /api/reprise/dashboard.js` | the page's module |
 | `GET /api/reprise/format.js` | the one formatting source both clients import: clock times, numbers, percentages, cursors |
+| `GET /api/reprise/states.js` | the one candidate-state vocabulary both clients name a state with: shapes, round verdicts, phase marks |
+| `GET /api/reprise/dashboard.css` | the one stylesheet both clients paint from: the `--reprise-*` token block and every component |
 
 Two answers on the overview are deliberately `null` rather than `0`: `cards.inUse`, and the orphan /
 foreign job lists. The page is session-free and has no platform port, so it has not read the
@@ -76,12 +78,18 @@ order would be a second definition of "the facts, in order".
 
 ## Client
 
-`client/index.html`, `client/dashboard.js` and `client/format.js` are plain ESM served from this
-package — nothing to build. `format.js` imports nothing and is imported by both clients (the page as
-`./format.js`, the Web UI panel by the route URL), so one formatter answers for both. Colour comes from the host's `--dsw-alias-*` theme tokens with CSS system colours
-(`Canvas`, `CanvasText`, `ButtonBorder`, `AccentColor`) as the fallback when the token sheet is not
-loaded; there is no palette and no hard-coded colour. The four gate states are distinguished by name
-and border weight rather than by hue.
+`client/index.html`, `client/dashboard.js`, `client/format.js`, `client/states.js` and
+`client/dashboard.css` are served from this package — nothing to build. `format.js` imports nothing
+and is imported by both clients (the page as `./format.js`, the Web UI panel by the route URL), and
+`states.js` is served the same way, so one formatter and one vocabulary answer for both surfaces.
+`dashboard.css` is the single stylesheet: the page links it, the panel injects the identical text, and
+every rule is scoped under `.reprise` (the `:root` block declares `--reprise-*` properties only) so
+injecting it cannot repaint the host document. Colour comes from the host's `--dsw-alias-*` theme
+tokens with CSS system colours (`Canvas`, `CanvasText`, `ButtonBorder`, `AccentColor`) as the
+fallback when the token sheet is not loaded; there is no palette and no hard-coded colour — the scan
+in `test/client.test.js` walks every file under `packages/ui/client` *and* `packages/core/client`, so
+the panel is covered by the same rule. The four gate states are distinguished by name and border
+weight rather than by hue.
 
 ## What has not been verified
 
