@@ -1323,7 +1323,9 @@ window.__ModuleLoader__.load({
       const ladder = conclusion?.data?.ladder ?? null
 
       if (!Array.isArray(rows) || rows.length === 0) {
-        return h('section', { className: 'card' }, [
+        // A figure, not a card — the same component the page uses, so the dock and the sheet show one
+        // design. Boxing the staircase is what made nine equal-weight panels of this page.
+        return h('section', { className: 'figure' }, [
           h('h2', { key: 'title' }, say(t, 'ladder.title')),
           h('p', { className: 'empty', key: 'empty' }, rounds?.reason ?? say(t, 'ladder.noRounds')),
         ])
@@ -1351,7 +1353,7 @@ window.__ModuleLoader__.load({
         rail(t, fmt, words, { rows, metric, slots, selected, onSelect }),
       ])
 
-      return h('section', { className: 'card' }, [
+      return h('section', { className: 'figure' }, [
         h('h2', { key: 'title' }, say(t, 'ladder.title')),
         h('p', { className: 'ladder-summary', key: 'summary' }, summary),
         axis === null
@@ -1782,14 +1784,14 @@ window.__ModuleLoader__.load({
       const title = h('h2', { key: 'title' }, say(t, 'tree.title'))
 
       if (data === null || data === undefined) {
-        return h('section', { className: 'card' }, [
+        return h('section', { className: 'figure' }, [
           title,
           h('p', { className: 'empty', key: 'empty' }, tree?.reason ?? say(t, 'tree.empty')),
         ])
       }
       const notes = (data.notes ?? []).map((note, index) => h('p', { className: 'note', key: `note-${index}` }, note))
       if (data.nodes.length === 0) {
-        return h('section', { className: 'card' }, [title, ...notes, h('p', { className: 'empty', key: 'empty' }, say(t, 'tree.noCandidates'))])
+        return h('section', { className: 'figure' }, [title, ...notes, h('p', { className: 'empty', key: 'empty' }, say(t, 'tree.noCandidates'))])
       }
 
       const base = say(t, 'tree.summary', {
@@ -1905,7 +1907,7 @@ window.__ModuleLoader__.load({
         ),
       )
 
-      return h('section', { className: 'card' }, [
+      return h('section', { className: 'figure' }, [
         title,
         ...notes,
         h('p', { className: 'tree-summary', key: 'summary' }, summary),

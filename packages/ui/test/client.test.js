@@ -501,7 +501,23 @@ test('the stylesheet is scoped, so the panel can inject it without repainting th
   // Ticket #6 injects this file verbatim into the Web UI panel. A bare `table`, `button` or `body`
   // rule would restyle the host's own chrome, which is why every rule is scoped under `.reprise`
   // (or is the `:root` token block, which only declares `--reprise-*` custom properties).
-  const css = read('dashboard.css').replace(/\/\*[\s\S]*?\*\//g, '')
+  //
+  // `@keyframes` blocks are not selectors — `from` and `to` inside one are animation steps, and a scan
+  // that read them as selectors would forbid every animation this sheet could ever define. They are
+  // removed first, with their braces matched, and the removal is checked rather than trusted: a strip
+  // that silently matched nothing would put the steps straight back in front of the scan.
+  const raw = read('dashboard.css')
+  // One nesting level, which is all a `@keyframes` block may have: steps, and declarations inside them.
+  const KEYFRAME_BLOCK = /@keyframes\s+[a-zA-Z0-9-]+\s*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}/g
+  const css = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(KEYFRAME_BLOCK, '')
+  assert.doesNotMatch(css, /^\s*(from|to|\d+%)\s*\{/m, 'no keyframe step escaped the strip above')
+  // And it stripped only that: an over-eager match would eat the rules after it, and the scan would
+  // then pass by finding nothing — so name one selector from the end of the sheet.
+  assert.match(css, /\.reprise \.call-ref\b/, 'the strip took the keyframes block and nothing past it')
+  // An animated name is injected into the host's document, so it may not be a name the host might use.
+  for (const match of raw.matchAll(/@keyframes\s+([a-zA-Z0-9-]+)/g)) {
+    assert.match(match[1], /^reprise-/, `the animation "${match[1]}" is not namespaced, and it is injected into the host`)
+  }
   const selectors = []
   for (const match of css.matchAll(/([^{}]+)\{/g)) {
     for (const part of match[1].split(',')) {

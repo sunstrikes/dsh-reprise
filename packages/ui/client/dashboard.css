@@ -39,34 +39,56 @@
   --reprise-text: var(--dsw-alias-label-primary, CanvasText);
   --reprise-dim: var(--dsw-alias-label-secondary, GrayText);
   --reprise-faint: var(--dsw-alias-label-tertiary, GrayText);
-  --reprise-border: var(--dsw-alias-border-l1, ButtonBorder);
-  --reprise-border-weak: var(--dsw-alias-border-l1, ButtonBorder);
-  --reprise-border-strong: var(--dsw-alias-border-l3, currentColor);
-  --reprise-accent: var(--dsw-alias-brand-primary, AccentColor);
+
+  /* Three weights of rule, and only three. This page is a ledger, so a line is never decoration: it
+     either separates two rows of the same table (hairline), opens a region (ledger) or carries a
+     conclusion (anchor). Having one name per weight is what keeps a redesign from drifting into
+     "every box gets a medium border", which is how nine equal weight cards happened once already.
+     They were `--reprise-border`, `--reprise-border-weak` and `--reprise-border-strong` before this,
+     which named the same three weights by an adjective instead of by the job the line does. */
+  --reprise-rule-hairline: var(--dsw-alias-border-l1, ButtonBorder);
+  /* `GrayText` and not `ButtonBorder` as this one's fallback, and that is the point of a middle weight:
+     a page served on its own has no `--dsw-alias-*` theme, and if the first two steps both fell back to
+     the same system colour there would be two weights wearing three names. Dim ink is a real second
+     step — a frame above a row divider. */
+  --reprise-rule-ledger: var(--dsw-alias-border-l2, GrayText);
+  --reprise-rule-anchor: var(--dsw-alias-border-l3, currentColor);
   --reprise-link: var(--dsw-alias-link, AccentColor);
   /* The one colour the design spends: committed and not yet settled. It lives only in the budget
      bar's hatch, which is also a texture, so the meaning survives a reader who cannot see it. */
   --reprise-committed: var(--dsw-alias-state-warn-primary, currentColor);
-  /* The running mark in the phase capsule. Decoration beside a printed word, never the only signal. */
-  --reprise-live: var(--dsw-alias-state-success-primary, AccentColor);
 
   /* Type. The host serves a system sans; identifiers and numbers are this design's display face. */
   --reprise-font: var(--dsw-font-family, system-ui, -apple-system, 'PingFang SC', sans-serif);
   --reprise-mono: var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace);
+  /* The prose measure, in characters. A sentence that runs the width of a 1400px sheet is one the
+     eye cannot return from, so every paragraph of argument stops at this and wraps. */
+  --reprise-read: 65ch;
 
-  /* Spacing and corners: two radii only, and a 4/8/12/16/20/24/28 spacing scale (spec §5.3). */
-  --reprise-radius: var(--dsw-radius-md, 0.75rem);
-  --reprise-radius-sm: 0.375rem;
+  /* Spacing and corners: two radii only, and a 4/8/12/16/20/24/28 spacing scale (spec §5.3).
+     The radius follows the host's *small* step, and falls back to 6px: a card kit's 12px rounding
+     is what made this page read as a SaaS dashboard rather than as an instrument panel. */
+  --reprise-radius: var(--dsw-radius-sm, 0.375rem);
+  --reprise-radius-sm: 0.1875rem;
   --reprise-gap: 0.75rem;
   --reprise-gap-lg: 1.75rem;
 
   /* The staircase's geometry. `--reprise-slot` is set per render: one slot's share of the plot
-     width, shared by the chart's marks and the rail's cells. */
+     width, shared by the chart's marks and the rail's cells. `--reprise-slot-cap` is the widest one
+     slot is allowed to get — a run with two rounds would otherwise draw three marks across 1300px
+     of empty sheet. See the `.ladder[data-slots]` rules below. */
   --reprise-axis-width: 3.5rem;
   --reprise-plot-height: 13rem;
-  --reprise-marker: 9px;
-  --reprise-square-width: 9px;
-  --reprise-square-height: 22px;
+  --reprise-slot-cap: 22rem;
+  --reprise-marker: 11px;
+  --reprise-square-width: 11px;
+  --reprise-square-height: 24px;
+
+  /* What a drawing is drawn *on*. A hollow marker, an open tree node and the baseline's label all have
+     to knock a hole in whatever they sit in front of, and that paint is the page's ground on the sheet
+     and the card's surface inside the panel — one name, two mounts, so no component has to know which
+     it is in. `.card` re-points it. */
+  --reprise-plot-bg: var(--reprise-bg);
 }
 
 /* ------------------------------------------------------------------ the page's own chrome */
@@ -77,13 +99,23 @@
      *host's* controls and scrollbars into the same scheme, which is the host's decision and not ours. */
   color-scheme: light dark;
   box-sizing: border-box;
-  margin: 0;
-  padding: 1.5rem;
+  /* The page is a sheet of a fixed maximum width, centred: past 88rem the extra columns of a wide
+     monitor add nothing but eye travel, and the staircase's slots get wider than they are tall. */
+  max-width: 88rem;
+  margin: 0 auto;
+  padding: 1.5rem 2rem 3.5rem;
   background: var(--reprise-bg);
   color: var(--reprise-text);
   font-family: var(--reprise-font);
   font-size: 0.875rem;
   line-height: 1.55;
+  /*
+   * The domain of this page is a measurement: metric values, candidate ids, round numbers, `#seq`
+   * stamps, clock times and phase names. None of them is prose, and a column of digits that shifts
+   * sideways as the values change cannot be compared down its own left edge. So every numeral on the
+   * page is tabular, declared once here instead of in each component that happens to print a number.
+   */
+  font-variant-numeric: tabular-nums;
 }
 
 .reprise *,
@@ -104,16 +136,21 @@
   overflow: auto;
 }
 
+/*
+ * Three heading levels, and not one of them shouts. An all-caps tracked-out label above a block is
+ * the house style of a template, and this page's own subject — an experiment ledger — puts its weight
+ * in the numbers, not in the words around them. So: sentence case, nominal tracking, and weight only
+ * where a region genuinely outranks the one below it.
+ */
 .reprise h1 {
   margin: 0;
   font-size: 0.8125rem;
   font-weight: 600;
-  letter-spacing: 0.01em;
 }
 
 .reprise h2 {
   margin: 0 0 0.5rem;
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
   font-weight: 600;
   line-height: 1.3;
 }
@@ -133,6 +170,12 @@
   color: var(--reprise-link);
 }
 
+/*
+ * The masthead is the ledger's letterhead, and the anchor-weight rule under it is the one line on the
+ * page that divides what is *declared* from what is *claimed*: above it, provenance (what this is,
+ * whether it is running, whose workspace); below it, every number the page stands behind. That single
+ * division is what makes this a sheet with a head rather than a column of boxes that begins somewhere.
+ */
 .reprise .masthead {
   display: flex;
   flex-wrap: wrap;
@@ -140,12 +183,11 @@
   justify-content: space-between;
   gap: 0.5rem 1.25rem;
   margin-bottom: 1.25rem;
-  padding-bottom: 0.75rem;
-  border-bottom: 1px solid var(--reprise-border-weak);
+  padding-bottom: 0.625rem;
+  border-bottom: 2px solid var(--reprise-rule-anchor);
 }
 
-.reprise .masthead-run,
-.reprise .masthead-stamps {
+.reprise .masthead-run {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -154,10 +196,39 @@
 }
 
 /*
- * The phase capsule: a dot and two words. The dot is decoration — running is a filled green-adjacent
- * mark, stopped is the tertiary ink — and the state word beside it is what actually says which. A
- * reader who cannot see the dot still reads `running` or `stopped`; that is why the word is not
- * optional (and why no rule here may rely on hue alone).
+ * The four stamps — workspace, read at, last fact, cursor — divided by hairlines instead of floating
+ * apart with a gap. Each one is a labelled claim about an instant or an address; a rule between them
+ * says "these are four columns of one row", which is the truth, and it stops a long workspace path
+ * from pushing the other three to a different part of the line.
+ */
+.reprise .masthead-stamps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0;
+  min-width: 0;
+}
+
+.reprise .masthead-stamps .stamp {
+  padding: 0 0.75rem;
+  border-left: 1px solid var(--reprise-rule-hairline);
+}
+
+.reprise .masthead-stamps .stamp:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.reprise .masthead-stamps .stamp:last-child {
+  padding-right: 0;
+}
+
+/*
+ * The phase capsule: a dot and two words. The dot is decoration, and now it is decoration with no
+ * hue either — running is a solid mark, stopped is an open ring — because a green dot beside the word
+ * "running" was the one place a colour told a reader something the words already said. The state word
+ * is what says which; a reader who cannot see the dot at all still reads `running` or `stopped`, and
+ * that is why the word is not optional, and why nothing here may rely on hue.
  */
 /*
  * Named `phase-capsule` and not `phase`: the candidate inspector already owns `.phase` for its path of
@@ -172,22 +243,26 @@
      neither may wrap and turn a one-glyph read into a paragraph. */
   white-space: nowrap;
   padding: 0 0.4375rem;
-  border: 1px solid var(--reprise-border);
+  border: 1px solid var(--reprise-rule-ledger);
   border-radius: 999px;
   font-family: var(--reprise-mono);
   font-size: 0.6875rem;
   line-height: 1.5;
 }
 
+/* Stopped: an open ring in tertiary ink. Running: the same mark, filled. Same size, so a phase change
+   moves nothing on the line — only the fill of a 6px circle changes. */
 .reprise .phase-capsule-dot {
   width: 6px;
   height: 6px;
+  border: 1px solid var(--reprise-faint);
   border-radius: 50%;
-  background: var(--reprise-faint);
+  background: transparent;
 }
 
 .reprise .phase-capsule[data-state='running'] .phase-capsule-dot {
-  background: var(--reprise-live);
+  border-color: currentColor;
+  background: currentColor;
 }
 
 .reprise .phase-capsule-name {
@@ -229,11 +304,32 @@
   overflow-wrap: anywhere;
 }
 
+/*
+ * One box, and it is for consulting rather than for reading: the inspector, the audit and the fact
+ * stream in the page's lower workbench, the stopped-run summary, and the same regions in the Web UI
+ * panel, which wraps everything in one. Everywhere else a region is opened by a rule, not by a frame.
+ * `.figure` below is the other half of the pair, and that split is the design: nine identical rounded
+ * cards is what this page used to be.
+ */
 .reprise .card {
   padding: 0.875rem 1rem;
   background: var(--reprise-surface);
-  border: 1px solid var(--reprise-border-weak);
+  border: 1px solid var(--reprise-rule-ledger);
   border-radius: var(--reprise-radius);
+  /* A drawing inside a pane knocks its holes out of the pane, not out of the page behind it. */
+  --reprise-plot-bg: var(--reprise-surface);
+}
+
+/*
+ * A figure: a region that is a drawing or a table rather than a pane. It has a rule across the top and
+ * no frame at all, so it reads as the next plate on the same sheet. The staircase and the tree are
+ * figures — they are the same evidence, drawn twice, and boxing each of them separately is what broke
+ * "the shape, then the structure" into two unrelated cards.
+ */
+.reprise .figure {
+  margin: 0;
+  padding: 1rem 0 0;
+  border-top: 1px solid var(--reprise-rule-ledger);
 }
 
 .reprise table {
@@ -246,7 +342,7 @@
 .reprise th,
 .reprise td {
   padding: 0.25rem 0.5rem 0.25rem 0;
-  border-bottom: 1px solid var(--reprise-border-weak);
+  border-bottom: 1px solid var(--reprise-rule-hairline);
   text-align: left;
   vertical-align: top;
 }
@@ -260,15 +356,11 @@
   padding: 0.125rem 0.375rem;
   color: var(--reprise-text);
   background: var(--reprise-surface-raised);
-  border: 1px solid var(--reprise-border);
+  border: 1px solid var(--reprise-rule-ledger);
   border-radius: var(--reprise-radius-sm);
   font-family: var(--reprise-mono);
   font-size: 0.75rem;
   cursor: pointer;
-}
-
-.reprise button[aria-pressed='true'] {
-  border-color: var(--reprise-accent);
 }
 
 .reprise button:focus-visible,
@@ -297,17 +389,22 @@
   overflow-x: auto;
   margin: 0.375rem 0 0;
   padding: 0.5rem;
-  border: 1px solid var(--reprise-border-weak);
+  border: 1px solid var(--reprise-rule-hairline);
   border-radius: var(--reprise-radius-sm);
   white-space: pre-wrap;
 }
 
 /* --------------------------------------------------------------- the conclusion line */
 
+/*
+ * The conclusion line: the page's first and loudest statement, and the only place a size this large
+ * appears. The number is set in the identifier face at 44px with negative tracking so it reads as a
+ * measurement rather than as a headline, and it sits on the same baseline as the metric's name.
+ */
 .reprise .headline {
   margin: 0 0 1.5rem;
   padding-bottom: 1rem;
-  border-bottom: 1px solid var(--reprise-border-weak);
+  border-bottom: 1px solid var(--reprise-rule-hairline);
 }
 
 .reprise .headline-value {
@@ -320,25 +417,27 @@
 
 .reprise .headline-number {
   font-family: var(--reprise-mono);
-  font-size: 2.5rem;
+  font-size: 2.75rem;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
-  line-height: 1;
-  letter-spacing: -0.02em;
+  line-height: 0.95;
+  letter-spacing: -0.03em;
 }
 
 .reprise .headline-unit {
   color: var(--reprise-dim);
   font-family: var(--reprise-mono);
-  font-size: 0.8125rem;
+  font-size: 0.875rem;
 }
 
+/* The sentence under the number is prose, and prose stops at the reading measure: on a 1400px sheet a
+   sentence given the full width becomes a 120-character line the eye cannot return from. */
 .reprise .headline-sentence,
 .reprise .headline-empty {
-  max-width: 60rem;
+  max-width: var(--reprise-read);
   margin: 0.5rem 0 0;
   font-size: 0.8125rem;
-  line-height: 1.55;
+  line-height: 1.6;
 }
 
 .reprise .headline-empty {
@@ -350,25 +449,39 @@
  * distance from it, and the direction of every objective. They were the body of the retired
  * `Measured / published` card; they are not a card here, because they are not a subject of their own —
  * they are the three numbers the sentence above cannot fit.
+ *
+ * They are drawn as one ledger row: a dashed rule across the top, a hairline between columns, a label
+ * over its own value. The dashes say "these qualify the sentence above them", which is exactly their
+ * job, and the columns make them comparable down the page instead of four facts joined by dots.
  */
 .reprise .facts {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.375rem 1.75rem;
+  align-items: flex-start;
+  gap: 0.5rem 0;
   margin: 0.75rem 0 0;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--reprise-rule-hairline);
 }
 
 .reprise .fact {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.375rem;
+  flex-direction: column;
+  gap: 0.125rem;
   min-width: 0;
+  padding: 0 0.75rem;
+  border-left: 1px solid var(--reprise-rule-hairline);
+}
+
+.reprise .fact:first-child {
+  padding-left: 0;
+  border-left: 0;
 }
 
 .reprise .fact dt {
   color: var(--reprise-faint);
   font-size: 0.6875rem;
+  line-height: 1.3;
 }
 
 .reprise .fact dd {
@@ -404,15 +517,20 @@
  * The four gate states are told apart by their name and by the weight of their border, never by
  * hue: `ok` / `missing` / `invalid` / `conflict` has to survive a greyscale screenshot, and
  * `missing` (never judged) must never look like `invalid` (judged and refused).
+ *
+ * The word is printed exactly as the projection spells it. It used to be forced to capitals, which
+ * made `ok` an abbreviation of nothing a reader could see and turned every badge into a shout; lower
+ * case in the identifier face is quiet, and the border weight already carries the difference.
  */
 .reprise .badge {
   display: inline-block;
   padding: 0 0.375rem;
-  border: 1px solid var(--reprise-border);
+  border: 1px solid var(--reprise-rule-ledger);
   border-radius: var(--reprise-radius-sm);
   font-family: var(--reprise-mono);
   font-size: 0.6875rem;
-  text-transform: uppercase;
+  line-height: 1.5;
+  white-space: nowrap;
 }
 
 .reprise .badge[data-state='ok'],
@@ -428,7 +546,7 @@
 .reprise .badge[data-state='failed'],
 .reprise .badge[data-state='conflict'] {
   border-width: 2px;
-  border-color: var(--reprise-border-strong);
+  border-color: var(--reprise-rule-anchor);
   font-weight: 600;
 }
 
@@ -436,21 +554,30 @@
   box-shadow: inset 0 0 0 1px var(--reprise-surface);
 }
 
+/* A note is a sentence the run owes a reader: no frame, one 2px anchor rule down its left edge, and
+   the prose measure so it wraps where a sentence should rather than where the sheet ends. */
 .reprise .note {
+  max-width: var(--reprise-read);
   margin: 0.5rem 0 0;
-  padding: 0.375rem 0.5rem;
+  padding: 0.375rem 0 0.375rem 0.625rem;
   color: var(--reprise-text);
-  border-left: 2px solid var(--reprise-border-strong);
+  border-left: 2px solid var(--reprise-rule-anchor);
 }
 
+/*
+ * The warning is the loudest strip, and loud here means status: the same left-barred shape a note has,
+ * one pixel wider, a heavier sentence, and a raised ground instead of a tinted fill. A rounded callout
+ * with a coloured background is the house style of a dashboard; this page has already spent its one hue
+ * on the budget hatch, and a third way of drawing a bordered box is what the redesign removed.
+ */
 .reprise .warning {
+  max-width: var(--reprise-read);
   margin: 0.5rem 0 0;
-  padding: 0.375rem 0.5rem;
+  padding: 0.375rem 0.625rem;
   font-weight: 600;
   color: var(--reprise-text);
-  border: 1px solid var(--reprise-border-strong);
-  border-left-width: 2px;
-  border-radius: var(--reprise-radius-sm);
+  background: var(--reprise-surface-raised);
+  border-left: 3px solid var(--reprise-rule-anchor);
 }
 
 .reprise .empty,
@@ -500,7 +627,37 @@
   row-gap: 0.25rem;
 }
 
+/*
+ * A short run must not be stretched to the width of a long one.
+ *
+ * One round is two slots (INIT, R1) — and two slots across a 1400px sheet is 690px each for a step
+ * that is 208px tall: two marks and a long flat line in a desert, which reads as "the chart failed to
+ * load" rather than as "this run is young". So one slot may occupy at most `--reprise-slot-cap`, and
+ * the figure simply stops there. A drawing the size of its subject, with sheet to its right, is what a
+ * plate on a large sheet looks like.
+ *
+ * Two rules, because there are two shapes of the problem: `2` slots (one round) and `3` slots (two
+ * rounds). They are also the last two that need one — at four rounds the sheet's own 88rem maximum
+ * already puts a slot under the cap (344px) and every longer run is narrower still, so a rule for
+ * `4`–`6` would be dead code waiting to be mistaken for a decision.
+ *
+ * The legend under the chart is held to the same width. `~` is the general sibling combinator and the
+ * order it leans on — the grid, then the key — is the order `renderLadder` writes, with the readable
+ * fallback table after both of them; a legend set across 1376px under a 760px drawing is how one figure
+ * comes apart into two unrelated blocks.
+ */
+.reprise .ladder[data-slots='2'],
+.reprise .ladder[data-slots='2'] ~ .ladder-key {
+  max-width: calc(var(--reprise-axis-width) + 2 * var(--reprise-slot-cap));
+}
+
+.reprise .ladder[data-slots='3'],
+.reprise .ladder[data-slots='3'] ~ .ladder-key {
+  max-width: calc(var(--reprise-axis-width) + 3 * var(--reprise-slot-cap));
+}
+
 .reprise .ladder-summary {
+  max-width: var(--reprise-read);
   margin: 0 0 0.75rem;
   font-size: 0.8125rem;
   color: var(--reprise-dim);
@@ -535,12 +692,23 @@
   line-height: 1;
 }
 
+/*
+ * The plot, ruled like graph paper: one hairline at each of the three axis readings, so the box the
+ * staircase is drawn in is a scale a reader can measure against rather than an empty rectangle. It
+ * costs no markup — the rules are a repeating background — and it is the reason a nearly-flat run no
+ * longer looks like nothing was drawn. The bottom rule is a border because a background line at 100%
+ * lands on the bottom edge and gets clipped in half.
+ */
 .reprise .ladder-plot {
   position: relative;
   grid-column: 2;
   grid-row: 1;
   height: var(--reprise-plot-height);
   overflow: hidden;
+  background-image: linear-gradient(to bottom, var(--reprise-rule-hairline) 0 1px, transparent 1px);
+  background-size: 100% 50%;
+  background-repeat: repeat-y;
+  border-bottom: 1px solid var(--reprise-rule-hairline);
 }
 
 /* The INIT baseline: a dashed line across the full plot, one pixel, tertiary ink (spec §5.4). */
@@ -557,7 +725,7 @@
   right: 0;
   bottom: 2px;
   padding-left: 0.5rem;
-  background: var(--reprise-surface);
+  background: var(--reprise-plot-bg);
   color: var(--reprise-faint);
   font-family: var(--reprise-mono);
   font-size: 0.65625rem;
@@ -579,7 +747,7 @@
 }
 
 /*
- * The marker: a 9px diamond. Filled only where a round actually raised the best result; hollow where
+ * The marker: an 11px diamond. Filled only where a round actually raised the best result; hollow where
  * it held. An empty round gets no marker at all — the absence is the fact, and it reads as a gap.
  */
 .reprise .ladder-marker {
@@ -587,7 +755,7 @@
   width: var(--reprise-marker);
   height: var(--reprise-marker);
   border: 1.5px solid currentColor;
-  background: var(--reprise-surface);
+  background: var(--reprise-plot-bg);
   transform: translate(-50%, -50%) rotate(45deg);
 }
 
@@ -597,6 +765,12 @@
 
 /* --------------------------------------------------------------------------- the rail */
 
+/*
+ * The rail: the rounds as an axis under the plot. Each cell is one slot, and the hairline between two
+ * cells is the tick that marks where one round ends — the same device a ruled axis uses, and the thing
+ * that lets a reader find the round a marker is standing over. The cells carry no frame of their own:
+ * a row of five boxes under a chart is a second chart, and this is meant to be the chart's own scale.
+ */
 .reprise .rail {
   display: flex;
   grid-column: 2;
@@ -616,8 +790,12 @@
 .reprise .rail-cell {
   flex: 1 1 0;
   min-width: 0;
-  padding: 0.25rem 2px 0;
+  padding: 0.3125rem 2px 0;
   text-align: center;
+}
+
+.reprise .rail-cell + .rail-cell {
+  border-left: 1px solid var(--reprise-rule-hairline);
 }
 
 .reprise .rail-candidates {
@@ -634,6 +812,13 @@
   font-family: var(--reprise-mono);
   font-size: 0.625rem;
   line-height: 1.4;
+}
+
+/* The round that raised the best result is the one a reader looks for, so it is the one round label
+   set in ink. It is a weight, not a mark: the verdict word underneath already says `raised`. */
+.reprise .rail-cell[data-verdict='raised'] .rail-round {
+  color: var(--reprise-text);
+  font-weight: 600;
 }
 
 /*
@@ -691,8 +876,11 @@
   );
 }
 
+/* The selected square, ringed in ink rather than in the accent hue: one 9–11px mark among a dozen has
+   to be findable in a greyscale screenshot too, and a hue ring is also the thing that makes a
+   selected square stop advertising which of the five shapes it is. */
 .reprise .rail-candidate[aria-pressed='true'] {
-  outline: 2px solid var(--reprise-accent);
+  outline: 2px solid currentColor;
   outline-offset: 1px;
 }
 
@@ -778,6 +966,7 @@
  */
 
 .reprise .tree-summary {
+  max-width: var(--reprise-read);
   margin: 0 0 0.75rem;
   font-size: 0.8125rem;
   color: var(--reprise-dim);
@@ -799,22 +988,51 @@
 }
 
 /* An edge is a fact, not an ornament: one hairline, no arrowhead, and the two ends it names in
-   `data-from` / `data-to` so a probe can check the drawing against the projection. */
+   `data-from` / `data-to` so a probe can check the drawing against the projection. It is drawn fainter
+   than the nodes on purpose — the branch is the structure, the node is the subject. */
 .reprise .tree-edge {
   fill: none;
-  stroke: var(--reprise-border-strong);
+  stroke: var(--reprise-rule-anchor);
   stroke-width: 1;
-  opacity: 0.4;
+  opacity: 0.35;
 }
 
+/* The two edges that touch the candidate the inspector has open, in ink. A branch is a relationship,
+   so "which branch does *this* candidate sit on" is the one question the map is asked while a reader
+   is looking at the inspector — and it is answered by raising the two lines that touch the node rather
+   than by moving the node. */
+.reprise .tree-edge[data-selected='true'] {
+  opacity: 1;
+  stroke-width: 1.5;
+}
+
+/*
+ * The round header over each column — and, because these spans are the only elements that know where a
+ * column begins, the column rule itself: stretched to the map's full height with one hairline down the
+ * left edge, they turn the fixed pixel grid into a lattice. That is the reference line this region was
+ * missing: without it a reader had to infer from two nodes' x-positions which round a branch belonged
+ * to, and an edge crossing a round boundary had no boundary to cross.
+ *
+ * No new number is introduced here. The position and the width are the ones the renderer already used
+ * to place the header, so the rule and the nodes under it cannot disagree — which is the only property
+ * a reference line has to have.
+ */
 .reprise .tree-column {
   position: absolute;
   top: 0;
+  bottom: 0;
+  padding-bottom: 0.25rem;
+  border-left: 1px solid var(--reprise-rule-hairline);
   text-align: center;
   font-family: var(--reprise-mono);
   font-size: 0.625rem;
   line-height: 1.4;
   color: var(--reprise-faint);
+}
+
+/* The last column closes the lattice; without it the drawing trails off into the sheet on the right. */
+.reprise .tree-column:last-of-type {
+  border-right: 1px solid var(--reprise-rule-hairline);
 }
 
 .reprise .tree-node {
@@ -825,8 +1043,8 @@
   align-items: flex-start;
   box-sizing: border-box;
   padding: 6px 8px;
-  background: var(--reprise-surface);
-  border: 1px solid var(--reprise-border);
+  background: var(--reprise-plot-bg);
+  border: 1px solid var(--reprise-rule-ledger);
   border-radius: var(--reprise-radius-sm);
   color: var(--reprise-text);
   font-family: var(--reprise-font);
@@ -835,7 +1053,7 @@
 }
 
 .reprise .tree-node:hover {
-  border-color: var(--reprise-border-strong);
+  border-color: var(--reprise-rule-anchor);
 }
 
 .reprise .tree-node:focus-visible {
@@ -843,9 +1061,15 @@
   outline-offset: 1px;
 }
 
+/*
+ * The selected node is anchored, not haloed: a 3px bar of ink down its inside edge, the same device the
+ * rejection block and the warnings use for "this line is the one". A coloured ring said the same thing
+ * only to a reader who could see the colour, and the ring also moved the neighbouring nodes' optical
+ * edges by 2px every time the selection changed.
+ */
 .reprise .tree-node[aria-pressed='true'] {
-  outline: 2px solid var(--reprise-accent);
-  outline-offset: 1px;
+  border-color: var(--reprise-rule-anchor);
+  box-shadow: inset 3px 0 0 currentColor;
 }
 
 /* The root is not a candidate and not clickable: dotted, and it says so in its own line. */
@@ -962,7 +1186,7 @@
   display: block;
   width: 3.875rem;
   height: 0.375rem;
-  border: 1px solid var(--reprise-border);
+  border: 1px solid var(--reprise-rule-ledger);
   border-radius: 1px;
 }
 
@@ -1028,7 +1252,7 @@
 .reprise .stop-why {
   min-width: 0;
   padding-right: var(--reprise-gap);
-  border-right: 1px solid var(--reprise-border-weak);
+  border-right: 1px solid var(--reprise-rule-hairline);
 }
 
 .reprise .stop-why-rule {
@@ -1039,10 +1263,13 @@
   overflow-wrap: anywhere;
 }
 
+/* The recorded conclusion, in the run's own words: prose, so it stops at the reading measure even
+   though the column it sits in is half the sheet wide. */
 .reprise .stop-why-message {
+  max-width: var(--reprise-read);
   margin: 0.375rem 0 0;
   font-size: 0.8125rem;
-  line-height: 1.55;
+  line-height: 1.6;
 }
 
 .reprise .stop-why-reading {
@@ -1052,26 +1279,54 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* ================================================================== the readings row */
-
+/* ================================================================== the readings band
+ *
+ * Five readings in one band, not five cards.
+ *
+ * They are read as one line — how much of the run there is, what it cost, what it found, what it is
+ * occupying — and they used to be five separately rounded, separately gapped boxes whose bottoms
+ * ended in five different places because one of them carries a bar and a legend and another carries
+ * two words. One frame, internal hairlines, and cells that stretch to the tallest of them says the
+ * true thing: these are five columns of one table.
+ *
+ * `grid-auto-flow: column` rather than `repeat(5, …)` because the empty state is a single cell, and
+ * a lone cell in a fifth of the width would be a band with four missing columns.
+ */
 .reprise .readings {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
-  gap: var(--reprise-gap);
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  align-items: stretch;
+  gap: 0;
   margin: 0 0 var(--reprise-gap-lg);
+  border: 1px solid var(--reprise-rule-ledger);
+  border-radius: var(--reprise-radius);
+  overflow: hidden;
 }
 
 .reprise .reading {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
-  padding: 0.75rem 0.875rem;
-  background: var(--reprise-surface);
-  border: 1px solid var(--reprise-border-weak);
-  border-radius: var(--reprise-radius);
+  padding: 0.75rem 0.875rem 0.875rem;
+  border-left: 1px solid var(--reprise-rule-hairline);
 }
 
+.reprise .reading:first-child {
+  border-left: 0;
+}
+
+/*
+ * The label is a column head, so it is set once at the top of every cell and the numbers below it
+ * start on one line across the whole band. A 22px numeral under a label that wrapped to two lines
+ * would drop below its neighbours; the fixed label line is what stops five readings reading as five
+ * misaligned boxes.
+ */
 .reprise .reading-label {
   color: var(--reprise-faint);
   font-size: 0.6875rem;
+  line-height: 1.35;
+  min-height: 1.35em;
 }
 
 .reprise .reading-headline {
@@ -1079,7 +1334,7 @@
   flex-wrap: wrap;
   align-items: baseline;
   gap: 0.25rem 0.375rem;
-  margin: 0.125rem 0 0;
+  margin: 0.25rem 0 0;
 }
 
 .reprise .reading-value {
@@ -1103,9 +1358,12 @@
   line-height: 1.5;
 }
 
+/* The list at the foot of a cell — which candidates are in flight, which sit on the frontier — is the
+   last thing in the column, so it is pushed to the bottom: three cells whose lists start at three
+   different heights is exactly how the old band looked ragged from the outside. */
 .reprise .reading-list {
-  margin: 0.375rem 0 0;
-  padding-left: 0;
+  margin: auto 0 0;
+  padding: 0.375rem 0 0;
   list-style: none;
   color: var(--reprise-dim);
   font-family: var(--reprise-mono);
@@ -1122,6 +1380,14 @@
  * The frame is the cap (a 1px strong border) and the soft limit is a thin vertical line inside it;
  * both are named in the legend under the bar, because a marker nobody can name is not information.
  */
+
+/* The GPU cell puts the budget bar where the number would be. It has to take the whole line and be
+   allowed to shrink, or the bar's legend sets the cell's width and one cell of the band grows past the
+   other four — which is what a band of five "equal" columns looked like before. */
+.reprise .reading-headline > .budget {
+  flex: 1 1 100%;
+  min-width: 0;
+}
 
 .reprise .budget {
   margin: 0.375rem 0 0;
@@ -1140,7 +1406,7 @@
   height: 0.5rem;
   margin: 0.375rem 0 0;
   overflow: hidden;
-  border: 1px solid var(--reprise-border-strong);
+  border: 1px solid var(--reprise-rule-anchor);
   border-radius: 2px;
 }
 
@@ -1179,7 +1445,7 @@
 
 .reprise .budget-marker[data-marker='limit'] {
   transform: translateX(-2px);
-  border-left: 2px solid var(--reprise-border-strong);
+  border-left: 2px solid var(--reprise-rule-anchor);
 }
 
 .reprise .budget-legend {
@@ -1202,7 +1468,7 @@
   display: inline-block;
   width: 0.75rem;
   height: 0.4375rem;
-  border: 1px solid var(--reprise-border);
+  border: 1px solid var(--reprise-rule-ledger);
   border-radius: 1px;
 }
 
@@ -1234,7 +1500,7 @@
   width: 0;
   height: 0.5rem;
   border: 0;
-  border-left: 2px solid var(--reprise-border-strong);
+  border-left: 2px solid var(--reprise-rule-anchor);
   border-radius: 0;
 }
 
@@ -1301,6 +1567,11 @@
   flex-wrap: wrap;
   align-items: baseline;
   gap: 0.5rem;
+  /* The inspector's own header: the id, its round and its state word, then a hairline, then the bindings
+     and the hypothesis. Without that line the whole block was one grey column of prose and a reader
+     could not tell who the paragraph was about. */
+  padding-bottom: 0.375rem;
+  border-bottom: 1px solid var(--reprise-rule-hairline);
 }
 
 .reprise .identity-id {
@@ -1332,31 +1603,65 @@
 }
 
 .reprise .identity-hypothesis {
-  max-width: 68ch;
+  max-width: var(--reprise-read);
   font-size: 0.8125rem;
+  line-height: 1.6;
 }
 
 /* ---------------------------------------------------------------------- the phase path */
 
+/*
+ * The eight phases as a ruler, not as a wrapped run of small blocks.
+ *
+ * `6.5rem` is the narrowest cell that fits the longest phase name (`SUBMIT_QUEUE`, `MONITOR_POLL`)
+ * without breaking it mid-word, and it is chosen so that eight of them fit the inspector's two-thirds
+ * column at the sheet's maximum width: 8 × 104px = 832px inside 877px of usable column. The plan's
+ * 7.25rem would put eight cells into 7 columns and strand the eighth on a row of its own, which is the
+ * "how far did it get" reading this region exists for, broken by a number.
+ *
+ * `auto-fit` is what makes the ruler survive a narrow screen with no rule of its own: at 520px the same
+ * cell floor lands on four columns and two rows, which is a better fit than five and three and keeps
+ * every cell the width its label needs.
+ *
+ * The path is the one region that answers "how far did this candidate get", and the answer should be
+ * legible from the shape of the row before any word is read: an equal-width cell per phase, each with
+ * a 2px rule across its top where the candidate actually arrived and a dotted one where it never did.
+ * The row then reads as a span — eight cells, seven of them inked — which is a distance, and a
+ * distance is the fact. Unequal blocks hung off a flex line could not show that; they wrapped into a
+ * paragraph of labels.
+ *
+ * The six-state vocabulary stays on the mark inside each cell (`data-mark`), unchanged: the top rule
+ * is the two-state summary, and it must not be mistaken for a state of its own.
+ */
 .reprise .phase-path {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.625rem 1rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(6.5rem, 1fr));
+  row-gap: 0.75rem;
   margin: 0;
   padding: 0;
   list-style: none;
+  border-top: 1px solid var(--reprise-rule-hairline);
 }
 
 .reprise .phase {
   display: grid;
-  grid-template-columns: auto auto;
-  grid-template-rows: auto auto auto;
-  align-items: center;
-  gap: 0 0.375rem;
-  min-width: 6rem;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-content: start;
+  column-gap: 0.375rem;
+  row-gap: 0.0625rem;
+  min-width: 0;
+  /* The band's hairline runs behind the cells; each cell's own 2px rule sits on top of it. */
+  margin-top: -1px;
+  padding: 0.375rem 0.5rem 0.25rem 0;
+  border-top: 2px solid currentColor;
+}
+
+.reprise .phase[data-mark='not-reached'] {
+  border-top: 1px dotted var(--reprise-faint);
 }
 
 .reprise .phase-mark {
+  grid-column: 1;
   grid-row: 1;
   width: 9px;
   height: 9px;
@@ -1365,20 +1670,23 @@
 }
 
 .reprise .phase-name {
+  grid-column: 2;
   grid-row: 1;
   font-family: var(--reprise-mono);
   font-size: 0.6875rem;
+  overflow-wrap: anywhere;
 }
 
 .reprise .phase-word {
-  grid-column: 2;
+  grid-column: 1 / -1;
   grid-row: 2;
   color: var(--reprise-dim);
   font-size: 0.65625rem;
+  line-height: 1.35;
 }
 
 .reprise .phase-stamp {
-  grid-column: 2;
+  grid-column: 1 / -1;
   grid-row: 3;
   color: var(--reprise-faint);
   font-family: var(--reprise-mono);
@@ -1457,15 +1765,18 @@
   margin: 1rem 0 0;
   padding: 0.625rem 0.75rem;
   background: var(--reprise-surface-raised);
-  border: 1px solid var(--reprise-border);
-  border-left-width: 2px;
+  border: 1px solid var(--reprise-rule-ledger);
+  /* A 3px bar, the same weight the warning strip carries: this is the block that says a candidate was
+     refused, and the gate's own words follow inside it. Weight is the argument — a tinted panel would
+     be a hue, and this page spends its one hue on the budget hatch. */
+  border-left: 3px solid var(--reprise-rule-anchor);
   border-radius: var(--reprise-radius-sm);
 }
 
 .reprise .rejection-words {
   margin: 0;
   padding: 0.5rem;
-  border: 1px solid var(--reprise-border-weak);
+  border: 1px solid var(--reprise-rule-hairline);
   background: var(--reprise-surface);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1543,8 +1854,65 @@
 }
 
 .reprise .stream-row {
-  padding: 0.25rem 0;
-  border-bottom: 1px solid var(--reprise-border-weak);
+  padding: 0.25rem 0.25rem 0.25rem 0.375rem;
+  border-bottom: 1px solid var(--reprise-rule-hairline);
+  border-left: 2px solid transparent;
+}
+
+/*
+ * The row for the candidate the inspector has open, anchored with the same 2px bar the tree node and
+ * the rejection block use. The stream is a window on the whole run, so "which of these twelve rows are
+ * *this* candidate's" is a question a reader asks of it constantly, and answering it by hue would be
+ * the one thing this page does not do. Hover is a raised ground rather than a second bar, so a row that
+ * is both hovered and selected never has to say which mark is which.
+ *
+ * The attribute is `aria-current`, not `aria-pressed` as the two controls use: a row here is not a
+ * toggle, and "this one belongs to what is open" is precisely what `aria-current` means. The two
+ * spellings are two different ARIA statements, not two ways of writing one.
+ */
+.reprise .stream-row[aria-current='true'] {
+  border-left-color: var(--reprise-rule-anchor);
+}
+
+.reprise .stream-row:hover {
+  background: var(--reprise-surface-raised);
+}
+
+/*
+ * The one piece of motion on the page, and it is not an entrance effect: a fact that arrived since the
+ * last read is marked once, for a fifth of a second, and then it is an ordinary row forever. A reader
+ * watching an unattended run needs to see *what changed* between two polls — that is information the
+ * page cannot state in words without a second paragraph — and nothing else here animates, so the mark
+ * means one thing. A reader who has asked their system not to animate gets the same distinction as a
+ * static rule down the row's edge instead.
+ */
+@keyframes reprise-stream-in {
+  from {
+    background: var(--reprise-surface-raised);
+    transform: translateY(-2px);
+  }
+  to {
+    background: transparent;
+    transform: none;
+  }
+}
+
+.reprise .stream-row[data-fresh='true'] {
+  animation: reprise-stream-in 220ms ease-out 1;
+}
+
+/*
+ * Without motion the same fact is still owed a mark, but not the selection's mark: a row that is both
+ * new and the open candidate's would then say one thing twice. The fallback moves to the other edge —
+ * the opened candidate keeps the left bar, a new fact wears a right one — so the two compose on one row
+ * instead of overwriting each other. `data-fresh` is only set for the read that first draws the row, so
+ * the mark lives about as long as the animation it replaces.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .reprise .stream-row[data-fresh='true'] {
+    animation: none;
+    border-right: 2px solid var(--reprise-rule-anchor);
+  }
 }
 
 .reprise .stream-head {
@@ -1556,7 +1924,10 @@
   font-size: 0.6875rem;
 }
 
+/* The time column is one width so the event types below it start on one vertical line: a column of
+   stamps that shifts with the digits is a column a reader has to re-find on every row. */
 .reprise .stream-time {
+  min-width: 4.25rem;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1566,9 +1937,11 @@
 }
 
 .reprise .stream-seq {
+  min-width: 2.5rem;
   margin-left: auto;
   color: var(--reprise-faint);
   font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 /* One line, ellipsis, whole text on hover: the right column is narrow on purpose, and a wrapped
@@ -1615,7 +1988,29 @@
   text-align: left;
 }
 
-/* ------------------------------------------------------------------------------ narrow */
+/* The one call a reader has opened, marked the way the two selection components are: the anchor weight,
+   not a hue. This grid rules the old blanket `button[aria-pressed]` border-colour out of the sheet, and
+   that rule was the only mark an opened judgement call ever had — deleting it without this one would
+   have removed a state from the audit silently, for a reader who cannot tell a pressed button from a
+   rested one by touch. */
+.reprise .call-ref[aria-pressed='true'] {
+  border-color: var(--reprise-rule-anchor);
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------------------------ narrow
+ *
+ * Below 45rem — a phone, or the Web UI panel docked narrow — the page stops being a sheet and becomes
+ * one column. Nothing is hidden: every region that is a row on the wide page becomes a stack, because a
+ * reader on a narrow screen needs the same facts, not a summary of them.
+ *
+ * Two cases, and which one applies is decided by whether the cells are *cells* or *columns of a table*.
+ * A band of cells becomes a column of cells and its divider turns from a left edge into a top edge —
+ * that is the readings band, and it is the one where the five values are read against each other. The
+ * `facts` row and the masthead stamps are a wrapping line of labelled claims, not a table: they keep
+ * their left hairlines and simply wrap, because a label-over-value pair stacked five deep is a list
+ * pretending to be a band.
+ */
 
 @media (max-width: 45rem) {
   .reprise {
@@ -1644,8 +2039,12 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .reprise .phase {
-    min-width: 6rem;
+  .reprise .facts {
+    gap: 0.375rem 0;
+  }
+
+  .reprise .fact {
+    padding: 0 0.625rem;
   }
 
   .reprise .timeline li {
@@ -1670,10 +2069,23 @@
     padding-right: 0;
     padding-bottom: var(--reprise-gap);
     border-right: 0;
-    border-bottom: 1px solid var(--reprise-border-weak);
+    border-bottom: 1px solid var(--reprise-rule-hairline);
   }
 
+  /* The readings band folds from one row of five into a column of five. Same frame, same order, same
+     hairlines — the divider simply moves from the cell's left edge to its top edge, which is what a
+     table does when it is narrower than its own columns. */
   .reprise .readings {
-    grid-template-columns: minmax(0, 1fr);
+    grid-auto-flow: row;
+    grid-auto-columns: auto;
+  }
+
+  .reprise .reading {
+    border-left: 0;
+    border-top: 1px solid var(--reprise-rule-hairline);
+  }
+
+  .reprise .reading:first-child {
+    border-top: 0;
   }
 }

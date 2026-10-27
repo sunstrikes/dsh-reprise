@@ -458,6 +458,18 @@ const state = {
   seen: new Set(),
   /** The most recent facts, newest kept bounded: the stream is a window, not a history. */
   events: [],
+  /**
+   * The highest seq the stream has drawn. Seqs are the fact plane's own order key and never go
+   * backwards, so "newer than what I last drew" is one comparison — no set to grow, and no way for a row
+   * to be called new twice.
+   */
+  streamHigh: 0,
+  /**
+   * Whether the stream has painted at all. The first paint marks nothing as new: everything would be,
+   * and a page that animates twelve rows the moment it opens is a page with an entrance effect rather
+   * than a page that tells you what changed.
+   */
+  streamPainted: false,
   /** How many facts the page has read at all — the number beside the stream's title. */
   factTotal: 0,
   /**
@@ -1274,7 +1286,13 @@ const SVG_NS = 'http://www.w3.org/2000/svg'
 /** An SVG element with its attributes set. Text never goes through it — the nodes are HTML. */
 function svgEl(tag, attributes = {}) {
   const node = document.createElementNS(SVG_NS, tag)
-  for (const [name, value] of Object.entries(attributes)) node.setAttribute(name, String(value))
+  // The same rule `el()` follows: an absent value is an absent attribute. `setAttribute` would write
+  // the string "null", and `data-selected="null"` is an attribute that matches nothing and looks like
+  // it matches something — which is worse than not having it.
+  for (const [name, value] of Object.entries(attributes)) {
+    if (value === undefined || value === null) continue
+    node.setAttribute(name, String(value))
+  }
   return node
 }
 
@@ -1572,6 +1590,9 @@ function renderTree(answer) {
         d: `M ${x1} ${y1} C ${x1} ${y1 + 26}, ${x2} ${y2 - 26}, ${x2} ${y2}`,
         'data-from': edge.from,
         'data-to': edge.to,
+        // The branch the open candidate sits on, drawn in ink: a selected node is easy to see, but
+        // "where does this one come from and what came from it" is two lines away from it.
+        'data-selected': edge.from === state.selected || edge.to === state.selected ? 'true' : null,
       }),
     )
   }
@@ -1873,23 +1894,43 @@ function renderStream() {
   }
 
   const list = el('ol', { class: 'stream' })
+  // Two facts about the page's own view, decided here and drawn by the stylesheet: which rows belong to
+  // the candidate the inspector has open, and which arrived since the previous read. Both are marks
+  // rather than hues — a colour would tell half the readers, and a paragraph would take two lines to
+  // say what a rule down the row's edge says at once.
   for (const event of recent) {
+    // Read before it is recorded: a row is new exactly once, on the first read that draws it.
+    const fresh = state.streamPainted === true && event.local_seq > state.streamHigh
+    if (event.local_seq > state.streamHigh) state.streamHigh = event.local_seq
     list.append(
-      el('li', { class: 'stream-row' }, [
-        el('span', { class: 'stream-head' }, [
-          el('span', { class: 'stream-time', text: clock(event.wall_clock_ms) }),
-          el('span', { class: 'stream-type', text: event.event_type }),
-          el('span', { class: 'stream-candidate', text: event.candidate_id }),
-          el('span', { class: 'stream-seq', text: seqStamp(event.local_seq) }),
-        ]),
-        el('span', {
-          class: 'stream-summary',
-          title: event.summary === '' ? event.event_type : event.summary,
-          text: event.summary === '' ? EM_DASH : event.summary,
-        }),
-      ]),
+      el(
+        'li',
+        {
+          class: 'stream-row',
+          // `aria-current`, not `aria-pressed`: a row is not a control, and this is the ARIA word for
+          // "this item belongs to what is open". The rail and the tree are buttons and say pressed.
+          'aria-current': event.candidate_id === state.selected ? 'true' : null,
+          'data-fresh': fresh ? 'true' : null,
+        },
+        [
+          el('span', { class: 'stream-head' }, [
+            el('span', { class: 'stream-time', text: clock(event.wall_clock_ms) }),
+            el('span', { class: 'stream-type', text: event.event_type }),
+            el('span', { class: 'stream-candidate', text: event.candidate_id }),
+            el('span', { class: 'stream-seq', text: seqStamp(event.local_seq) }),
+          ]),
+          el('span', {
+            class: 'stream-summary',
+            title: event.summary === '' ? event.event_type : event.summary,
+            text: event.summary === '' ? EM_DASH : event.summary,
+          }),
+        ],
+      ),
     )
   }
+  // Nothing is marked on the first paint: twelve rows fading in at load is decoration, and this mark
+  // means "between the read before this one and now".
+  state.streamPainted = true
   root.append(list)
 }
 
