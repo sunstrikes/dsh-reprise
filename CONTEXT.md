@@ -248,8 +248,11 @@ Enforced in `packages/core/lib/runs.js` (the listing, the id rule, `scaffoldRun`
 
 The registry also answers the second question — *which* of these does this host drive? — and that
 answer is **not** a run's fact: "nobody has started me yet" is not something that happened to a run. It
-is the one piece of host state, the set in `<runs_root>/.reprise-host.json` (`core/lib/active-runs.js`),
-absent meaning "only the run `workspace` names". Every active run gets its own workspace object, its own
+is host state, and there are two records of it: the set in `<runs_root>/.reprise-host.json`
+(`core/lib/active-runs.js`, absent meaning "only the run `workspace` names", carrying the archive log of
+runs that were moved aside), and the two operational keys in `<DSH_HOME>/reprise/settings.json`
+(`core/lib/settings.js`: where new runs go, and how many may advance — the page's value winning over the
+plugin configuration, and every reader saying which one answered). Every active run gets its own workspace object, its own
 `reprise.toml` (resolved with the run directory as the cwd), its own in-flight guard, and one shared
 interval that advances up to `max_active_runs` of them per beat in round-robin order.
 

@@ -82,9 +82,19 @@ export function readHostState(runsRoot, { readFile = (path) => readFileSync(path
     return { status: 'invalid', ids: undefined, path, problems: [`${path}: "active" must be an array of run ids`] }
   }
 
+  // The archive log rides in the same file: one record of what this host was told, in one place, so a
+  // run that was moved aside is still nameable after its directory stopped being one.
+  const trashed = document.trashed ?? []
+  if (
+    !Array.isArray(trashed) ||
+    !trashed.every((entry) => typeof entry === 'object' && entry !== null && isText(entry.id) && isText(entry.dir))
+  ) {
+    return { status: 'invalid', ids: undefined, path, problems: [`${path}: "trashed" must be an array of {id, dir} records`] }
+  }
+
   // Order is the operator's, duplicates are not: a set is a set, and writing the same id twice would
   // make "how many runs is this host driving?" answerable two ways.
-  return { status: 'ok', ids: [...new Set(document.active)], path }
+  return { status: 'ok', ids: [...new Set(document.active)], trashed, path }
 }
 
 /**
@@ -113,10 +123,41 @@ export function setRunActive(runsRoot, id, { activate, readFile, writeFile = (pa
   if (has === activate) return { ids, changed: false, path: join(runsRoot, HOST_STATE_FILENAME) }
 
   const next = activate ? [...ids, id] : ids.filter((entry) => entry !== id)
+  const path = writeHostState(runsRoot, { active: next, trashed: current.trashed ?? [] }, { writeFile })
+  return { ids: next, changed: true, path }
+}
+
+/**
+ * One record of a run that was moved aside, appended to the same file.
+ *
+ * The archive is not a deletion: the directory still exists, one level away, and this entry is what
+ * makes it findable a week later ("where did run 7 go?" → `.trash/7-2026-10-28T…`). Keeping it beside
+ * the activation set is deliberate — both are this host's own memory, and a second file would be a
+ * second thing to remember to back up.
+ *
+ * @param {string} runsRoot
+ * @param {{id: string, dir: string, trashed_to: string, at_ms: number}} entry
+ * @param {{readFile?: Function, writeFile?: (path: string, text: string) => void}} [options]
+ * @returns {{trashed: object[], path: string}}
+ */
+export function recordTrash(runsRoot, entry, { readFile, writeFile = (path, text) => writeFileSync(path, text) } = {}) {
+  if (!isText(runsRoot)) throw new Error('recording a removed run needs runs_root')
+  const current = readHostState(runsRoot, readFile === undefined ? {} : { readFile })
+  if (current.status === 'invalid') throw new Error(current.problems[0])
+  const trashed = [...(current.trashed ?? []), entry]
+  const path = writeHostState(runsRoot, { active: current.ids ?? [], trashed }, { writeFile })
+  return { trashed, path }
+}
+
+/**
+ * The one writer: replace the whole document through a temporary file, so a crash mid-write leaves the
+ * previous decision intact.
+ */
+function writeHostState(runsRoot, { active, trashed }, { writeFile }) {
   const path = join(runsRoot, HOST_STATE_FILENAME)
   const temporary = `${path}.${process.pid}.tmp`
   try {
-    writeFile(temporary, `${JSON.stringify({ v: VERSION, active: next }, null, 2)}\n`)
+    writeFile(temporary, `${JSON.stringify({ v: VERSION, active, trashed }, null, 2)}\n`)
     renameSync(temporary, path)
   } catch (error) {
     try {
@@ -126,7 +167,7 @@ export function setRunActive(runsRoot, id, { activate, readFile, writeFile = (pa
     }
     throw error
   }
-  return { ids: next, changed: true, path }
+  return path
 }
 
 /**

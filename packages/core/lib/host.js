@@ -76,7 +76,12 @@ export function mountTick(
   if (!Number.isSafeInteger(intervalMs) || intervalMs <= 0) {
     throw new TypeError(`mountTick needs a positive interval in milliseconds, got ${JSON.stringify(intervalMs)}`)
   }
-  const capFor = (size) => (maxActive === undefined || maxActive === null ? size : maxActive)
+  // `maxActive` may be a number or a function: the page can change it, and a host that only honoured
+  // the new value after a restart would be a switch that lies about what it did.
+  const capFor = (size) => {
+    const value = typeof maxActive === 'function' ? maxActive() : maxActive
+    return value === undefined || value === null ? size : value
+  }
   const cap = capFor(list.length)
   if (!Number.isSafeInteger(cap) || cap <= 0) {
     throw new TypeError(`mountTick needs a positive maxActive, got ${JSON.stringify(maxActive)}`)

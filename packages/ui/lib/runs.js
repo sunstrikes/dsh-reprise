@@ -23,13 +23,19 @@
  *     and closes it, and the list derives each row from the very projection the overview page draws —
  *     one derivation, so the registry list and the page cannot disagree about a run's phase, its
  *     start time or its best result.
- *   - **The write surface is two paths.** `POST /runs` scaffolds a directory under `runs_root`
+ *   - **The write surface is four named paths.** `POST /runs` scaffolds a directory under `runs_root`
  *     (`scaffoldRun`), and `POST /intent` writes one of two things, depending on the kind: a
  *     pause/resume/grant file under `<run>/pending/` that the kernel already consumes (`placeIntent`),
  *     or — for `activate`/`deactivate` — the host-level set of runs this host drives, recorded once
- *     beside the runs (`core/lib/active-runs.js`). Neither writes a fact: a run's own state is only
- *     ever changed by the kernel that read the intent, which is what keeps "who decided this"
+ *     beside the runs (`core/lib/active-runs.js`). None of those writes a fact: a run's own state is
+ *     only ever changed by the kernel that read the intent, which is what keeps "who decided this"
  *     answerable from the run directory alone.
+ *   - **A removal is an archive, and the plugin's own settings are the plugin's memory.** `POST
+ *     /runs/delete` moves `<runs_root>/<id>` into `<runs_root>/.trash/<id>-<stamp>` (`archiveRun`) and
+ *     says where it went; nothing is unlinked. `GET`/`POST /settings` read and write
+ *     `<DSH_HOME>/reprise/settings.json` through `core/lib/settings.js`, which is the plugin's record of
+ *     two answers an operator gives while looking at the page (`runs_root`, `max_active_runs`) — not a
+ *     fact of any run, and not a second place to configure the host.
  *
  * A run with no `workspace.db` is a legitimate row, not an error: a directory created a second ago has
  * no facts yet, and answering 500 there would make a fresh run look broken on the one page an operator
@@ -42,10 +48,11 @@ import { existsSync } from 'node:fs'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 
 import { activeRunIds, setRunActive } from '../../core/lib/active-runs.js'
-import { resolveConfig } from '../../core/lib/config.js'
+import { DEFAULT_MAX_ACTIVE_RUNS, resolveConfig } from '../../core/lib/config.js'
 import { IntentRefused, placeIntent } from '../../core/lib/intents.js'
 import { overview } from '../../core/lib/projection.js'
-import { RUN_CONFIG_FILENAME, readRunConfig, scaffoldRun } from '../../core/lib/runs.js'
+import { RUN_CONFIG_FILENAME, RunArchiveRefused, archiveRun, readRunConfig, scaffoldRun } from '../../core/lib/runs.js'
+import { SETTINGS_KEYS, effectiveSettings, writeSettings } from '../../core/lib/settings.js'
 import { DB_FILENAME, Store } from '../../core/lib/store.js'
 import { ViewError, configFrom } from './views.js'
 
@@ -194,6 +201,9 @@ function runnableOf(config, dir) {
 }
 
 const isPlainObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value)
+
+/** A string with something in it — the same rule `core/lib/settings.js` uses for a configured path. */
+const isText = (value) => typeof value === 'string' && value.trim() !== ''
 
 /**
  * A number field the create form sends flat on the wire (`max_rounds`, …). Absent or null means "the
@@ -346,4 +356,220 @@ function activation(registry, id, activate) {
     active: outcome.ids,
     path: outcome.path,
   }
+}
+
+/**
+ * `POST /api/reprise/runs/delete`: take one run out of the registry by archiving it.
+ *
+ * It is not a deletion, and the answer says so: `archiveRun` renames `<runs_root>/<id>` to
+ * `<runs_root>/.trash/<id>-<stamp>` and appends one record to the host's own file, so the fact plane, the
+ * landed worktrees and the artifacts a conclusion was drawn from are all still there — `mv` puts them
+ * back. Nothing here unlinks anything, which is why this path is named "delete" only in the sense the
+ * operator means it.
+ *
+ * **Two steps, and the second one names the run.** `confirm` must repeat `id` exactly, and that check
+ * happens before anything touches the disk: a removal is the one request on this surface a slip of the
+ * mouse must not be able to make, and a body that cannot be honoured is a 400 whether or not the id
+ * exists. The rest is `archiveRun`'s: it owns the two refusals that are decisions rather than syntax —
+ * the run this host ticks (`409`, its directory is named by the configuration) and a run in the host's
+ * active set (`409`, a directory that moves under a tick in flight is a crash dressed as a cleanup; the
+ * panel's Stop writes that record, so this route never deactivates on the caller's behalf) — and it
+ * carries the status for each one, so this handler does not re-derive them.
+ *
+ * `activeIds` is computed here because the activation set is host state that lives beside the runs
+ * (`core/lib/active-runs.js`), not something the registry answers. `keepIds` is deliberately not passed:
+ * its default is the registry's own answer — the run the configuration *declares* — so forgetting an
+ * argument cannot archive the directory the loop is pointed at.
+ *
+ * @param {object} registry the run registry
+ * @param {any} body the parsed JSON body, `{id, confirm}`
+ * @param {{clock?: {now: () => number}}} [options] the instant stamped into the archive's own path
+ * @returns {{ok: true, id: string, trashed_to: string, at_ms: number}}
+ */
+export function deleteRunHandler(registry, body, { clock } = {}) {
+  if (!isPlainObject(body)) throw new ViewError(400, 'the request body must be a JSON object: {id, confirm}')
+
+  const id = body.id
+  if (typeof id !== 'string' || id === '') {
+    throw new ViewError(400, 'removing a run needs its id: {"id": "<run id>", "confirm": "<the same id>"}')
+  }
+  if (body.confirm !== id) {
+    throw new ViewError(
+      400,
+      `removing a run is two steps: send confirm: ${JSON.stringify(id)} — the same id again — to move ${JSON.stringify(id)} into the archive`,
+    )
+  }
+
+  const activeIds = activeRunIds({ registry, runsRoot: registry.runsRoot, defaultRun: registry.defaultRun }).ids
+  let made
+  try {
+    made = archiveRun({ registry, id, activeIds, now: clock === undefined ? undefined : clock.now() })
+  } catch (error) {
+    if (error instanceof RunArchiveRefused) {
+      // "No run X is registered" is one fact with one sentence on this whole surface: the reads and the
+      // intent writer already answer it through `unknownRun`, so the archive answers it with the same
+      // words — including where the list is. Everything else is the archive's own reason, carried with
+      // the status it decided on: "is this run active?" is not a question a route should re-derive.
+      throw new ViewError(error.status, error.code === 'not_registered' ? unknownRun(id) : error.message)
+    }
+    throw new ViewError(400, error?.message ?? String(error))
+  }
+  return { ok: true, id, trashed_to: made.trashed_to, at_ms: made.at_ms }
+}
+
+/**
+ * One sentence for a mount that never received the two things the settings routes need.
+ *
+ * The settings answer is not a run's fact and not a registry's: it is "what is in force for *this
+ * host*", which is the caller's `{env, config}` — the environment `DSH_HOME` is read from and the
+ * resolved configuration whose values are the fallbacks. A handler cannot reconstruct either without
+ * reaching behind the caller's back, so a mount that was not given them says so instead of inventing an
+ * answer: a page that silently reported "no settings" would be telling the operator that the file it
+ * could not find is the file that does not exist.
+ */
+const SETTINGS_UNWIRED =
+  'this host did not wire settings: the settings routes need {env, config} from the caller, and this mount has neither'
+
+/**
+ * The `{env, config}` a settings handler works with, or the refusal above.
+ *
+ * `settings.env` defaults to `process.env` — the one documented place this package reads it, and only
+ * because a route mounted by a host that passed nothing is a host reading its own environment. A test
+ * passes `{env: {DSH_HOME: <tmp>}}` and gets a settings file in a temporary directory.
+ */
+function settingsOf(context) {
+  const settings = isPlainObject(context) ? context.settings : undefined
+  if (!isPlainObject(settings)) throw new ViewError(400, SETTINGS_UNWIRED)
+  return {
+    env: settings.env ?? process.env,
+    config: isPlainObject(settings.config) ? settings.config : {},
+  }
+}
+
+const positiveWhole = (value) => Number.isSafeInteger(value) && value > 0
+
+/**
+ * The settings answer, built once for the read and for the write's reply.
+ *
+ * Both halves are in it on purpose. The effective half (`runs_root`, `max_active_runs` and the `_from`
+ * that says who answered) is what is in force right now — the same derivation the boot log and the loop
+ * use, so the page cannot display a third answer. The `configured` half is what the plugin configuration
+ * says, because the page's other job is to explain what clearing a key goes back to: "clear this and you
+ * get `/srv/runs`" is a sentence that needs the fallback in the payload.
+ */
+function settingsPayload({ env, config }) {
+  const effective = effectiveSettings({ config, env })
+  const configuredMax = positiveWhole(config.max_active_runs) ? config.max_active_runs : DEFAULT_MAX_ACTIVE_RUNS
+  return {
+    ok: true,
+    path: effective.path ?? null,
+    status: effective.status,
+    problems: effective.problems ?? [],
+    runs_root: effective.runsRoot ?? null,
+    runs_root_from: effective.runsRootFrom,
+    // Never null: "how many runs may advance at once" always has an answer, even when the file says
+    // nothing — the configuration's, or the shipped default. `max_active_runs_from` says which.
+    max_active_runs: effective.maxActiveRuns ?? configuredMax,
+    max_active_runs_from: effective.maxActiveRunsFrom,
+    configured: {
+      runs_root: isText(config.runs_root) ? config.runs_root : null,
+      max_active_runs: configuredMax,
+    },
+  }
+}
+
+/**
+ * `GET /api/reprise/settings`: what the page may change, what is in force, and who decided it.
+ *
+ * A missing file is `status: 'absent'` with the path it *would* be at, not an error: a host that has
+ * never had anything set from the page is the normal case, and the panel needs the path to say where the
+ * decision would land. A corrupt file is reported as `invalid` with the reader's own `problems`, and the
+ * effective values fall back to the configuration — the answer a reader needs to understand what the
+ * loop is doing while somebody fixes the file.
+ *
+ * @param {{settings?: {env?: Record<string, string | undefined>, config?: object}}} [context] the mount's
+ *   `settings` — `{env, config}` — threaded from `registerRoutes`
+ * @returns {{ok: true, path: string | null, status: 'absent'|'ok'|'invalid', problems: string[],
+ *            runs_root: string | null, runs_root_from: 'settings'|'config'|null,
+ *            max_active_runs: number, max_active_runs_from: 'settings'|'config',
+ *            configured: {runs_root: string | null, max_active_runs: number}}}
+ */
+export function settingsHandler(context = {}) {
+  return settingsPayload(settingsOf(context))
+}
+
+/**
+ * The body of a settings write, as a patch — or the refusal naming the field that was wrong.
+ *
+ * The three mistakes this refuses are the three a form can make, and each is refused by name rather than
+ * coerced: a key this page does not own (so the file can never grow into a shadow of the plugin
+ * configuration), a `runs_root` that is not an absolute directory (a relative one would resolve against
+ * the host's cwd, which is not a place the operator was pointing at), and a `max_active_runs` that is not
+ * a positive whole number (`"4"` is a string; writing it would change what the loop is allowed to do on
+ * the strength of a coercion nobody asked for). `null` is not a mistake in either case — it is how the
+ * page says "go back to what the configuration says" without knowing what that is.
+ */
+function settingsPatch(body) {
+  for (const key of Object.keys(body)) {
+    if (!SETTINGS_KEYS.includes(key)) {
+      throw new ViewError(400, `${JSON.stringify(key)} is not a setting this page owns (it owns ${SETTINGS_KEYS.join(', ')})`)
+    }
+  }
+  const patch = {}
+  if (body.runs_root !== undefined) {
+    const value = body.runs_root
+    if (value !== null && (!isText(value) || !isAbsolute(value))) {
+      throw new ViewError(
+        400,
+        `runs_root must be the absolute path of a directory (got ${JSON.stringify(value ?? null)}) — send null to clear it back to the configured value`,
+      )
+    }
+    patch.runs_root = value
+  }
+  if (body.max_active_runs !== undefined) {
+    const value = body.max_active_runs
+    if (value !== null && !positiveWhole(value)) {
+      throw new ViewError(
+        400,
+        `max_active_runs must be a positive whole number (got ${JSON.stringify(value ?? null)}) — send null to clear it back to the configured value`,
+      )
+    }
+    patch.max_active_runs = value
+  }
+  return patch
+}
+
+/**
+ * `POST /api/reprise/settings`: record what the page decided, then answer what is in force.
+ *
+ * An absent key leaves the setting alone; `null` clears it back to the configuration's value. The reply
+ * is the GET payload read back through the same reader, so the page never has to reconcile "what I sent"
+ * with "what landed" — and a write that changed nothing (the same value again) is still a 200 with the
+ * same answer, because a button is a button.
+ *
+ * Every refusal is one sentence in a 400 and comes from the thing that knows the reason: `writeSettings`
+ * refuses when there is nowhere to write (`DSH_HOME` unset) and when the existing file is corrupt — and
+ * that second sentence is surfaced **verbatim**, because it names the file and the fault, and replacing
+ * it with "invalid settings" would send the operator looking for the wrong problem.
+ *
+ * @param {{settings?: {env?: Record<string, string | undefined>, config?: object}}} [context]
+ * @param {any} body the parsed JSON body, `{runs_root?, max_active_runs?}`
+ * @returns {ReturnType<typeof settingsHandler>} the same payload a GET sends afterwards
+ */
+export function saveSettingsHandler(context = {}, body) {
+  const { env, config } = settingsOf(context)
+  if (!isPlainObject(body)) {
+    throw new ViewError(400, 'the request body must be a JSON object: {runs_root?, max_active_runs?}')
+  }
+  const patch = settingsPatch(body)
+
+  try {
+    writeSettings(patch, { env })
+  } catch (error) {
+    throw new ViewError(400, error?.message ?? String(error))
+  }
+
+  // Read back rather than echo: the answer is what the file says now, produced by the same derivation
+  // the page's GET uses, so the two can never disagree about which value is in force.
+  return settingsPayload({ env, config })
 }

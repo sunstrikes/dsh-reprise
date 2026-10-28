@@ -237,6 +237,11 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 
 两个已知边界：概览里的集群列表仍按配置里那个 run 的 executor 去问，别的 run 的页面会说「集群没读」而不是
 显示别人的卡；`reprise_status` 也只答配置里那个 run。
+- **两个运维键在面板里设**，不用改 patch：`runs_root` 与 `max_active_runs` 存在
+  `$DSH_HOME/reprise/settings.json`（选择器旁的 `⚙`）。面板写下的值优先于这份 patch —— boot log 和表单都会
+  告诉你当前是哪一边在生效；把字段清空就把决定权交回配置；两者都是**下一拍生效**，不用重启。
+- **删除 run 是归档**：`删除` 把目录移到 `<runs_root>/.trash/<id>-<时间戳>` 并留一条记录，什么都不会被销毁，
+  `mv` 就能拿回来。正在被 tick 的那个 run、处于 active 的 run、以及 `runs_root` 之外的目录都会被拒绝。
 
 校验在 `packages/core/lib/config.js` 里，启动时只跑一次。本包不导出 `Config` 对象，所以宿主对这条
 配置行没有 schema：配置有问题只是一行日志，永远不会变成启动失败。有两处拒绝值得在你撞上之前先知道——有

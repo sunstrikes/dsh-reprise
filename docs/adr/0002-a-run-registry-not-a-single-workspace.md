@@ -234,3 +234,60 @@ executor, so a non-default run's page reports the cluster as unread (the honest 
 own cards; `status-tool` (`reprise_status`) still answers about the configured run; and `GET /runs`
 still resolves each row's configuration on every read (one domain-pack load per run per 30 s), which is
 the thing to cache when a deployment runs dozens of runs rather than a handful.
+
+## The two keys an operator owns, and taking a run back out
+
+Two things were still only doable in a console after T2: saying *where new runs go* / *how many advance*,
+and getting a finished run out of the picker. Both were the same complaint — the page knows the state and
+the console is where the decisions live — and both are answered the same way: **the page writes, the
+host reads it on the next beat, and the file that records it is named.**
+
+### `runs_root` and `max_active_runs` (settings)
+
+They live in `<DSH_HOME>/reprise/settings.json` (`{v, runs_root?, max_active_runs?}`,
+`core/lib/settings.js`), not in the profile patch, for a reason that is not convenience: the host's
+`cordis.patch.yml` describes the run this host was **mounted** for, and these two answer questions the
+operator answers while looking at the page. The host's own Plugins page cannot take them either — it
+renders a configuration form only for a plugin that registers one (`plugins.row.config`) *and* exports a
+config schema, and this package deliberately does neither (a schema would make the host validate a
+configuration it currently only reads). So the page gets its own two-field form, the only keys it may
+touch, and nothing else:
+
+- **What the page wrote wins over the plugin configuration**, otherwise the form would be decoration.
+  Every reader reports `from: 'settings' | 'config'` — the boot line prints it, the settings route returns
+  it, so "who set this?" is never inferred.
+- **Clearing a key hands the question back** (`null` in the request), because the page does not know what
+  the configuration says and must not have to.
+- **Changing either applies on the next beat**, like the activation set: the ticking half re-reads the
+  settings before each beat, rebuilds the registry if `runs_root` moved, and asks for the ceiling each
+  time. A switch that only took effect after a restart is the friction this whole section removes.
+- **A malformed file is reported, never defaulted.** Reading a corrupt settings file as "nothing set"
+  would silently move where new runs land; the readers answer `problems`, the loop keeps the configured
+  value, and the settings form prints the sentence.
+- The file holds **only these two keys**. Anything else is refused by name, so it cannot grow into a
+  shadow of the plugin configuration.
+
+### Removing a run is archiving it
+
+`POST /api/reprise/runs/delete {id, confirm}` moves `<runs_root>/<id>` to
+`<runs_root>/.trash/<id>-<stamp>` and appends `{id, dir, trashed_to, at_ms}` to the host's record.
+Nothing is destroyed: a run is a fact plane, landed worktrees and the artifacts a judgement was made
+from, and "delete" may only promise what this repository can keep — it stops being a run, and it is
+still there. Restoring is `mv`, and `.trash` is a dot-directory, so the registry scan never lists it.
+
+Three refusals come before the move, and each is a decision rather than tidiness:
+
+- `confirm` must repeat the `id` — a two-step guard in the request itself, so a mis-click cannot be
+  finished by a retry;
+- **the run the configuration ticks** cannot be archived (point `workspace` elsewhere first) — moving a
+  directory the loop is pointed at leaves it pointed at nothing;
+- **an active run** cannot be archived — a directory that moves under a tick in flight is a crash dressed
+  as a cleanup. Stopping it is one click.
+
+A run declared through `runs: [...]` lives outside `runs_root` and is refused too: this host only
+reorganises the directory it owns.
+
+The write surface is therefore four paths, and the doctrine is unchanged in spirit: `POST /runs` creates,
+`POST /runs/delete` archives, `POST /intent` writes a `pending/` file or the activation set,
+`POST /settings` writes the plugin's own memory. **None of them can write a fact** — a run's own state
+still changes only inside the kernel that read an intent.

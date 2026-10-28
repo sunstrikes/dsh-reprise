@@ -59,7 +59,7 @@ const ASSET_PATHS = [
  * They are listed separately because their methods are *not* GET-only — that is their reason to exist —
  * and a test that folded them into `DATA_PATHS` would quietly lose the assertion below.
  */
-const REGISTRY_PATHS = ['/api/reprise/runs', '/api/reprise/intent']
+const REGISTRY_PATHS = ['/api/reprise/runs', '/api/reprise/runs/delete', '/api/reprise/intent', '/api/reprise/settings']
 
 const workspaceDir = () => mkdtempSync(join(tmpdir(), 'reprise-ui-routes-'))
 
@@ -135,6 +135,12 @@ test('the views and assets are GET-only; the two writers declare exactly the ver
   // second path for the create would make "which of these two is the registry?" a question.
   assert.deepEqual(connection.routes.get('/api/reprise/runs').methods, ['GET', 'POST'])
   assert.deepEqual(connection.routes.get('/api/reprise/intent').methods, ['POST'], 'an intent is only ever placed')
+  assert.deepEqual(connection.routes.get('/api/reprise/runs/delete').methods, ['POST'], 'removal is an action, not a restful DELETE on a path a browser cannot send a body with')
+  assert.deepEqual(
+    connection.routes.get('/api/reprise/settings').methods,
+    ['GET', 'POST'],
+    'one resource: what the page may set, read and written',
+  )
 
   dispose()
 })

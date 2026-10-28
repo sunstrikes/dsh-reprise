@@ -64,7 +64,11 @@ test('runs_root joins the registry, and the boot line says how many runs it hold
     ['feed', 'run-a', 'run-b'],
     'the ticked run first, then the root in its own order',
   )
-  assert.match(describeRunLine(resolved.config), /runs_root .*\(3 run\(s\)\)/)
+  assert.match(
+    describeRunLine(resolved.config),
+    /\(3 run\(s\), from config\)/,
+    'and who chose it: the configuration, because no settings file overrides it here',
+  )
 })
 
 test('extra runs are joined, and a relative one resolves against the host cwd like every other path', () => {

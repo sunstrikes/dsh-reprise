@@ -83,7 +83,8 @@ test('activating and deactivating write one set, atomically, and are idempotent'
   const first = setRunActive(runsRoot, 'b', { activate: true })
   assert.deepEqual(first.ids, ['b'])
   assert.equal(first.changed, true)
-  assert.deepEqual(JSON.parse(readFileSync(join(runsRoot, HOST_STATE_FILENAME), 'utf8')), { v: 1, active: ['b'] })
+  // The archive log rides in the same document, so a set written by this call must not drop it.
+  assert.deepEqual(JSON.parse(readFileSync(join(runsRoot, HOST_STATE_FILENAME), 'utf8')), { v: 1, active: ['b'], trashed: [] })
 
   // A button is a button: a double click must not be an error.
   const again = setRunActive(runsRoot, 'b', { activate: true })

@@ -34,8 +34,20 @@ import { ROUTES, registerRoutes, withStore } from '../lib/routes.js'
 import { fakeJudge, openWorkspace, runCandidate, seedConfig } from '../../core/test/support/fake-ports.js'
 import { fakeConnection } from './support/fake-connection.js'
 
-/** The two paths allowed to accept a verb other than GET. Anything else is a defect. */
-const WRITE_PATHS = Object.freeze(['/api/reprise/intent', '/api/reprise/runs'])
+/**
+ * The paths allowed to accept a verb other than GET. Anything else is a defect.
+ *
+ * Two of them write outside any run's fact plane: `runs` creates a directory under `runs_root` and
+ * `runs/delete` moves one aside (never destroying it). `intent` writes the file the kernel consumes, or
+ * the host's own activation set. `settings` writes the plugin's own memory about itself — where new runs
+ * go, and how many may advance. None of the four can write a fact.
+ */
+const WRITE_PATHS = Object.freeze([
+  '/api/reprise/intent',
+  '/api/reprise/runs',
+  '/api/reprise/runs/delete',
+  '/api/reprise/settings',
+])
 
 /** Every fact the workspace holds, through the store's own readers. */
 function facts(store) {
@@ -196,7 +208,12 @@ test('the write surface is a closed set: the two non-GET paths, and no view amon
     )
     // One path for both registry verbs — reading the list and creating a run are the same resource —
     // and one path that only ever accepts a POST, because an intent is placed, never read back.
-    const METHODS = { '/api/reprise/runs': ['GET', 'POST'], '/api/reprise/intent': ['POST'] }
+    const METHODS = {
+      '/api/reprise/runs': ['GET', 'POST'],
+      '/api/reprise/runs/delete': ['POST'],
+      '/api/reprise/intent': ['POST'],
+      '/api/reprise/settings': ['GET', 'POST'],
+    }
     for (const route of writers) {
       assert.deepEqual(route.methods, METHODS[route.path], `${route.path} declares exactly the verbs it needs`)
     }

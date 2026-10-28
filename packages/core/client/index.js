@@ -29,12 +29,15 @@
  *      on one surface and something else on the other.
  *
  * Read-mostly, and honest about the exceptions: every view is a `GET` against the routes the Host half
- * already mounts, and the panel writes exactly twice — `POST /runs`, which scaffolds a *new* directory
- * under the registry's root, and `POST /intent`, which records the host-level decision to advance one
- * run (an `activate`/`deactivate` pair, `core/lib/active-runs.js`). Neither changes a fact of a run
- * that is already ticking: the second one decides only whether this host ticks it at all, which is why
- * the button says so in its own tooltip. No button here can change a fact of the run it is watching —
- * that is the property `read-only.test.js` holds, and it is what the masthead's mode line says out loud.
+ * already mounts, and the panel writes exactly four times — `POST /runs`, which scaffolds a *new*
+ * directory under the registry's root; `POST /intent`, which records the host-level decision to advance
+ * one run (an `activate`/`deactivate` pair, `core/lib/active-runs.js`); `POST /runs/delete`, which
+ * moves one run's directory aside into `<runs_root>/.trash`; and `POST /settings`, which records where
+ * new runs go and how many may advance at once. None of them changes a fact of a run that is already
+ * ticking: the second decides only whether this host ticks it at all (which is why the button says so
+ * in its own tooltip), the third keeps every fact it moves, and the fourth is this plugin's memory
+ * about itself. No button here can change a fact of the run it is watching — that is the property
+ * `read-only.test.js` holds, and it is what the masthead's mode line says out loud.
  *
  * Since ADR 0002 this page shows *a* run rather than *the* run. The registry is a directory listing
  * the Host reads fresh (`GET /runs`), the masthead's `<select>` chooses one of them, and the choice
@@ -130,7 +133,8 @@ window.__ModuleLoader__.load({
 
     const EN = {
       'panel.title': 'Reprise',
-      'panel.mode': 'the facts are read-only — the only writes are creating a run, and starting or stopping one',
+      'panel.mode':
+        'the facts are read-only — the only writes are creating a run, removing one, starting or stopping one, and the settings',
       'panel.loading': 'Reading the fact plane…',
       'panel.sharedFailed': 'The page modules did not load ({reason}) — asking again.',
 
@@ -139,7 +143,7 @@ window.__ModuleLoader__.load({
       'run.missing': '{id} — not in the registry',
       'run.create': 'Create a run',
       'run.createNeedsRoot':
-        'creating a run needs runs_root: add it to this plugin\'s configuration, then reload — a new run is a directory under it',
+        'creating a run needs runs_root: open the settings beside ＋ and set it — a new run is a directory under it',
       'run.field.id': 'run id',
       'run.field.mode': 'mode',
       'run.mode.clone': 'clone a repository',
@@ -164,6 +168,29 @@ window.__ModuleLoader__.load({
       'run.stopHint': 'decides whether this host advances the run — stopping it leaves every fact in place, and is not the same as interrupting a step already in flight.',
       'run.pauseElsewhere': "the run's own pause and resume are a pending/ intent the loop consumes, which is another control and not this button.",
       'run.activationInvalid': 'this host cannot read which runs it advances — {problem}',
+      // The two settings the page owns (`core/lib/settings.js`), and the sentence each field owes a
+      // reader: *where the value in force comes from*. Without it, "Save" and "Clear to configuration"
+      // look like two spellings of one button, and a value pinned in the host's settings file is
+      // indistinguishable from one the plugin's configuration still supplies.
+      'run.settings': 'Settings — where new runs go, and how many advance at once',
+      'run.settings.field.runsRoot': 'runs_root — where new runs are created (an absolute path)',
+      'run.settings.field.maxActiveRuns': 'max_active_runs — how many runs this host advances at once',
+      'run.settings.fromSettings': 'from settings',
+      'run.settings.fromConfig': 'from plugin configuration',
+      'run.settings.fromUnknown': 'not read yet',
+      'run.settings.noRoot': 'no runs_root is set anywhere, so this host has no directory to create runs in',
+      'run.settings.corrupt': 'this host cannot read its settings file, so nothing here can be saved yet — {problem}',
+      'run.settings.save': 'Save',
+      'run.settings.saving': 'Saving…',
+      'run.settings.clear': 'Clear to configuration',
+      // Removing a run. Three sentences, kept apart: why this run cannot be removed right now, what
+      // removal does to the directory, and the word on the button. The trash sentence is the one that
+      // must never be softened — the Host moves the directory, it does not destroy the facts.
+      'run.delete': 'Delete',
+      'run.deleteConfirm': 'Confirm delete {id}',
+      'run.deleteIsDefault': 'this is the run this host ticks: point workspace at another directory first, and then it can be removed',
+      'run.deleteIsActive': 'this host advances this run: stop it first, and then it can be removed',
+      'run.deleteTrash': 'removing a run moves its directory aside into <runs_root>/.trash — it keeps every fact the run recorded',
 
       'phase.noFacts': 'no facts yet',
       'phase.notRecorded': 'phase not recorded',
@@ -416,7 +443,7 @@ window.__ModuleLoader__.load({
 
     const ZH = {
       'panel.title': 'Reprise',
-      'panel.mode': '事实只读 —— 只有新建运行和开始/停止会写入',
+      'panel.mode': '事实只读 —— 只有新建运行、删除运行、开始/停止和修改设置会写入',
       'panel.loading': '正在读取事实…',
       'panel.sharedFailed': '页面模块加载失败（{reason}）——正在重试。',
 
@@ -425,7 +452,7 @@ window.__ModuleLoader__.load({
       'run.missing': '{id} —— 不在注册表里',
       'run.create': '新建一个运行',
       'run.createNeedsRoot':
-        '新建运行需要 runs_root：在插件配置里加上它再重载 —— 新运行就是它下面的一个目录',
+        '新建运行需要 runs_root：点 ＋ 旁边的设置把它填上 —— 新运行就是它下面的一个目录',
       'run.field.id': '运行 id',
       'run.field.mode': '模式',
       'run.mode.clone': '克隆一个仓库',
@@ -446,6 +473,22 @@ window.__ModuleLoader__.load({
       'run.stopHint': '这决定这个宿主是否推进这个运行 —— 停止会保留全部事实，也不等于打断正在执行的一步。',
       'run.pauseElsewhere': '运行自己的暂停与继续是内核消费的 pending/ 意图，那是另一个控件，不是这个按钮。',
       'run.activationInvalid': '这个宿主读不出它驱动哪些运行的记录 —— {problem}',
+      'run.settings': '设置 —— 新运行建在哪里，同时推进几个',
+      'run.settings.field.runsRoot': 'runs_root —— 新运行建在哪里（绝对路径）',
+      'run.settings.field.maxActiveRuns': 'max_active_runs —— 这个宿主同时推进几个运行',
+      'run.settings.fromSettings': '来自设置',
+      'run.settings.fromConfig': '来自插件配置',
+      'run.settings.fromUnknown': '尚未读取',
+      'run.settings.noRoot': '哪里都没有设置 runs_root，这个宿主没有新建运行的目录',
+      'run.settings.corrupt': '这个宿主读不出自己的设置文件，所以在这里保存什么都不会生效 —— {problem}',
+      'run.settings.save': '保存',
+      'run.settings.saving': '正在保存…',
+      'run.settings.clear': '清除回配置',
+      'run.delete': '删除',
+      'run.deleteConfirm': '确认删除 {id}',
+      'run.deleteIsDefault': '这是这个宿主默认推进的那个运行：先把 workspace 指向别的目录，才能删除它',
+      'run.deleteIsActive': '这个宿主正在推进这个运行：先停止它，然后才能删除',
+      'run.deleteTrash': '删除会把运行目录移到 <runs_root>/.trash 下，它记录的全部事实都还在',
 
       'phase.noFacts': '还没有任何事实',
       'phase.notRecorded': '阶段未记录',
@@ -832,11 +875,12 @@ window.__ModuleLoader__.load({
 
     // -------------------------------------------------------------- the registry (ADR 0002)
     //
-    // Three requests: the `GET` lists what this Host may show, one `POST` scaffolds a new run under its
-    // root, and one `POST` records the host-level decision to advance an existing run. The list is a
-    // *directory listing* read fresh by the Host (a run dropped in by hand appears without a restart),
-    // so it is read on mount, after a create, after a start or a stop, and every half minute — never on
-    // the five-second view poll.
+    // Five requests, of which four write: the `GET` lists what this Host may show, one `POST` scaffolds
+    // a new run under its root, one `POST` moves a run's directory aside, one `POST` records the
+    // host-level decision to advance an existing run, and one `POST` writes the two settings the page
+    // owns. The list is a *directory listing* read fresh by the Host (a run dropped in by hand appears
+    // without a restart), so it is read on mount, after a create, after a start or a stop, after a
+    // removal, after a settings save, and every half minute — never on the five-second view poll.
 
     /** The registry's one address. `createRun` and `readRuns` below are its only callers. */
     const RUNS_URL = '/api/reprise/runs'
@@ -852,7 +896,26 @@ window.__ModuleLoader__.load({
     const INTENT_URL = '/api/reprise/intent'
 
     /**
-     * The first of the panel's two writes: `POST /api/reprise/runs`, in the body ADR 0002 names.
+     * One run out of the registry: the `POST` that moves its directory aside.
+     *
+     * It is spelled as a member of `/api/reprise/runs` because that is what it operates on, and it takes
+     * `{ id, confirm: id }` — the confirmation is the *id*, not a boolean, so a request built for one
+     * run cannot remove another if the list moved between the two clicks. The answer names where the
+     * directory went (`trashed_to`), which is the only thing the panel could not have guessed.
+     */
+    const RUN_DELETE_URL = '/api/reprise/runs/delete'
+
+    /**
+     * The two settings the page owns: where new runs go, and how many this host advances at once.
+     *
+     * Read on mount and after a save, never on the five-second poll (`core/lib/settings.js`: the file
+     * this answer is derived from is written by one form, not by the run). The `GET` and the `POST`
+     * answer the same payload, so one reducer reads both.
+     */
+    const SETTINGS_URL = '/api/reprise/settings'
+
+    /**
+     * The first of the panel's four writes: `POST /api/reprise/runs`, in the body ADR 0002 names.
      *
      * It answers rather than throws, because a refusal is this form's normal state — an existing
      * directory, a bad id, a repository git could not clone — and the sentence that comes back is what
@@ -979,6 +1042,135 @@ window.__ModuleLoader__.load({
         }
       }
       return { ok: true, status: typeof answer?.status === 'string' ? answer.status : null }
+    }
+
+    /**
+     * The settings answer, reduced to the things the form draws.
+     *
+     * The route answers `{ ok, path, status, problems, runs_root, runs_root_from, max_active_runs,
+     * max_active_runs_from, configured }`; the form needs the two values in force, the two `*_from`
+     * words that say who chose them, and the Host's own sentences when the settings file could not be
+     * read. Everything is defaulted rather than trusted, in the same spirit as `readRuns`: a field this
+     * surface cannot read is `null`, and `null` is drawn as "not read yet", never as a made-up value.
+     *
+     * @param {object} answer the route's payload
+     * @returns {{path: string|null, status: string, problems: string[],
+     *   runs_root: string|null, runs_root_from: 'settings'|'config'|null,
+     *   max_active_runs: number|null, max_active_runs_from: 'settings'|'config'|null}}
+     */
+    function settingsAnswer(answer) {
+      const from = (value) => (value === 'settings' || value === 'config' ? value : null)
+      const root = typeof answer?.runs_root === 'string' && answer.runs_root !== '' ? answer.runs_root : null
+      return {
+        path: typeof answer?.path === 'string' ? answer.path : null,
+        status: typeof answer?.status === 'string' ? answer.status : 'absent',
+        problems: Array.isArray(answer?.problems)
+          ? answer.problems.filter((problem) => typeof problem === 'string' && problem !== '')
+          : [],
+        runs_root: root,
+        // No root anywhere means there is nobody to name: `null` here is the contract's own word for it.
+        runs_root_from: root === null ? null : from(answer?.runs_root_from),
+        max_active_runs: Number.isSafeInteger(answer?.max_active_runs) ? answer.max_active_runs : null,
+        max_active_runs_from: from(answer?.max_active_runs_from),
+      }
+    }
+
+    /** One settings read. It throws on a refusal; the caller keeps the last answer it had. */
+    async function readSettings() {
+      const response = await fetch(SETTINGS_URL, { headers: { accept: 'application/json' }, cache: 'no-store' })
+      const answer = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(`settings: HTTP ${response.status} — ${answer?.error?.message ?? 'no answer'}`)
+      }
+      return settingsAnswer(answer)
+    }
+
+    /**
+     * The body the settings form sends.
+     *
+     * **Only the fields the operator changed**, because an absent key means "leave this alone" and a
+     * `null` means "forget my value, go back to the plugin configuration" (`core/lib/settings.js`). A
+     * form that re-sent both values on every save would quietly copy a configuration's `runs_root` into
+     * the settings file the first time somebody changed the other field — and the provenance line would
+     * then say `from settings` about a value nobody set here.
+     *
+     * An emptied field is sent as `null`: the reader refuses `""` as a path (it is not absolute), and
+     * "I typed nothing" means the same thing as "clear it", so `Save` on two empty fields is a clear.
+     */
+    function settingsBody({ runsRoot, maxActiveRuns, inForce }) {
+      const body = {}
+      const root = runsRoot.trim()
+      if (root !== (inForce?.runs_root ?? '')) body.runs_root = root === '' ? null : root
+      const max = maxActiveRuns.trim()
+      const inForceMax = inForce?.max_active_runs === null || inForce?.max_active_runs === undefined ? '' : String(inForce.max_active_runs)
+      if (max !== inForceMax) {
+        const parsed = Number(max)
+        body.max_active_runs = max === '' || !Number.isFinite(parsed) ? null : parsed
+      }
+      return body
+    }
+
+    /**
+     * Save one settings patch, in the body `settingsBody` built (or `{runs_root: null,
+     * max_active_runs: null}` for *Clear to configuration*).
+     *
+     * It answers rather than throws, exactly as the other three writes do: a refused save is this
+     * form's normal state (a relative path, a zero cap, a settings file the Host cannot read), and the
+     * Host's sentence is what the reader has to see, verbatim.
+     *
+     * @returns {Promise<{ok: true, settings: object} | {ok: false, said: string}>}
+     */
+    async function writeSettings(t, body) {
+      let response
+      try {
+        response = await fetch(SETTINGS_URL, {
+          method: 'POST',
+          headers: { accept: 'application/json', 'content-type': 'application/json' },
+          cache: 'no-store',
+          body: JSON.stringify(body),
+        })
+      } catch (error) {
+        return {
+          ok: false,
+          said: say(t, 'run.notSent', { error: error instanceof Error ? error.message : String(error) }),
+        }
+      }
+      const answer = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        return { ok: false, said: answer?.error?.message ?? say(t, 'run.refused', { status: response.status }) }
+      }
+      return { ok: true, settings: settingsAnswer(answer) }
+    }
+
+    /**
+     * Remove one run, by moving its directory aside.
+     *
+     * The body carries the id twice — `{ id, confirm: id }` — because the route's refusal is about
+     * whether the *same* run is still the one the reader meant when they armed the button, and a
+     * boolean would answer that question for whichever run the list happens to hold now.
+     *
+     * @returns {Promise<{ok: true, trashedTo: string|null} | {ok: false, said: string}>}
+     */
+    async function removeRun(t, { id }) {
+      let response
+      try {
+        response = await fetch(RUN_DELETE_URL, {
+          method: 'POST',
+          headers: { accept: 'application/json', 'content-type': 'application/json' },
+          cache: 'no-store',
+          body: JSON.stringify({ id, confirm: id }),
+        })
+      } catch (error) {
+        return {
+          ok: false,
+          said: say(t, 'run.notSent', { error: error instanceof Error ? error.message : String(error) }),
+        }
+      }
+      const answer = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        return { ok: false, said: answer?.error?.message ?? say(t, 'run.refused', { status: response.status }) }
+      }
+      return { ok: true, trashedTo: typeof answer?.trashed_to === 'string' ? answer.trashed_to : null }
     }
 
     /**
@@ -1203,6 +1395,21 @@ window.__ModuleLoader__.load({
        */
       const [toggleBusy, setToggleBusy] = useState(false)
       const [toggleSaid, setToggleSaid] = useState(null)
+      /**
+       * The two settings, the form that edits them, and the removal that is one click from writing.
+       *
+       * `settings` is the Host's last answer (never a copy of what was typed): the form's *values* are
+       * its own state, but the sentence under each field — where the value in force comes from — is
+       * read from this answer, so "from settings" changes to "from plugin configuration" the moment a
+       * save says it did. `deleteArmed` is the id the first click armed, or nothing; it is cleared by
+       * the second click, by `Cancel`, and by every refusal, so an armed button never outlives its
+       * reason.
+       */
+      const [settings, setSettings] = useState(null)
+      const [settingsOpen, setSettingsOpen] = useState(false)
+      const [deleteArmed, setDeleteArmed] = useState(null)
+      const [deleteBusy, setDeleteBusy] = useState(false)
+      const [deleteSaid, setDeleteSaid] = useState(null)
       const book = useRef(null)
       if (book.current === null) book.current = newBook()
       const alive = useRef(true)
@@ -1273,6 +1480,25 @@ window.__ModuleLoader__.load({
         }
       }, [applyRun])
 
+      /**
+       * One settings read: the two values in force, and who chose them.
+       *
+       * Read on mount and after a save, and deliberately *not* on the five-second poll: `runs_root` and
+       * `max_active_runs` change when somebody saves the form, so a read per poll would be four requests
+       * a minute to learn that nothing moved. A refused read keeps the last answer — a Host that cannot
+       * answer for a moment must not close a form the reader has open, and an unanswered read is not
+       * "no settings".
+       */
+      const loadSettings = useCallback(async () => {
+        try {
+          const answer = await readSettings()
+          if (!alive.current) return
+          setSettings(answer)
+        } catch {
+          // The last answer stays, and the form's own paragraph is where a refused save speaks.
+        }
+      }, [])
+
       const poll = useCallback(async (candidateId) => {
         const mine = ++gen.current
         // One run per tick: the five reads of this poll are five questions about the same run, and
@@ -1320,6 +1546,12 @@ window.__ModuleLoader__.load({
         const timer = setInterval(() => void loadRuns(), RUNS_POLL_MS)
         return () => clearInterval(timer)
       }, [loadRuns])
+
+      // The settings: once, on mount. No interval — the one thing that changes them is the form below,
+      // and it re-reads them itself after a save (`settingsSaved`).
+      useEffect(() => {
+        void loadSettings()
+      }, [loadSettings])
 
       useEffect(() => {
         // Nothing is polled until the registry has answered, even if that answer is a refusal. Without
@@ -1423,6 +1655,74 @@ window.__ModuleLoader__.load({
         [loadRuns, t],
       )
 
+      const toggleSettings = useCallback(() => setSettingsOpen((open) => !open), [])
+      // Stable, like `closeForm`: the settings form's Escape listener depends on this identity.
+      const closeSettings = useCallback(() => setSettingsOpen(false), [])
+
+      /**
+       * A saved settings patch: take the Host's answer as the new truth, then re-read the registry.
+       *
+       * The second half is not an afterthought — a new `runs_root` changes *which runs exist*, so the
+       * picker would otherwise offer the old directory's runs until its own half-minute came round. The
+       * page keeps the run it is showing (`loadRuns` is handed `runRef.current` as `kept`), because a
+       * settings save is a statement about where future runs go, not about which run is on screen; if
+       * that run lived under the old root the picker says `not in the registry` rather than silently
+       * swapping in another one.
+       *
+       * `settings` is replaced with the answer and never with the patch that was sent: the form must
+       * say `from settings` only if the Host says so.
+       */
+      const settingsSaved = useCallback(
+        async (next) => {
+          if (alive.current) setSettings(next)
+          await loadRuns()
+        },
+        [loadRuns],
+      )
+
+      /** Arm the removal for one id. Arming the same id twice is not a second state. */
+      const armDelete = useCallback((id) => {
+        if (typeof id !== 'string' || id === '') return
+        setDeleteSaid(null)
+        setDeleteArmed(id)
+      }, [])
+
+      const cancelDelete = useCallback(() => setDeleteArmed(null), [])
+
+      /**
+       * Remove the run the reader confirmed — the second click, and the only one that writes.
+       *
+       * The order matters here too: the id the page is *showing* is dropped before the registry is
+       * re-read, because `loadRuns` deliberately keeps a selection that has left the registry (that is
+       * what keeps a stale `localStorage` value from moving the page). After a removal the run is gone
+       * for good, so the selection has to be released first — which is what lets the read fall back to
+       * the Host's default run, exactly as a fresh page would. The armed state is cleared on every
+       * path, including a refusal: a button that stayed armed after the Host said no would be one click
+       * from a write nobody asked for a second time.
+       */
+      const deleteSelected = useCallback(
+        async (id) => {
+          if (typeof id !== 'string' || id === '') return
+          setDeleteBusy(true)
+          setDeleteSaid(null)
+          const result = await removeRun(t, { id })
+          if (!alive.current) return
+          setDeleteArmed(null)
+          if (result.ok !== true) {
+            setDeleteSaid(result.said)
+            setDeleteBusy(false)
+            return
+          }
+          const wasViewed = runRef.current === id
+          if (wasViewed) applyRun(null)
+          await loadRuns()
+          if (!alive.current) return
+          setDeleteBusy(false)
+          if (wasViewed) void poll(chosen.current)
+        },
+        [applyRun, loadRuns, poll, t],
+      )
+
       const openCall = useCallback(async (ref) => {
         setOpenRef(ref)
         setOpenRecord(null)
@@ -1452,19 +1752,30 @@ window.__ModuleLoader__.load({
           snapshot: answers,
           readAt,
           failure,
-          // The picker and the create form are one thing — "which run is this page about" — so they
-          // arrive as one object rather than six sibling props the region has to keep in step. The
-          // start/stop control is the third member of the same sentence: it is about *that* run, and
-          // it is drawn from the same registry answer as the `<select>` beside it.
+          // The picker, the create form, the settings, the start/stop control and the removal are one
+          // thing — "which run is this page about, and what may I do to the registry it lives in?" — so
+          // they arrive as one object rather than a dozen sibling props the region has to keep in step.
+          // Every control here is drawn from the same registry answer as the `<select>` beside it.
           runs: {
             registry,
             selected: runId,
             formOpen,
+            settingsOpen,
             onSelect: chooseRun,
             onToggleForm: toggleForm,
+            onToggleSettings: toggleSettings,
             onCreated: runCreated,
             onCloseForm: closeForm,
+            settings: { answered: settings, onSaved: settingsSaved, onClose: closeSettings },
             toggle: { busy: toggleBusy, said: toggleSaid, onToggle: toggleActive },
+            remove: {
+              armed: deleteArmed,
+              busy: deleteBusy,
+              said: deleteSaid,
+              onArm: armDelete,
+              onCancel: cancelDelete,
+              onDelete: deleteSelected,
+            },
           },
         }),
         h(RegionHeadline, { key: 'headline', t, shared, conclusion: answers.conclusion }),
@@ -1528,15 +1839,16 @@ window.__ModuleLoader__.load({
      * of the run the picker names, because it is read from *that* run's overview answer.
      *
      * The picker sits beside the title because it is the same kind of claim as the title: what this
-     * page is. The create form lives in the same header, on its own line, because it is a sentence
-     * about the registry rather than a place to go — a modal would take the facts off screen to
-     * describe a run that, once created, becomes the run the page shows.
+     * page is. The create form and the settings form live in the same header, each on its own line,
+     * because each is a sentence about the registry rather than a place to go — a modal would take the
+     * facts off screen to describe a run that, once created, becomes the run the page shows, or to set
+     * a directory the runs will be created in.
      *
-     * Two sentences a refused click or a corrupt record owes a reader live on their own full-width
-     * line under the stamps, wearing the class the create form's refusal already wears: the Host's
-     * words about the activation file it could not read, and the Host's words about the start or stop
-     * it refused. Neither is a stamp — both are sentences — and a sentence inside the wrapping row of
-     * stamps would push the numbers around.
+     * Three sentences a refused click or a corrupt record owes a reader live on their own full-width
+     * lines under the stamps, wearing the class the create form's refusal already wears: the Host's
+     * words about the activation file it could not read, about the start or stop it refused, and about
+     * the removal it refused. None is a stamp — all are sentences — and a sentence inside the wrapping
+     * row of stamps would push the numbers around.
      */
     function RegionMasthead({ t, shared, snapshot, readAt, failure, runs }) {
       const fmt = shared.format
@@ -1573,9 +1885,12 @@ window.__ModuleLoader__.load({
             registry: runs.registry,
             selected: runs.selected,
             open: runs.formOpen,
+            settingsOpen: runs.settingsOpen,
             onSelect: runs.onSelect,
             onToggleForm: runs.onToggleForm,
+            onToggleSettings: runs.onToggleSettings,
             toggle: runs.toggle,
+            remove: runs.remove,
           }),
           h('span', { className: 'phase-capsule', 'data-state': phaseState, 'aria-live': 'polite', key: 'phase' }, [
             h('span', { className: 'phase-capsule-dot', 'aria-hidden': 'true', key: 'dot' }),
@@ -1603,15 +1918,31 @@ window.__ModuleLoader__.load({
         runs.toggle.said === null
           ? null
           : h('p', { className: 'warning', key: 'toggleRefusal' }, runs.toggle.said),
+        // A refused removal, in the same paragraph again: one way for a Host's sentence to look.
+        runs.remove.said === null
+          ? null
+          : h('p', { className: 'warning', key: 'deleteRefusal' }, runs.remove.said),
         runs.formOpen === true
           ? h(RunCreateForm, { key: 'create', t, onCreated: runs.onCreated, onClose: runs.onCloseForm })
+          : null,
+        // The settings, on a line of their own under the create form: a sentence about the registry
+        // this page is pointed at, drawn where that registry is named rather than in a console.
+        runs.settingsOpen === true
+          ? h(RunSettingsForm, {
+              key: 'settings',
+              t,
+              settings: runs.settings.answered,
+              onSaved: runs.settings.onSaved,
+              onClose: runs.settings.onClose,
+            })
           : null,
       ])
     }
 
     /**
-     * The registry as one native `<select>`, plus the two buttons that act on the run it names: `＋`,
-     * which opens the create form, and the start/stop control, which is about the run *on screen*.
+     * The registry as one native `<select>`, plus the four controls that act on it: `＋`, which opens
+     * the create form; `⚙`, which opens the settings; the start/stop control, which is about the run
+     * *on screen*; and the removal, which is about that run's directory.
      *
      * Native because the listbox has already been written, by every browser, with keyboard navigation,
      * type-ahead and the reader's own platform picker — and this is a choice between a handful of short
@@ -1619,11 +1950,181 @@ window.__ModuleLoader__.load({
      * silently swapped for the default: the view routes answer `404` naming it, which a reader can act
      * on, and a picker that quietly moved to another run would hide exactly the fact worth seeing.
      *
-     * The whole picker is one `inline-flex` unit that never wraps, so the `<select>` and both buttons
+     * The order is the sentence the line says: *this run* (`<select>`), *a new one* (`＋`, `⚙` — the
+     * two things that describe the registry rather than the run), *advance it or not*, *remove it*.
+     * The settings button sits beside `＋` because both are about the directory runs live in: creating
+     * a run needs `runs_root`, and `＋`'s own tooltip sends the reader here when it is missing.
+     *
+     * The whole picker is one `inline-flex` unit that never wraps, so the `<select>` and its buttons
      * cannot separate and the stamps keep their line: the `<select>` is the only member allowed to
      * shrink (the stylesheet's `max-width` on it is the whole of that rule).
      */
-    function RunPicker({ t, registry, selected, open, toggle, onSelect, onToggleForm }) {
+    /**
+     * The two settings the page owns — where new runs go, and how many the host advances at once.
+     *
+     * Why this form exists instead of a row in the host's own plugin settings: that page renders a form
+     * only for a plugin that registers one *and* exports a config schema, and this package deliberately
+     * does neither (`docs/adr/0002`). So the page carries the two fields, and the Host writes them into
+     * its own file — the boot line and this form both say whether the value in force came from *here*
+     * or from the plugin configuration, because a switch that does not say who set it is a switch you
+     * cannot reason about later.
+     *
+     * Four rules, each of them a way the simpler version would have lied:
+     *
+     *   - **The fields follow the Host's answer, never the patch that was typed.** Every save replaces
+     *     what this form believes with what came back, so "from settings" appears only when the Host
+     *     says so, and a Clear visibly hands the value back to the configuration.
+     *   - **Only the fields that changed are sent.** An absent key means "leave this alone" and `null`
+     *     means "clear it"; re-sending both would copy a configuration's `runs_root` into the settings
+     *     file the first time somebody touched the other field.
+     *   - **An emptied field is a Clear.** `""` is not a path (the reader refuses a relative one), and
+     *     "I typed nothing" means the same thing as "forget my value", so the two agree instead of one
+     *     of them being a refusal nobody understands.
+     *   - **A settings file the Host cannot read is said out loud, and nothing here pretends to save.**
+     *     The refusal is the file's own sentence; Save is disabled until it is fixed by hand, because a
+     *     writer that cannot read the record must not overwrite it.
+     */
+    function RunSettingsForm({ t, settings, onSaved, onClose }) {
+      const value = (next) => (next === null || next === undefined ? '' : String(next))
+      const [runsRoot, setRunsRoot] = useState(value(settings?.runs_root))
+      const [maxActiveRuns, setMaxActiveRuns] = useState(value(settings?.max_active_runs))
+      const [busy, setBusy] = useState(false)
+      const [refusal, setRefusal] = useState(null)
+
+      // Follow the Host: a save, a clear, or the first answer arriving replaces what is typed here —
+      // these are two settings, not a document, and the value in force is the one worth showing.
+      useEffect(() => {
+        setRunsRoot(value(settings?.runs_root))
+        setMaxActiveRuns(value(settings?.max_active_runs))
+      }, [settings])
+
+      useEffect(() => {
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') onClose()
+        }
+        document.addEventListener('keydown', onKeyDown)
+        return () => document.removeEventListener('keydown', onKeyDown)
+      }, [onClose])
+
+      const unreadable = settings === null
+      const corrupt = settings?.status === 'invalid'
+      const body = unreadable ? {} : settingsBody({ runsRoot, maxActiveRuns, inForce: settings })
+      const nothingChanged = Object.keys(body).length === 0
+
+      const apply = async (patch) => {
+        if (busy === true) return
+        setBusy(true)
+        setRefusal(null)
+        const result = await writeSettings(t, patch)
+        setBusy(false)
+        if (result.ok === true) {
+          onSaved(result.settings)
+          return
+        }
+        setRefusal(result.said)
+      }
+
+      const save = async (event) => {
+        event.preventDefault()
+        if (nothingChanged) {
+          onClose()
+          return
+        }
+        await apply(body)
+      }
+
+      // Where the value in force came from, in the Host's vocabulary: this page, or the configuration.
+      const provenance = (from) =>
+        say(
+          t,
+          from === 'settings'
+            ? 'run.settings.fromSettings'
+            : from === 'config'
+              ? 'run.settings.fromConfig'
+              : 'run.settings.fromUnknown',
+        )
+
+      const field = (name, caption, control, from) =>
+        h('label', { key: name }, [
+          h('span', { key: 'caption' }, caption),
+          control,
+          h('span', { className: 'dim', key: 'from' }, provenance(from)),
+        ])
+
+      return h(
+        'form',
+        { className: 'run-settings', onSubmit: save, 'aria-busy': busy === true, 'aria-label': say(t, 'run.settings') },
+        [
+          field(
+            'runsRoot',
+            say(t, 'run.settings.field.runsRoot'),
+            h('input', {
+              key: 'control',
+              name: 'runs_root',
+              type: 'text',
+              autoComplete: 'off',
+              spellCheck: false,
+              value: runsRoot,
+              disabled: busy || corrupt,
+              onChange: (event) => setRunsRoot(event.currentTarget.value),
+            }),
+            settings?.runs_root_from,
+          ),
+          field(
+            'maxActiveRuns',
+            say(t, 'run.settings.field.maxActiveRuns'),
+            h('input', {
+              key: 'control',
+              name: 'max_active_runs',
+              type: 'number',
+              min: 1,
+              step: 1,
+              value: maxActiveRuns,
+              disabled: busy || corrupt,
+              onChange: (event) => setMaxActiveRuns(event.currentTarget.value),
+            }),
+            settings?.max_active_runs_from,
+          ),
+          h('button', { type: 'submit', key: 'save', disabled: busy || corrupt }, say(t, busy ? 'run.settings.saving' : 'run.settings.save')),
+          h(
+            'button',
+            {
+              type: 'button',
+              key: 'clear',
+              disabled: busy || corrupt,
+              // Clearing is a statement about both keys, so it is never hidden behind "nothing changed":
+              // the file may hold a value identical to the configuration's, and only the Host can say.
+              onClick: () => void apply({ runs_root: null, max_active_runs: null }),
+            },
+            say(t, 'run.settings.clear'),
+          ),
+          h('button', { type: 'button', key: 'cancel', onClick: () => onClose() }, say(t, 'run.cancel')),
+          // The two states where this form can say nothing true: no answer yet, and a file the Host
+          // could not read. The second carries the Host's own sentence, verbatim.
+          unreadable ? h('p', { className: 'dim', key: 'waiting' }, say(t, 'panel.loading')) : null,
+          corrupt
+            ? h('p', { className: 'warning', key: 'corrupt' }, say(t, 'run.settings.corrupt', { problem: settings.problems[0] }))
+            : null,
+          settings !== null && settings.runs_root === null && corrupt === false && settings.runs_root_from === null
+            ? h('p', { className: 'dim', key: 'noRoot' }, say(t, 'run.settings.noRoot'))
+            : null,
+          refusal === null ? null : h('p', { className: 'warning', key: 'refusal' }, refusal),
+        ].filter(Boolean),
+      )
+    }
+
+    function RunPicker({
+      t,
+      registry,
+      selected,
+      open,
+      settingsOpen,
+      toggle,
+      remove,
+      onSelect,
+      onToggleForm,
+      onToggleSettings,
+    }) {
       const rows = registry?.runs ?? []
       const listed = rows.map((run) => run.id)
       // The row the button reads its state from. Absent while the registry has not answered, and for a
@@ -1667,7 +2168,31 @@ window.__ModuleLoader__.load({
           },
           '＋',
         ),
+        h(
+          'button',
+          {
+            type: 'button',
+            key: 'settings',
+            // Never disabled: the settings form is also the way *out* of "there is no runs_root", which
+            // is the state `＋` is disabled in. A button that could not open the only form that fixes
+            // it would send the reader back to the YAML this whole control exists to avoid.
+            'aria-label': say(t, 'run.settings'),
+            'aria-expanded': settingsOpen === true,
+            title: say(t, 'run.settings'),
+            onClick: () => onToggleSettings(),
+          },
+          '⚙',
+        ),
         h(RunToggle, { key: 'toggle', t, row, toggle }),
+        h(RunDelete, {
+          key: 'delete',
+          t,
+          row,
+          // The run this host ticks is named by its configuration, so the Host refuses to move its
+          // directory — and the button says so before the click rather than after it.
+          isDefault: row !== null && registry?.default_run === row.id,
+          remove,
+        }),
       ])
     }
 
@@ -1730,6 +2255,63 @@ window.__ModuleLoader__.load({
         },
         label,
       )
+    }
+
+    /**
+     * Remove the run the picker names — the same kind of control as start/stop, and the only one here
+     * that moves a directory. Two steps, in place, never a modal.
+     *
+     * **What "delete" means on this page.** The Host moves `<runs_root>/<id>` to
+     * `<runs_root>/.trash/<id>-<stamp>` (`archiveRun`); the run leaves the registry and keeps every
+     * fact it recorded. That sentence is in the button's `title` in both states — before the click and
+     * while it is refused — because a control whose name promises destruction and whose act is a move
+     * is a control that lies about the one thing the reader is weighing.
+     *
+     * **Two clicks, because the first one is a question.** The first turns the word into
+     * `Confirm delete <id>` — the id, not "this run", so the confirmation names what will move — and
+     * draws `Cancel` beside it in the same unit; only the second posts `{ id, confirm: id }`. No modal:
+     * a dialog would take the facts off screen to ask about the run that is on them, and this is a
+     * question about *one* run the picker is already naming.
+     *
+     * **Three states where nothing is asked.** No row (the registry has not answered, or the selected
+     * run has left it): nothing is drawn, as on `RunToggle`. The run this host ticks, or a run it
+     * advances: drawn disabled with the reason in the `title`, because the Host refuses both — a
+     * moved directory under a running tick is a crash, and a moved `workspace` is a loop pointed at
+     * nothing. A refusal that is *knowable* before the click is not something to learn from an error.
+     */
+    function RunDelete({ t, row, isDefault, remove }) {
+      if (row === null) return null
+      const busy = remove.busy === true
+      const active = row.active === true
+      const blocked = isDefault === true || active
+      // An armed button that became unaskable (the registry re-read and the Host now advances this run)
+      // goes back to its inert word: a disabled `Confirm delete …` would be a question nobody can answer.
+      const armed = blocked === false && remove.armed === row.id
+      const why = say(t, isDefault === true ? 'run.deleteIsDefault' : 'run.deleteIsActive')
+      const title = blocked || armed === false ? `${blocked ? why : ''}${blocked ? ' ' : ''}${say(t, 'run.deleteTrash')}` : say(t, 'run.deleteTrash')
+      const label = busy
+        ? say(t, 'run.toggling')
+        : armed
+          ? say(t, 'run.deleteConfirm', { id: row.id })
+          : say(t, 'run.delete')
+      return h('span', { className: 'run-delete', key: 'unit', 'data-armed': armed ? 'true' : 'false' }, [
+        h(
+          'button',
+          {
+            type: 'button',
+            key: 'delete',
+            'aria-busy': busy === true,
+            'aria-label': armed ? say(t, 'run.deleteConfirm', { id: row.id }) : say(t, 'run.delete'),
+            title,
+            disabled: busy || blocked,
+            onClick: () => (armed ? remove.onDelete(row.id) : remove.onArm(row.id)),
+          },
+          label,
+        ),
+        armed
+          ? h('button', { type: 'button', key: 'cancel', disabled: busy, onClick: () => remove.onCancel() }, say(t, 'run.cancel'))
+          : null,
+      ])
     }
 
     /**

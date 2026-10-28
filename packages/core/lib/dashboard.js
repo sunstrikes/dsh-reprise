@@ -74,7 +74,7 @@ export async function importUiPackage() {
  *   workspace, which is what every deployment that never sets `runs_root` gets.
  * @returns {Promise<{mounted: boolean, dispose?: () => void, routes?: number, reason?: string}>}
  */
-export async function mountDashboard({ connection, workspace, registry, platform, notice, importUi = importUiPackage }) {
+export async function mountDashboard({ connection, workspace, registry, platform, notice, settings, importUi = importUiPackage }) {
   if (typeof connection?.fetch?.register !== 'function') {
     return { mounted: false, reason: 'the host exposes no connection.fetch.register, so there is no surface to mount on' }
   }
@@ -100,7 +100,7 @@ export async function mountDashboard({ connection, workspace, registry, platform
 
   let dispose
   try {
-    dispose = ui.registerRoutes({ connection, workspace, registry, platform, notice })
+    dispose = ui.registerRoutes({ connection, workspace, registry, platform, notice, settings })
   } catch (error) {
     return { mounted: false, reason: `@dsh-reprise/ui refused to mount: ${messageOf(error)}` }
   }
@@ -164,6 +164,13 @@ export function apply(ctx, config = {}) {
       // fallback is the one run this page can read. `registerRoutes` treats a missing registry the same
       // way; passing it here keeps that answer in one place instead of two.
       registry: config.registry ?? createRunRegistry({ workspace: config.workspaceDir }),
+      // The page may set `runs_root` / `max_active_runs` (`settings.js`), so the routes need to know
+      // where the settings live and what the configuration says, in order to answer "what is in force
+      // and who set it". `env` is the host's, passed rather than read behind the caller's back.
+      settings: {
+        env: config.settingsEnv ?? process.env,
+        config: { runs_root: config.runs_root ?? config.runsRoot ?? null, max_active_runs: config.max_active_runs },
+      },
       platform: platformFor(config),
       notice: config.notice,
       importUi: config.importUi,

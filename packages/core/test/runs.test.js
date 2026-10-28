@@ -16,8 +16,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
+import { HOST_STATE_FILENAME } from '../lib/active-runs.js'
 import {
   RUN_CONFIG_FILENAME,
+  RunArchiveRefused,
+  archiveRun,
   createRunRegistry,
   readRunConfig,
   runConfigDocument,
@@ -268,4 +271,69 @@ test('readRunConfig distinguishes missing, invalid and ok', () => {
   const ok = readRunConfig(dir)
   assert.equal(ok.status, 'ok')
   assert.deepEqual(ok.value, { domain: '/abs/pack' })
+})
+// ------------------------------------------------------------- removing a run (archive, not destroy)
+
+const statusOf = (thrown) => (thrown instanceof RunArchiveRefused ? thrown.status : undefined)
+
+test('a removed run is moved into .trash and named in the host record — never destroyed', () => {
+  const root = mkdir(join(workdir(), 'runs'))
+  scaffoldRun({ registry: createRunRegistry({ runsRoot: root }), id: 'old', mode: 'empty', domain: packDir() })
+  const registry = createRunRegistry({ runsRoot: root })
+  assert.deepEqual(registry.list().map((entry) => entry.id), ['old'])
+
+  const made = archiveRun({ registry, id: 'old', activeIds: [], now: 1_700_000_000_000 })
+  assert.match(made.trashed_to, /[.]trash[/\\]old-/)
+  assert.ok(existsSync(join(made.trashed_to, RUN_CONFIG_FILENAME)), 'every file the run had came along')
+  assert.equal(existsSync(join(root, 'old')), false, 'and it is no longer a run')
+
+  // The registry does not list the archive: `.trash` is a dot-directory, skipped by the scan.
+  assert.deepEqual(createRunRegistry({ runsRoot: root }).list(), [])
+
+  const record = JSON.parse(readFileSync(join(root, HOST_STATE_FILENAME), 'utf8'))
+  assert.equal(record.trashed.length, 1)
+  assert.equal(record.trashed[0].id, 'old')
+  assert.equal(record.trashed[0].trashed_to, made.trashed_to, 'where it went is answerable a week later')
+})
+
+test('a run is refused when it is the one being ticked, when it is active, or when it is not ours', () => {
+  const root = mkdir(join(workdir(), 'runs'))
+  const registry = createRunRegistry({ runsRoot: root })
+  for (const id of ['ticked', 'busy']) scaffoldRun({ registry, id, mode: 'empty', domain: packDir() })
+
+  const ticked = createRunRegistry({ runsRoot: root, workspace: join(root, 'ticked') })
+  assert.throws(
+    () => archiveRun({ registry: ticked, id: 'ticked' }),
+    (error) => statusOf(error) === 409 && /point workspace at another directory first/.test(error.message),
+  )
+
+  // `keepIds` defaults to the registry's default run, so this case says "nothing is protected" to reach
+  // the activation guard on a registry whose first entry happens to be `busy`.
+  assert.throws(
+    () => archiveRun({ registry, id: 'busy', keepIds: [], activeIds: ['busy'] }),
+    (error) => statusOf(error) === 409 && /stop it first/.test(error.message),
+  )
+
+  assert.throws(
+    () => archiveRun({ registry, id: 'nobody' }),
+    (error) => statusOf(error) === 404,
+  )
+
+  // A run declared through `runs: [...]` lives outside the root: this host only reorganises its own.
+  const outside = mkdir(join(workdir(), 'elsewhere'))
+  const wired = createRunRegistry({ runsRoot: root, runs: [outside] })
+  assert.throws(
+    () => archiveRun({ registry: wired, id: 'elsewhere', keepIds: [] }),
+    (error) => statusOf(error) === 400 && /not inside runs_root/.test(error.message),
+  )
+
+  // A host with no root at all cannot hold an archive either.
+  assert.throws(
+    () => archiveRun({ registry: createRunRegistry({}), id: 'ticked' }),
+    (error) => statusOf(error) === 400 && /needs runs_root/.test(error.message),
+  )
+
+  // Nothing moved in any of the refusals above.
+  for (const id of ['ticked', 'busy']) assert.ok(existsSync(join(root, id)))
+  assert.ok(existsSync(outside))
 })

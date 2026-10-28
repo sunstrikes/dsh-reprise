@@ -273,6 +273,13 @@ is the decision record.
 Two limits worth knowing: the overview's cluster listing is still built from the configured run's
 executor (another run's page says the cluster was not read rather than showing someone else's cards),
 and `reprise_status` answers about the configured run.
+- **Two operational keys are set from the page**, not the patch: `runs_root` and `max_active_runs` in
+  `$DSH_HOME/reprise/settings.json` (`⚙` beside the picker). What the page wrote wins over this patch —
+  the boot line and the form both say which of the two is in force — clearing a field hands the question
+  back, and either change applies on the next beat rather than at the next restart.
+- **Removing a run archives it.** `删除` moves the directory to `<runs_root>/.trash/<id>-<stamp>` and
+  records the move; nothing is destroyed, so `mv` brings it back. It refuses the run this host ticks, an
+  active run, and a directory outside `runs_root`.
 
 One of `model.kind` and `model.command` must be there when `rounds` is set; the five call sites are the
 only places a model is consulted, and they all go through this one adapter —

@@ -1,20 +1,23 @@
 /**
  * The dashboard's routes — registered on the host's existing HTTP surface, never on a port of ours.
  *
- * `registerRoutes({ connection, workspace, registry, platform, clock, notice })` mounts the exact Fetch
- * routes through `connection.fetch.register` and returns the disposer that unmounts them. There is no
- * server here, no launcher, no liveness probe: the host already owns the listener, and a dashboard that
- * opened a second one would be the detached FastAPI process this rewrite exists to delete.
+ * `registerRoutes({ connection, workspace, registry, platform, clock, notice, settings })` mounts the
+ * exact Fetch routes through `connection.fetch.register` and returns the disposer that unmounts them.
+ * There is no server here, no launcher, no liveness probe: the host already owns the listener, and a
+ * dashboard that opened a second one would be the detached FastAPI process this rewrite exists to
+ * delete.
  *
  * Three properties are load-bearing and each has a test:
  *
- *   - **Read-only views, two named writes.** The seven view routes are `GET`; the only other verbs a
- *     run's state accepts are `POST /api/reprise/runs` (scaffold a directory under `runs_root`) and
- *     `POST /api/reprise/intent` (place the file under `<run>/pending/` the kernel already consumes) —
- *     ADR 0002. Every read opens its own `readOnly` SQLite handle and closes it, so a view physically
- *     cannot write a fact, two windows cannot interfere through a shared handle, and the page works
- *     with every session closed (it needs the run directory and nothing else — no session, no agent,
- *     no live `tick`).
+ *   - **Read-only views, four named writes.** The seven view routes are `GET`; the only other verbs this
+ *     package accepts are `POST /api/reprise/runs` (scaffold a directory under `runs_root`),
+ *     `POST /api/reprise/intent` (place the file under `<run>/pending/` the kernel already consumes, or
+ *     write the host's activation set), `POST /api/reprise/runs/delete` (move one run's directory into
+ *     `<runs_root>/.trash/` — an archive, never an unlink) and `POST /api/reprise/settings` (the two
+ *     settings the page owns, in `<DSH_HOME>/reprise/settings.json`) — ADR 0002. Every read opens its
+ *     own `readOnly` SQLite handle and closes it, so a view physically cannot write a fact, two windows
+ *     cannot interfere through a shared handle, and the page works with every session closed (it needs
+ *     the run directory and nothing else — no session, no agent, no live `tick`).
  *   - **Plain handlers.** `overviewHandler(workspace, query)` and friends are ordinary functions
  *     returning JSON. The route object is a two-line adapter over them, so the data contract can be
  *     tested without a host or a socket.
@@ -31,7 +34,7 @@ import { fileURLToPath } from 'node:url'
 import { readListing } from '../../core/lib/jobs.js'
 import { createRunRegistry } from '../../core/lib/runs.js'
 import { ViewError, callView, callsView, candidateView, conclusionView, overviewView, roundsView, treeView } from './views.js'
-import { createRunHandler, intentHandler, resolveRun, runsHandler, withStore } from './runs.js'
+import { createRunHandler, deleteRunHandler, intentHandler, resolveRun, runsHandler, saveSettingsHandler, settingsHandler, withStore } from './runs.js'
 
 export { ViewError }
 
@@ -192,8 +195,8 @@ export const ROUTES = [
 ]
 
 /**
- * The two paths a run's own state accepts a write on, and the whole of this package's write surface
- * (ADR 0002). Everything else a browser can reach here reads.
+ * The paths a run's own state accepts a write on, and the registry routes that read (ADR 0002).
+ * Everything else a browser can reach here reads.
  *
  * `runs` carries the list and the create on one path because they are one resource — the directory of
  * runs — and a client that can list them is one form away from adding one. `intent` is written by
@@ -201,13 +204,38 @@ export const ROUTES = [
  * produce the same bytes under `<run>/pending/`, and neither of them is the truth: the notebook on disk
  * is, and the kernel consumes it once.
  *
- * `read` is present where a `GET` is served and absent where it is not; a `GET` to `intent` is not
- * routed at all (the method is not declared here), which is how "no view of the intent file is
- * offered" is a fact about the route table rather than a promise.
+ * `delete` is the archive, not a destruction: `archiveRun` moves `<runs_root>/<id>` to
+ * `<runs_root>/.trash/<id>-<stamp>` and records where it went, so the run is out of the registry and
+ * still on disk. It is a `POST` with a body — `{id, confirm}` — rather than a `DELETE` with the id in
+ * the path, because the second half of the guard is a body the caller had to fill in, and because this
+ * path needs a declared `requestBody` like every other write here. The double guard is not a formality:
+ * this is the one request a slip of the mouse must not be able to make.
+ *
+ * `read` is present where a `GET` is served and absent where it is not; a `GET` to `intent` or `delete`
+ * is not routed at all (the method is not declared here), which is how "no view of the intent file is
+ * offered" and "nothing reads a removed run" are facts about the route table rather than promises.
  */
 export const RUN_ROUTES = [
   { name: 'runs', path: '/api/reprise/runs', methods: ['GET', 'POST'], read: runsHandler, write: createRunHandler },
   { name: 'intent', path: '/api/reprise/intent', methods: ['POST'], write: intentHandler },
+  { name: 'delete-run', path: '/api/reprise/runs/delete', methods: ['POST'], write: deleteRunHandler },
+]
+
+/**
+ * The plugin's own settings: the two answers an operator gives while looking at the page, remembered in
+ * `<DSH_HOME>/reprise/settings.json` (`core/lib/settings.js`).
+ *
+ * They are not a run's facts and not the host's activation record, so they are their own resource with
+ * its own path, and the handlers are handed the mount's `settings` — `{env, config}` — because "what is
+ * in force for this host" cannot be derived from a run registry. `config` supplies the fallbacks and the
+ * `configured` half of the answer (what clearing a key goes back to); `env` is where `DSH_HOME` is read
+ * from, so a test writes into a temporary directory and a host reads its own environment.
+ *
+ * Both verbs answer the same payload: a `POST` is a `GET` after the write, read back through the same
+ * reader, so the page never reconciles "what I sent" against "what landed".
+ */
+export const SETTINGS_ROUTES = [
+  { name: 'settings', path: '/api/reprise/settings', methods: ['GET', 'POST'], read: settingsHandler, write: saveSettingsHandler },
 ]
 
 /**
@@ -338,23 +366,49 @@ function routeFor({ path, method = 'GET', handler, workspace, registry, platform
 
 /**
  * One route of the registry's own: the list and the create share a path because they are one resource,
- * and the intent is the single write a run's own state accepts (ADR 0002).
+ * the intent is the single write a run's own state accepts, and the archive takes one run out of the
+ * registry without destroying it (ADR 0002).
  *
- * The two writes read their body here rather than in the handler, so a handler can be written against
+ * The writes read their body here rather than in the handler, so a handler can be written against
  * "the parsed body" and tested without a `Request` — and so the one place a body can be unreadable is
- * a 400 in a function with a test.
+ * a 400 in a function with a test. Every option is handed to every handler, the mount's `settings`
+ * included: only the archive reads the clock today, and a handler that ignored its third argument
+ * cannot start using it by accident.
  */
-function registryRoute({ entry, registry, clock }) {
+function registryRoute({ entry, registry, clock, settings }) {
   return route({
     path: entry.path,
     methods: entry.methods,
     fetch: async (request) => {
       try {
         if (request.method === 'GET' && typeof entry.read === 'function') {
-          return json(entry.read(registry, { clock }))
+          return json(entry.read(registry, { clock, settings }))
         }
         const body = await readBody(request)
-        return json(entry.write(registry, body))
+        return json(entry.write(registry, body, { clock, settings }))
+      } catch (error) {
+        return failure(error)
+      }
+    },
+  })
+}
+
+/**
+ * One settings route. It gets the mount's `settings` instead of a registry, because that — `{env,
+ * config}` — is the whole of what these handlers need, and hand it over explicitly so nothing here has
+ * to guess where `DSH_HOME` comes from. A mount that passes nothing still mounts both verbs: the refusal
+ * ("this host did not wire settings") is then an answer the page can print, rather than a route that is
+ * missing from the table and a 404 that explains nothing.
+ */
+function settingsRoute({ entry, settings }) {
+  return route({
+    path: entry.path,
+    methods: entry.methods,
+    fetch: async (request) => {
+      try {
+        if (request.method === 'GET' && typeof entry.read === 'function') return json(entry.read({ settings }))
+        const body = await readBody(request)
+        return json(entry.write({ settings }, body))
       } catch (error) {
         return failure(error)
       }
@@ -372,6 +426,7 @@ function registryRoute({ entry, registry, clock }) {
  *   platform?: object,
  *   clock?: { now: () => number },
  *   notice?: string,
+ *   settings?: { env?: Record<string, string | undefined>, config?: object },
  * }} options `workspace` is the one run this host ticks; it is required only when no `registry` is
  *   given, because then it *is* the registry. `registry` is the runs a request may name (ADR 0002:
  *   `createRunRegistry`). Without it this mount builds a registry of exactly this one workspace, so
@@ -386,10 +441,16 @@ function registryRoute({ entry, registry, clock }) {
  *   reason — the reader goes hunting for the wrong fault. It lands first in the overview envelope's
  *   `notes`, the channel the standalone page already renders; an empty page draws only `reason`, so it
  *   lands there too (see `withNotice`). No other route carries it, and no other *run* receives it: the
- *   sentence is about the run the host ticks.
+ *   sentence is about the run the host ticks. `settings` is optional and is what the settings routes need
+ *   — `{env, config}`, threaded from the caller (`core/lib/dashboard.js` passes the resolved
+ *   configuration and the environment `DSH_HOME` is read from). It is *not* inferred here: this package
+ *   does not know which configuration a host resolved, and a settings route that guessed would answer
+ *   "what is in force" from a second, quieter derivation of the same keys. Absent, the two verbs still
+ *   mount and answer a 400 saying this host did not wire settings, so a page can report the fault
+ *   instead of receiving a 404 that explains nothing.
  * @returns {() => void} the disposer that unregisters every route this call mounted
  */
-export function registerRoutes({ connection, workspace, registry, platform, clock, notice }) {
+export function registerRoutes({ connection, workspace, registry, platform, clock, notice, settings }) {
   const runs = registry ?? createRunRegistry({ workspace })
   const disposers = []
   try {
@@ -399,7 +460,11 @@ export function registerRoutes({ connection, workspace, registry, platform, cloc
     // The registry's routes come after the views for the same reason the views come first at all: a
     // page that cannot read a run is useless even if it can create one.
     for (const entry of RUN_ROUTES) {
-      disposers.push(connection.fetch.register(registryRoute({ entry, registry: runs, clock })))
+      disposers.push(connection.fetch.register(registryRoute({ entry, registry: runs, clock, settings })))
+    }
+    // The plugin's own settings: not a run's resource, and not the registry's, so its own table.
+    for (const entry of SETTINGS_ROUTES) {
+      disposers.push(connection.fetch.register(settingsRoute({ entry, settings })))
     }
     for (const entry of ASSETS) {
       disposers.push(

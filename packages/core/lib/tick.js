@@ -27,6 +27,8 @@
 
 import { activeRunIds } from './active-runs.js'
 import { resolveConfig } from './config.js'
+import { createRunRegistry } from './runs.js'
+import { effectiveSettings } from './settings.js'
 import { createWorkspace } from './workspace.js'
 import { describeRun, logFor } from './boot.js'
 import { mountTick } from './host.js'
@@ -129,11 +131,25 @@ export function apply(ctx, config = {}) {
   const reported = new Set(plan.skipped.map((entry) => entry.id))
   let lastActive = workspaces.map((entry) => entry.id)
 
+  // The registry the beat resolves ids against. It is rebuilt when the page changes `runs_root`, which
+  // is why it is a `let` rather than the frozen value from boot: moving where runs live must not need a
+  // restart either (ADR 0002, settings).
+  let registry = config.registry
+  const settingsFor = () => effectiveSettings({ config, env: config.settingsEnv ?? process.env })
+
   const provider = () => {
-    const active = activeRunIds({ registry: config.registry, runsRoot: config.runs_root, defaultRun: config.registry.defaultRun })
+    const settings = settingsFor()
+    for (const problem of settings.problems) log(`${problem} — keeping ${config.registry.runsRoot ?? '(none)'} as the runs root`)
+    if (settings.runsRoot !== undefined && settings.runsRoot !== registry.runsRoot) {
+      registry = createRunRegistry({ workspace: config.workspaceDir, runsRoot: settings.runsRoot, runs: config.runs ?? [] })
+      reported.clear()
+      log(`runs_root changed to ${settings.runsRoot} (from ${settings.runsRootFrom}): the registry was rebuilt`)
+    }
+
+    const active = activeRunIds({ registry, runsRoot: registry.runsRoot, defaultRun: registry.defaultRun })
     for (const id of active.ids) {
       if (open.has(id) || reported.has(id)) continue
-      const dir = config.registry.resolve(id)
+      const dir = registry.resolve(id)
       const opened = dir === undefined ? { id, problem: 'the registry no longer lists this directory' } : openWorkspaceFor({ id, dir, log })
       if (opened.workspace === undefined) {
         // Reported once, not once per beat: a broken configuration is not news every 300 ms.
@@ -203,7 +219,11 @@ export function apply(ctx, config = {}) {
       // How many runs may advance per beat. Every active run still advances; this only decides how many
       // in the same beat, so a host with five runs and `max_active_runs: 2` interleaves rather than
       // starves (ADR 0002).
-      maxActive: config.max_active_runs,
+      // A provider, not a number: the page can change the ceiling and it applies on the next beat.
+      maxActive: () => {
+        const settings = settingsFor()
+        return Number.isSafeInteger(settings.maxActiveRuns) && settings.maxActiveRuns > 0 ? settings.maxActiveRuns : config.max_active_runs
+      },
       log,
     })
   })()

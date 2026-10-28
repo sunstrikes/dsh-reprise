@@ -29,10 +29,11 @@
  * @module
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
+import { recordTrash } from './active-runs.js'
 import { parseToml } from './toml.js'
 
 /**
@@ -325,4 +326,118 @@ export function scaffoldRun({
   )
 
   return { dir, configPath, cloned }
+}
+/**
+ * A refusal from `archiveRun`, carrying both the HTTP status the route should answer with and a stable
+ * code. The status lives here rather than in the route because the *reason* does: "the run is active" and
+ * "the run is the one this host ticks" are different decisions, and a route that had to re-derive them
+ * would be a second place where they can disagree.
+ */
+export class RunArchiveRefused extends Error {
+  constructor(code, status, message) {
+    super(message)
+    this.name = 'RunArchiveRefused'
+    this.code = code
+    this.status = status
+  }
+}
+
+/**
+ * Take one run out of the registry by **moving its directory aside** — never by destroying it.
+ *
+ * A run is a directory holding a fact plane, landed worktrees and the artifacts a judgement was made
+ * from. "Delete" therefore means what this repository can actually promise: it stops being a run (the
+ * registry no longer lists it, and `.trash` is a dot-directory the scan ignores), and it is still there
+ * under `<runs_root>/.trash/<id>-<stamp>` for anybody who wants it back. Restoring is `mv` — the same
+ * operation, backwards — and the record of the move is appended to the host's own file, because
+ * "where did run 7 go?" must be answerable a week later.
+ *
+ * Two refusals come before the move, and both are about ownership rather than tidiness:
+ *
+ *   - **the run this host ticks** cannot be archived — its directory is named by the configuration, and
+ *     moving it would leave the loop pointed at nothing;
+ *   - **an active run** cannot be archived — it is in the set the host advances, and a directory that
+ *     moves under a tick in flight is a crash dressed as a cleanup. Stopping it is one click.
+ *
+ * A run outside `runs_root` (declared through `runs: [...]`) is refused too: this function only moves
+ * things inside the directory it owns.
+ *
+ * @param {{registry: object, id: string, keepIds?: string[], activeIds?: string[], now?: number,
+ *          readFile?: Function, writeFile?: (path: string, text: string) => void}} options
+ * @returns {{trashed_to: string, at_ms: number}}
+ */
+export function archiveRun({
+  registry,
+  id,
+  keepIds,
+  activeIds = [],
+  now = Date.now(),
+  readFile,
+  writeFile,
+}) {
+  const root = registry?.runsRoot
+  if (root === undefined || root === null) {
+    throw new RunArchiveRefused(
+      'needs_runs_root',
+      400,
+      'removing a run needs runs_root: the archive lives beside the runs, and this host has no directory of runs',
+    )
+  }
+  if (!isText(id)) throw new RunArchiveRefused('invalid_id', 400, 'removing a run needs its id')
+
+  const dir = registry.resolve(id)
+  if (dir === undefined) throw new RunArchiveRefused('not_registered', 404, `no run ${JSON.stringify(id)} is registered on this host`)
+
+  // A caller that forgets `keepIds` must still not be able to archive the run this host ticks. Note
+  // what that means precisely: the *declared* run (`workspace`), not "whichever run a bare request
+  // happens to mean" — on a registry with no `workspace` the default is just the first entry, and no
+  // loop is pointed at it, so nothing there needs protecting.
+  const kept = keepIds ?? registry.list().filter((entry) => entry.source === 'workspace').map((entry) => entry.id)
+  if (kept.includes(id)) {
+    throw new RunArchiveRefused(
+      'default_run',
+      409,
+      `the run this host is ticking (${id}) cannot be removed — point workspace at another directory first`,
+    )
+  }
+  if (activeIds.includes(id)) {
+    throw new RunArchiveRefused(
+      'active_run',
+      409,
+      `run ${id} is active: stop it first, then remove it — a directory that moves under a running tick is a crash`,
+    )
+  }
+  if (!registry.contains(dir)) {
+    throw new RunArchiveRefused(
+      'outside_runs_root',
+      400,
+      `${dir} is not inside runs_root, so it cannot be moved aside — this host only reorganises its own directory`,
+    )
+  }
+
+  const stamp = new Date(now).toISOString().replace(/[:.]/g, '-')
+  const trash = join(root, '.trash')
+  mkdirSync(trash, { recursive: true })
+  const target = join(trash, `${id}-${stamp}`)
+  if (existsSync(target)) throw new RunArchiveRefused('archive_exists', 409, `the archive already holds ${target}`)
+
+  renameSync(dir, target)
+  try {
+    recordTrash(root, { id, dir, trashed_to: target, at_ms: now }, readFile === undefined && writeFile === undefined ? {} : { readFile, writeFile })
+  } catch (error) {
+    // The move happened; the record is what failed. Put the directory back rather than leave a run that
+    // vanished without a note — the operator asked for a removal, not for a silent disappearance.
+    try {
+      renameSync(target, dir)
+    } catch {
+      // Nothing further to try: the archive path this call returns is still the truth to report.
+    }
+    throw new RunArchiveRefused(
+      'log_failed',
+      500,
+      `the run was moved to ${target} but the archive log could not be written (${error?.message ?? String(error)})`,
+    )
+  }
+
+  return { trashed_to: target, at_ms: now }
 }

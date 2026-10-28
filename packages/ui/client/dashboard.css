@@ -386,7 +386,8 @@
  * a dialog would take the facts off screen to talk about a run that, once created, becomes the run the
  * page shows.
  */
-.reprise .masthead .run-create {
+.reprise .masthead .run-create,
+.reprise .masthead .run-settings {
   flex-basis: 100%;
   margin-top: 0.125rem;
   padding-top: 0.625rem;
@@ -441,6 +442,54 @@
 }
 
 /* The Host's refusal, on its own line under the fields it is about. */
+.reprise .run-settings {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.5rem 0.75rem;
+  flex-basis: 100%;
+  margin-top: 0.25rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--reprise-rule-hairline);
+}
+.reprise .run-settings label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.reprise .run-settings label > span:first-child {
+  color: var(--reprise-dim);
+  font-size: 0.6875rem;
+}
+/* The provenance line is a caption under the field, not a warning: dim, small, and never truncating the
+   path it qualifies. */
+.reprise .run-settings label > .dim {
+  color: var(--reprise-faint);
+  font-size: 0.625rem;
+  overflow-wrap: anywhere;
+}
+.reprise .run-settings input {
+  padding: 0.125rem 0.25rem;
+  color: var(--reprise-text);
+  background: var(--reprise-surface-raised);
+  border: 1px solid var(--reprise-rule-ledger);
+  border-radius: var(--reprise-radius-sm);
+  font-family: var(--reprise-mono);
+  font-size: 0.75rem;
+}
+.reprise .run-settings input:disabled {
+  color: var(--reprise-dim);
+  border-style: dashed;
+}
+.reprise .run-settings button[disabled] {
+  color: var(--reprise-faint);
+}
+.reprise .run-settings .warning {
+  flex-basis: 100%;
+  margin: 0;
+}
 .reprise .run-create .warning {
   flex-basis: 100%;
   margin: 0;

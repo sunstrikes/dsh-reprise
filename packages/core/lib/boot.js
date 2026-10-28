@@ -110,8 +110,14 @@ export function describeRunLine(config) {
   parts.push(`executor ${run.executor}`, `candidate ${run.candidate}`, `rounds ${run.rounds}`)
   if (run.config_file !== null) parts.push(`config_file ${run.config_file}`)
   // Only when a registry is configured: every host that predates it prints exactly the line it always
-  // printed, which is what lets the boot log stay a diffable artefact (ADR 0002).
-  if (config.runs_root) parts.push(`runs_root ${config.runs_root} (${config.registry?.list().length ?? 0} run(s))`)
+  // printed, which is what lets the boot log stay a diffable artefact (ADR 0002). The root printed is
+  // the registry's own — the page's setting outranks the configuration — and it says which of the two
+  // answered, because "who set this?" is the question a log line exists to answer.
+  const runsRoot = config.registry?.runsRoot
+  if (runsRoot) {
+    const from = config.effective_runs_root_from ?? 'config'
+    parts.push(`runs_root ${runsRoot} (${config.registry?.list().length ?? 0} run(s), from ${from})`)
+  }
   return `run: ${parts.join(' \u00b7 ')}`
 }
 
