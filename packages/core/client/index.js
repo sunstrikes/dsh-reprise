@@ -138,6 +138,8 @@ window.__ModuleLoader__.load({
       'run.loading': 'reading the run list…',
       'run.missing': '{id} — not in the registry',
       'run.create': 'Create a run',
+      'run.createNeedsRoot':
+        'creating a run needs runs_root: add it to this plugin\'s configuration, then reload — a new run is a directory under it',
       'run.field.id': 'run id',
       'run.field.mode': 'mode',
       'run.mode.clone': 'clone a repository',
@@ -422,6 +424,8 @@ window.__ModuleLoader__.load({
       'run.loading': '正在读取运行列表…',
       'run.missing': '{id} —— 不在注册表里',
       'run.create': '新建一个运行',
+      'run.createNeedsRoot':
+        '新建运行需要 runs_root：在插件配置里加上它再重载 —— 新运行就是它下面的一个目录',
       'run.field.id': '运行 id',
       'run.field.mode': '模式',
       'run.mode.clone': '克隆一个仓库',
@@ -1651,9 +1655,14 @@ window.__ModuleLoader__.load({
           {
             type: 'button',
             key: 'create',
+            // `runs_root: null` is the host saying it has nowhere to create a run. Offering the form
+            // anyway is how somebody fills six fields and learns the answer from a refusal — so the
+            // button says the precondition first. `undefined` is "the registry has not answered yet",
+            // which is not a refusal and must not disable anything.
             'aria-label': say(t, 'run.create'),
             'aria-expanded': open === true,
-            title: say(t, 'run.create'),
+            disabled: registry?.runs_root === null,
+            title: registry?.runs_root === null ? say(t, 'run.createNeedsRoot') : say(t, 'run.create'),
             onClick: () => onToggleForm(),
           },
           '＋',

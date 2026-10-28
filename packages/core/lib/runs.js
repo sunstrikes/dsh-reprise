@@ -286,6 +286,15 @@ export function scaffoldRun({
   if (!isText(domain) || !isAbsolute(domain)) {
     throw new Error(`domain must be the absolute path of a domain pack (got ${JSON.stringify(domain ?? null)}) — a relative path would resolve against the host, not the run`)
   }
+  // A directory that is not a pack would create a run that cannot boot, and the person would find out
+  // from a row that says "not runnable" a minute later. The check is the cheapest one that catches the
+  // mistake the form actually invites — a parent directory typed instead of the pack inside it.
+  if (!existsSync(join(domain, 'domain.json'))) {
+    throw new Error(
+      `${domain} is not a domain pack: there is no domain.json in it — a run's metric contract, priors, ` +
+        'adjustable surface, prompts and executor entry are read from that directory',
+    )
+  }
   if (mode !== 'clone' && mode !== 'empty') throw new Error(`mode must be "clone" or "empty" (got ${JSON.stringify(mode)})`)
   if (mode === 'clone' && !isText(repo)) throw new Error('mode "clone" needs repo: the repository this run explores (an absolute path or a git URL)')
 

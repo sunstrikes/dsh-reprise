@@ -25,6 +25,18 @@ import {
 } from '../lib/runs.js'
 
 const workdir = () => mkdtempSync(join(tmpdir(), 'reprise-runs-'))
+
+/**
+ * A directory that *is* a domain pack, which is what a create now requires: the shape check is the
+ * presence of `domain.json`, so a test that scaffolds a run has to hand over a real one rather than a
+ * path that merely looks like a pack.
+ */
+const packDir = () => {
+  const dir = join(workdir(), 'pack')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'domain.json'), JSON.stringify({ name: 'test-pack' }))
+  return dir
+}
 const mkdir = (dir) => {
   mkdirSync(dir, { recursive: true })
   return dir
@@ -156,13 +168,13 @@ test('scaffoldRun("empty") lays down the directory and its configuration', () =>
   const root = mkdir(join(workdir(), 'runs'))
   const registry = createRunRegistry({ runsRoot: root })
 
-  const made = scaffoldRun({ registry, id: 'run-1', mode: 'empty', domain: '/abs/pack' })
+  const made = scaffoldRun({ registry, id: 'run-1', mode: 'empty', domain: packDir() })
   assert.equal(made.dir, join(root, 'run-1'))
   assert.equal(made.cloned, false)
   const config = readRunConfig(made.dir)
   assert.equal(config.status, 'ok', JSON.stringify(config.problems))
   assert.equal(config.value.workspace, '.')
-  assert.equal(config.value.domain, '/abs/pack')
+  assert.match(config.value.domain, /pack$/)
   assert.equal(config.value.runner.repo, 'repo')
   assert.equal(config.value.rounds.max_rounds, 3)
   // The id is now visible to the page without a restart: the registry re-reads the directory.
@@ -184,7 +196,7 @@ test('scaffoldRun("clone") runs git once, into the run, and says whether it clon
     id: 'cloned',
     mode: 'clone',
     repo: '/abs/source-repo',
-    domain: '/abs/pack',
+    domain: packDir(),
     repoDir: 'model-repo',
     git,
   })
@@ -208,16 +220,24 @@ test('scaffoldRun refuses what it cannot do, by name', () => {
     () => scaffoldRun({ registry, id: 'run-1', mode: 'empty', domain: 'relative/pack' }),
     /absolute path of a domain pack/,
   )
-  assert.throws(() => scaffoldRun({ registry, id: 'run-2', mode: 'sideways', domain: '/abs/pack' }), /"clone" or "empty"/)
-  assert.throws(() => scaffoldRun({ registry, id: 'run-3', mode: 'clone', domain: '/abs/pack' }), /needs repo/)
+  const pack = packDir()
+  assert.throws(() => scaffoldRun({ registry, id: 'run-2', mode: 'sideways', domain: pack }), /"clone" or "empty"/)
+  assert.throws(() => scaffoldRun({ registry, id: 'run-3', mode: 'clone', domain: pack }), /needs repo/)
+
+  // A directory that looks like a pack but is not one: the mistake the form invites is a parent
+  // directory typed instead of the pack inside it, and a run created against it could never boot.
+  assert.throws(
+    () => scaffoldRun({ registry, id: 'run-2b', mode: 'empty', domain: root }),
+    /is not a domain pack: there is no domain\.json/,
+  )
 
   // An existing directory is refused rather than merged into: it may be somebody's run.
   mkdir(join(root, 'run-4'))
-  assert.throws(() => scaffoldRun({ registry, id: 'run-4', mode: 'empty', domain: '/abs/pack' }), /already exists/)
+  assert.throws(() => scaffoldRun({ registry, id: 'run-4', mode: 'empty', domain: pack }), /already exists/)
 
   // No root at all: there is nowhere to create it.
   assert.throws(
-    () => scaffoldRun({ registry: createRunRegistry({}), id: 'run-5', mode: 'empty', domain: '/abs/pack' }),
+    () => scaffoldRun({ registry: createRunRegistry({}), id: 'run-5', mode: 'empty', domain: pack }),
     /needs runs_root/,
   )
 })
@@ -228,7 +248,7 @@ test('a clone that fails keeps the directory and quotes git', () => {
   const git = () => ({ status: 128, stderr: 'fatal: repository not found' })
 
   assert.throws(
-    () => scaffoldRun({ registry, id: 'broken', mode: 'clone', repo: 'https://example.invalid/x.git', domain: '/abs/pack', git }),
+    () => scaffoldRun({ registry, id: 'broken', mode: 'clone', repo: 'https://example.invalid/x.git', domain: packDir(), git }),
     /repository not found/,
   )
   // Never tidy away the evidence of a failure: the half-built run is left to be inspected.
