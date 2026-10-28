@@ -39,7 +39,16 @@ const messageOf = (error) => (error instanceof Error ? error.message : String(er
  * `dashboard.js`'s `platformFor` refuses to build a platform without an executor for that reason.
  */
 function displayOnly(config, display) {
-  return { workspaceDir: display.workspaceDir, notice: display.notice, onLog: config.onLog, importUi: config.importUi }
+  return {
+    workspaceDir: display.workspaceDir,
+    // The runs the page may show, resolved on the refused path too: a host whose *run* configuration
+    // is unusable still has runs on disk worth reading, and the picker is how an operator sees that
+    // (ADR 0002). A display path carrying no registry falls back to the one directory it can read.
+    registry: display.registry,
+    notice: display.notice,
+    onLog: config.onLog,
+    importUi: config.importUi,
+  }
 }
 
 /**

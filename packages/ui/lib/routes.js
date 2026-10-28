@@ -1,17 +1,20 @@
 /**
  * The dashboard's routes — registered on the host's existing HTTP surface, never on a port of ours.
  *
- * `registerRoutes({ connection, workspace, platform, notice })` mounts seven exact Fetch routes through
- * `connection.fetch.register` and returns the disposer that unmounts them. There is no server here,
- * no launcher, no liveness probe: the host already owns the listener, and a dashboard that opened a
- * second one would be the detached FastAPI process this rewrite exists to delete.
+ * `registerRoutes({ connection, workspace, registry, platform, clock, notice })` mounts the exact Fetch
+ * routes through `connection.fetch.register` and returns the disposer that unmounts them. There is no
+ * server here, no launcher, no liveness probe: the host already owns the listener, and a dashboard that
+ * opened a second one would be the detached FastAPI process this rewrite exists to delete.
  *
  * Three properties are load-bearing and each has a test:
  *
- *   - **Read-only.** Every route is `GET`. Each request opens its own `readOnly` SQLite handle and
- *     closes it, so a view physically cannot write a fact, two windows cannot interfere through a
- *     shared handle, and the page works with every session closed (it needs the workspace directory
- *     and nothing else — no session, no agent, no live `tick`).
+ *   - **Read-only views, two named writes.** The seven view routes are `GET`; the only other verbs a
+ *     run's state accepts are `POST /api/reprise/runs` (scaffold a directory under `runs_root`) and
+ *     `POST /api/reprise/intent` (place the file under `<run>/pending/` the kernel already consumes) —
+ *     ADR 0002. Every read opens its own `readOnly` SQLite handle and closes it, so a view physically
+ *     cannot write a fact, two windows cannot interfere through a shared handle, and the page works
+ *     with every session closed (it needs the run directory and nothing else — no session, no agent,
+ *     no live `tick`).
  *   - **Plain handlers.** `overviewHandler(workspace, query)` and friends are ordinary functions
  *     returning JSON. The route object is a two-line adapter over them, so the data contract can be
  *     tested without a host or a socket.
@@ -21,15 +24,24 @@
  * @module
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { readListing } from '../../core/lib/jobs.js'
-import { DB_FILENAME, Store } from '../../core/lib/store.js'
+import { createRunRegistry } from '../../core/lib/runs.js'
 import { ViewError, callView, callsView, candidateView, conclusionView, overviewView, roundsView, treeView } from './views.js'
+import { createRunHandler, intentHandler, resolveRun, runsHandler, withStore } from './runs.js'
 
 export { ViewError }
+
+/**
+ * `withStore` moved to `runs.js` when the registry arrived: a registry route may read *any* run in the
+ * listing, so the one read-only opener belongs beside those routes. It is re-exported here because
+ * this is where its callers import it from (`status-tool.js`, `test/read-only.test.js`), and moving a
+ * helper must not move an import for somebody else.
+ */
+export { withStore }
 
 const PACKAGE_DIR = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -38,27 +50,6 @@ const json = (body, status = 200) =>
     status,
     headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
   })
-
-/**
- * Run one read against the workspace fact plane.
- *
- * A missing database is not an error: a workspace with no facts yet is exactly what the dashboard
- * shows before the first tick, and answering 500 there would make an empty run look broken.
- *
- * @param {string} workspace
- * @param {(store: Store) => object} read
- * @returns {object | undefined} `undefined` when the workspace has no facts yet
- */
-export function withStore(workspace, read) {
-  if (typeof workspace !== 'string' || workspace === '') throw new ViewError(500, 'no workspace configured')
-  if (!existsSync(join(workspace, DB_FILENAME))) return undefined
-  const store = Store.openReadOnly(workspace)
-  try {
-    return read(store)
-  } finally {
-    store.close()
-  }
-}
 
 /** The one sentence an empty page says, written once so a test and a payload cannot drift apart. */
 const NOTHING_YET = 'no facts recorded in this workspace yet'
@@ -178,22 +169,45 @@ export function callHandler(workspace, query = {}) {
 }
 
 /**
- * The declared routes, in registration order.
+ * The declared view routes, in registration order.
  *
  * The view routes come first so a failed registration cannot leave the page mounted without
  * the data it fetches; the page and its module are static files read from `client/` per request
  * (no build step, nothing to watch, and a stale bundle cannot outlive an edit).
+ *
+ * `method` is spelled out rather than implied, because it is no longer the same for every route this
+ * package mounts: these seven read (`GET`), and the registry's own two are declared in `RUN_ROUTES`
+ * below.
  */
 export const ROUTES = [
-  { name: 'overview', path: '/api/reprise/overview', handler: overviewHandler },
-  { name: 'rounds', path: '/api/reprise/rounds', handler: roundsHandler },
-  { name: 'candidate', path: '/api/reprise/candidate', handler: candidateHandler },
+  { name: 'overview', path: '/api/reprise/overview', method: 'GET', handler: overviewHandler },
+  { name: 'rounds', path: '/api/reprise/rounds', method: 'GET', handler: roundsHandler },
+  { name: 'candidate', path: '/api/reprise/candidate', method: 'GET', handler: candidateHandler },
   // The search as a tree: the one page whose unit is the search, not a round or a candidate.
-  { name: 'tree', path: '/api/reprise/tree', handler: treeHandler },
-  { name: 'conclusion', path: '/api/reprise/conclusion', handler: conclusionHandler },
+  { name: 'tree', path: '/api/reprise/tree', method: 'GET', handler: treeHandler },
+  { name: 'conclusion', path: '/api/reprise/conclusion', method: 'GET', handler: conclusionHandler },
   // The audit is what makes a model's answer checkable: which judgement, what prompt, what came back.
-  { name: 'calls', path: '/api/reprise/calls', handler: callsHandler },
-  { name: 'call', path: '/api/reprise/call', handler: callHandler },
+  { name: 'calls', path: '/api/reprise/calls', method: 'GET', handler: callsHandler },
+  { name: 'call', path: '/api/reprise/call', method: 'GET', handler: callHandler },
+]
+
+/**
+ * The two paths a run's own state accepts a write on, and the whole of this package's write surface
+ * (ADR 0002). Everything else a browser can reach here reads.
+ *
+ * `runs` carries the list and the create on one path because they are one resource — the directory of
+ * runs — and a client that can list them is one form away from adding one. `intent` is written by
+ * `placeIntent`, the same function the CLI calls, so a button and `dsh-reprise intents place pause`
+ * produce the same bytes under `<run>/pending/`, and neither of them is the truth: the notebook on disk
+ * is, and the kernel consumes it once.
+ *
+ * `read` is present where a `GET` is served and absent where it is not; a `GET` to `intent` is not
+ * routed at all (the method is not declared here), which is how "no view of the intent file is
+ * offered" is a fact about the route table rather than a promise.
+ */
+export const RUN_ROUTES = [
+  { name: 'runs', path: '/api/reprise/runs', methods: ['GET', 'POST'], read: runsHandler, write: createRunHandler },
+  { name: 'intent', path: '/api/reprise/intent', methods: ['POST'], write: intentHandler },
 ]
 
 /**
@@ -219,11 +233,17 @@ export const ASSETS = [
   { path: '/api/reprise/dashboard.css', file: 'dashboard.css', contentType: 'text/css; charset=utf-8' },
 ]
 
-/** `?after=…&candidate=…` → a plain object; absent parameters stay absent rather than null. */
+/**
+ * `?after=…&candidate=…&run=…` → a plain object; absent parameters stay absent rather than null.
+ *
+ * `run` is the registry's id for the run a request means (ADR 0002). It travels through the same
+ * parser as the view's own parameters because it is parsed at the same boundary and validated once, by
+ * `resolveRun` — a view never sees an id it would have to interpret.
+ */
 export function queryOf(url) {
   const params = new URL(url, 'http://dsh.test').searchParams
   const query = {}
-  for (const key of ['after', 'candidate', 'site', 'ref']) {
+  for (const key of ['after', 'candidate', 'site', 'ref', 'run']) {
     const value = params.get(key)
     if (value !== null) query[key] = value
   }
@@ -248,20 +268,95 @@ function route({ path, methods, fetch }) {
   return { path, methods, requestBody: 'buffered', fetch }
 }
 
-function routeFor({ path, handler, workspace, platform, clock, notice }) {
+/**
+ * The one place a thrown thing becomes a status.
+ *
+ * A `ViewError` carries its own status and is the whole vocabulary of refusals this package raises: a
+ * 400 for a request that cannot be honoured, a 404 for an id nobody registered. Anything else is a bug
+ * and stays a 500, so a `TypeError` can never be disguised as a client error.
+ */
+function failure(error) {
+  if (error instanceof ViewError) return json({ error: { message: error.message } }, error.status)
+  return json({ error: { message: error?.message ?? String(error) } }, 500)
+}
+
+/**
+ * A write's body, parsed — and every way it can fail answered as a `400` rather than as a `500`.
+ *
+ * A body the bridge could not deliver, a body that is not JSON, and no body at all are three ways for
+ * a caller to be wrong about a request, and none of them is a fault of this server. The empty case is
+ * spelled out because `fetch` hands an empty body to `request.text()` as `''`, which `JSON.parse`
+ * reports as a syntax error at position 0 — a sentence that would send the reader looking for a
+ * missing brace that was never sent.
+ */
+async function readBody(request) {
+  let text
+  try {
+    text = await request.text()
+  } catch (error) {
+    throw new ViewError(400, `the request body could not be read: ${error?.message ?? String(error)}`)
+  }
+  if (typeof text !== 'string' || text.trim() === '') {
+    throw new ViewError(400, 'the request body must be a JSON object; this request sent no body')
+  }
+  try {
+    return JSON.parse(text)
+  } catch (error) {
+    throw new ViewError(400, `the request body is not JSON: ${error?.message ?? String(error)}`)
+  }
+}
+
+/**
+ * One view route: resolve which run the request means, then hand the handler that run's directory.
+ *
+ * `?run=` absent means the registry's default run, and the handler then receives exactly what it
+ * received before the registry existed — the configured workspace, by the same string — so every
+ * payload that predates ADR 0002 is byte-identical. `platform` and `notice` are the host's answers
+ * about *the default run* (the one it ticks), so a request for any other run gets neither: its page
+ * says the cluster was not read, rather than printing the default run's cards.
+ */
+function routeFor({ path, method = 'GET', handler, workspace, registry, platform, clock, notice }) {
   return route({
     path,
-    methods: ['GET'],
-    // `await` on a non-promise is a no-op, so one adapter serves the five synchronous views and the
+    methods: [method],
+    // `await` on a non-promise is a no-op, so one adapter serves the seven synchronous views and the
     // one route that reads the cluster listing. Every option is handed to every handler: only the
     // overview reads them, and a handler that ignored its third argument before cannot start using it
-    // by accident — the tests pin the other five payloads as byte-identical with both options mounted.
+    // by accident — the tests pin the other six payloads as byte-identical with both options mounted.
     fetch: async (request) => {
       try {
-        return json(await handler(workspace, queryOf(request.url), { platform, clock, notice }))
+        const query = queryOf(request.url)
+        const target = resolveRun(registry, query, { workspace })
+        const host = target.isDefault ? { platform, clock, notice } : { platform: undefined, clock, notice: undefined }
+        return json(await handler(target.dir, query, host))
       } catch (error) {
-        if (error instanceof ViewError) return json({ error: { message: error.message } }, error.status)
-        return json({ error: { message: error?.message ?? String(error) } }, 500)
+        return failure(error)
+      }
+    },
+  })
+}
+
+/**
+ * One route of the registry's own: the list and the create share a path because they are one resource,
+ * and the intent is the single write a run's own state accepts (ADR 0002).
+ *
+ * The two writes read their body here rather than in the handler, so a handler can be written against
+ * "the parsed body" and tested without a `Request` — and so the one place a body can be unreadable is
+ * a 400 in a function with a test.
+ */
+function registryRoute({ entry, registry, clock }) {
+  return route({
+    path: entry.path,
+    methods: entry.methods,
+    fetch: async (request) => {
+      try {
+        if (request.method === 'GET' && typeof entry.read === 'function') {
+          return json(entry.read(registry, { clock }))
+        }
+        const body = await readBody(request)
+        return json(entry.write(registry, body))
+      } catch (error) {
+        return failure(error)
       }
     },
   })
@@ -272,27 +367,39 @@ function routeFor({ path, handler, workspace, platform, clock, notice }) {
  *
  * @param {{
  *   connection: { fetch: { register(route: object): () => void } },
- *   workspace: string,
+ *   workspace?: string,
+ *   registry?: object,
  *   platform?: object,
  *   clock?: { now: () => number },
  *   notice?: string,
- * }} options `platform` is optional: it is the only thing any route may ask, and only the overview
- *   route does (the cluster listing). Without it the page is exactly as complete as it was — it just
- *   reports "the cluster listing was not read" instead of a number. `clock` is optional too, and
- *   defaults to the system clock: it is what the stop gauges measure a wall-clock limit against.
- *   `notice` is the third option, and is the host's sentence about the *run* rather than about the
- *   facts: why the loop is not ticking (a refused configuration). It is not a fact, so it cannot be
- *   in the projection, but a dashboard mounted over a run that never started would otherwise show an
- *   empty page and no reason — the reader goes hunting for the wrong fault. It lands first in the
- *   overview envelope's `notes`, the channel the standalone page already renders; an empty page draws
- *   only `reason`, so it lands there too (see `withNotice`). No other route carries it.
+ * }} options `workspace` is the one run this host ticks; it is required only when no `registry` is
+ *   given, because then it *is* the registry. `registry` is the runs a request may name (ADR 0002:
+ *   `createRunRegistry`). Without it this mount builds a registry of exactly this one workspace, so
+ *   every caller that predates the registry — `mountDashboard`, every test — keeps passing the same
+ *   arguments and gets the same page. `platform` is optional: it is the only thing any route may ask,
+ *   and only the overview route does (the cluster listing). It is built from the default run's
+ *   configuration, so it is handed only to a request that means the default run; any other run's page
+ *   reports "the cluster was not read" instead. `clock` is optional too, and defaults to the system
+ *   clock: it is what the stop gauges measure a wall-clock limit against. `notice` is the host's sentence about the *run* rather than about the facts: why the
+ *   loop is not ticking (a refused configuration). It is not a fact, so it cannot be in the projection,
+ *   but a dashboard mounted over a run that never started would otherwise show an empty page and no
+ *   reason — the reader goes hunting for the wrong fault. It lands first in the overview envelope's
+ *   `notes`, the channel the standalone page already renders; an empty page draws only `reason`, so it
+ *   lands there too (see `withNotice`). No other route carries it, and no other *run* receives it: the
+ *   sentence is about the run the host ticks.
  * @returns {() => void} the disposer that unregisters every route this call mounted
  */
-export function registerRoutes({ connection, workspace, platform, clock, notice }) {
+export function registerRoutes({ connection, workspace, registry, platform, clock, notice }) {
+  const runs = registry ?? createRunRegistry({ workspace })
   const disposers = []
   try {
     for (const entry of ROUTES) {
-      disposers.push(connection.fetch.register(routeFor({ ...entry, workspace, platform, clock, notice })))
+      disposers.push(connection.fetch.register(routeFor({ ...entry, workspace, registry: runs, platform, clock, notice })))
+    }
+    // The registry's routes come after the views for the same reason the views come first at all: a
+    // page that cannot read a run is useless even if it can create one.
+    for (const entry of RUN_ROUTES) {
+      disposers.push(connection.fetch.register(registryRoute({ entry, registry: runs, clock })))
     }
     for (const entry of ASSETS) {
       disposers.push(

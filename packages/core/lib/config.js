@@ -29,10 +29,18 @@ import { DomainPackError, executorProblems, loadDomainPack } from './domain.js'
 import { gpuExclusivityProblems } from './jobs.js'
 import { bindingOf, resolveMetricContract } from './metric-contract.js'
 import { loadConfigFile } from './run-config.js'
+import { createRunRegistry } from './runs.js'
 import { configWarnings, modelPortDeclared } from './warnings.js'
 
 /** Five seconds: the cadence ticket 01 measured in the real host (78 beats / 415 s, drift ≤ 3 ms). */
 export const DEFAULT_INTERVAL_MS = 5_000
+
+/**
+ * Two runs may tick at once by default. Not a performance number: it is the smallest value that makes
+ * "several exploration tasks" real while keeping one `interval_ms` tick from submitting to two
+ * executors back to back without anybody noticing the bill.
+ */
+export const DEFAULT_MAX_ACTIVE_RUNS = 2
 
 const CANDIDATE_KINDS = Object.freeze(['command', 'claude', 'dsh'])
 
@@ -233,6 +241,25 @@ export function resolveConfig(
     problems.push(`interval_ms must be a positive integer number of milliseconds (got ${JSON.stringify(intervalMs)})`)
   }
 
+  // The registry (ADR 0002): a directory of runs, plus extra absolute paths. It is *additive* — the
+  // host still ticks the one run `workspace` names, and a deployment that never sets `runs_root`
+  // gets a registry of exactly that one run, so nothing it saw before changes.
+  const runsRoot = isText(raw.runs_root) ? resolvePath(cwd, raw.runs_root) : undefined
+  let extraRuns = []
+  if (raw.runs !== undefined) {
+    if (!Array.isArray(raw.runs) || !raw.runs.every(isText)) {
+      problems.push(`runs must be an array of absolute run directories (got ${JSON.stringify(raw.runs)})`)
+    } else {
+      extraRuns = raw.runs.map((dir) => resolvePath(cwd, dir))
+    }
+  }
+  const maxActive = raw.max_active_runs ?? DEFAULT_MAX_ACTIVE_RUNS
+  if (!Number.isSafeInteger(maxActive) || maxActive <= 0) {
+    problems.push(
+      `max_active_runs must be a positive integer (how many runs may tick at once; got ${JSON.stringify(raw.max_active_runs)})`,
+    )
+  }
+
   if (problems.length > 0) return fail()
 
   const config = {
@@ -251,6 +278,14 @@ export function resolveConfig(
     interval_ms: intervalMs,
     workspaceDir: workspace.dir,
     domainPack: pack,
+    // The registry the dashboard reads (ADR 0002): which runs this host may show, and which one a
+    // request means when it names none. It is a value, not a service — built from the same keys by
+    // every reader — so the page cannot list a run the loop has never heard of, and a test can hand
+    // over a `runs_root` of temporary directories without a host.
+    runs_root: runsRoot ?? null,
+    runs: extraRuns,
+    max_active_runs: maxActive,
+    registry: createRunRegistry({ workspace: workspace.dir, runsRoot, runs: extraRuns, cwd }),
   }
 
   // One normalised `runner`: `keep` is filled in here rather than left to each reader's memory of

@@ -17,6 +17,7 @@
 
 import { logFor } from './boot.js'
 import { createPlatform } from './ports.js'
+import { createRunRegistry } from './runs.js'
 
 export const name = 'reprise-dashboard'
 
@@ -61,16 +62,19 @@ export async function importUiPackage() {
  * @param {{
  *   connection: any,
  *   workspace: string,
+ *   registry?: object,
  *   platform?: any,
  *   notice?: string,
  *   log?: Function,
  *   importUi?: () => Promise<any>,
  * }} options `platform` is the one external thing a route may ask (the overview's cluster listing);
  *   without it the page still mounts and reports the cluster as unread. `notice` is the refusal
- *   sentence for a run that is not ticking, or `undefined` for one that is.
+ *   sentence for a run that is not ticking, or `undefined` for one that is. `registry` is the list of
+ *   runs a request may name (ADR 0002); without it the UI mounts a registry of exactly this one
+ *   workspace, which is what every deployment that never sets `runs_root` gets.
  * @returns {Promise<{mounted: boolean, dispose?: () => void, routes?: number, reason?: string}>}
  */
-export async function mountDashboard({ connection, workspace, platform, notice, importUi = importUiPackage }) {
+export async function mountDashboard({ connection, workspace, registry, platform, notice, importUi = importUiPackage }) {
   if (typeof connection?.fetch?.register !== 'function') {
     return { mounted: false, reason: 'the host exposes no connection.fetch.register, so there is no surface to mount on' }
   }
@@ -96,7 +100,7 @@ export async function mountDashboard({ connection, workspace, platform, notice, 
 
   let dispose
   try {
-    dispose = ui.registerRoutes({ connection, workspace, platform, notice })
+    dispose = ui.registerRoutes({ connection, workspace, registry, platform, notice })
   } catch (error) {
     return { mounted: false, reason: `@dsh-reprise/ui refused to mount: ${messageOf(error)}` }
   }
@@ -156,6 +160,10 @@ export function apply(ctx, config = {}) {
     const result = await mountDashboard({
       connection: ctx.connection,
       workspace: config.workspaceDir,
+      // A display-only mount (a refused run) has no resolved configuration to carry a registry, so the
+      // fallback is the one run this page can read. `registerRoutes` treats a missing registry the same
+      // way; passing it here keeps that answer in one place instead of two.
+      registry: config.registry ?? createRunRegistry({ workspace: config.workspaceDir }),
       platform: platformFor(config),
       notice: config.notice,
       importUi: config.importUi,

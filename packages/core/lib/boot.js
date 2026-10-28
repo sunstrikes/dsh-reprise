@@ -16,6 +16,7 @@
  */
 
 import { declaredWorkspace, resolveConfig } from './config.js'
+import { createRunRegistry } from './runs.js'
 import { runnerLayout } from './worktrees.js'
 
 const messageOf = (error) => (error instanceof Error ? error.message : String(error))
@@ -108,6 +109,9 @@ export function describeRunLine(config) {
   }
   parts.push(`executor ${run.executor}`, `candidate ${run.candidate}`, `rounds ${run.rounds}`)
   if (run.config_file !== null) parts.push(`config_file ${run.config_file}`)
+  // Only when a registry is configured: every host that predates it prints exactly the line it always
+  // printed, which is what lets the boot log stay a diffable artefact (ADR 0002).
+  if (config.runs_root) parts.push(`runs_root ${config.runs_root} (${config.registry?.list().length ?? 0} run(s))`)
   return `run: ${parts.join(' \u00b7 ')}`
 }
 
@@ -178,20 +182,47 @@ export function resolveForHost(raw, log) {
  * @param {{cwd?: string, env?: Record<string, string | undefined>,
  *         readFile?: (path: string) => string}} [options] the same resolution seams `config.js` takes,
  *   so a test can pin both a configuration and the environment that produced it.
- * @returns {{workspaceDir: string, notice: string | undefined} | undefined}
+ * @returns {{workspaceDir: string, registry: object, notice: string | undefined} | undefined}
  */
 export function displayForHost(raw, resolved, log = () => {}, { cwd, env, readFile } = {}) {
-  if (resolved?.ok === true) return { workspaceDir: resolved.config.workspaceDir, notice: undefined }
+  if (resolved?.ok === true) {
+    // The resolved configuration already carries its registry (ADR 0002) — one derivation, so the page
+    // cannot list runs the loop resolved under a different set of keys. The fallback is for a caller
+    // that hands over a hand-built `resolved` (a test, an embedder) and is never the host path.
+    return {
+      workspaceDir: resolved.config.workspaceDir,
+      registry: resolved.config.registry ?? createRunRegistry({ workspace: resolved.config.workspaceDir }),
+      notice: undefined,
+    }
+  }
 
   // The refused path reads the workspace declaration on its own: the run configuration might be
   // unusable for a reason that has nothing to do with paths (a missing domain pack), and the page
   // still has a directory to read in that case.
   const workspace = declaredWorkspace(raw, { cwd, env, readFile })
   if (workspace.problem !== undefined) {
-    log(`dashboard not mounted: the run was refused and no workspace directory could be named either (${workspace.problem})`)
-    return undefined
+    // A host configured with a *registry* and no single `workspace` is the one shape where a refused
+    // run still has something worth showing: the runs are on disk, the loop just has no run to tick.
+    // Reading the registry here (rather than refusing the page) is what lets an operator adopt
+    // `runs_root` before the ticking half learns to drive several runs (ADR 0002).
+    const registry = createRunRegistry({ runsRoot: raw?.runs_root, runs: raw?.runs, cwd })
+    const first = registry.list()[0]
+    if (first === undefined) {
+      log(`dashboard not mounted: the run was refused and no workspace directory could be named either (${workspace.problem})`)
+      return undefined
+    }
+    log(`dashboard mounted on the registry's first run (${first.id}): no workspace is configured, so nothing ticks yet`)
+    return {
+      workspaceDir: first.dir,
+      registry,
+      notice: `this run is not ticking: ${workspace.problem} — ${registry.list().length} run(s) are registered and none of them is being ticked`,
+    }
   }
 
   const problem = resolved?.problem ?? 'the run configuration could not be resolved'
-  return { workspaceDir: workspace.dir, notice: `this run is not ticking: ${problem}` }
+  return {
+    workspaceDir: workspace.dir,
+    registry: createRunRegistry({ workspace: workspace.dir, runsRoot: raw?.runs_root, runs: raw?.runs, cwd }),
+    notice: `this run is not ticking: ${problem}`,
+  }
 }

@@ -706,17 +706,26 @@ test('both clients draw the tree on the same grid, with the same class names', (
   assert.deepEqual([...classes(panel)].sort(), [...classes(page)].sort(), 'and one vocabulary of tree class names')
 })
 
-test('the panel asks the page\'s routes, always with GET, and polls at five seconds', () => {
+test('the panel asks the page\'s routes, and its two writes are the two ADR 0002 allows', () => {
   const source = panelCode()
 
   for (const path of ['overview', 'rounds', 'candidate', 'conclusion', 'tree', 'calls', 'call']) {
     assert.ok(source.includes(`/api/reprise/${path}`), `the panel reads /api/reprise/${path}`)
   }
+  assert.ok(source.includes('/api/reprise/runs'), 'and the registry, which is how the picker knows what to offer')
   assert.match(source, /POLL_MS\s*=\s*5_000/, 'the panel polls at the page\'s cadence, not its own slower one')
-  assert.doesNotMatch(source, /method:\s*'(POST|PUT|PATCH|DELETE)'/, 'a read-only surface has no write verb')
   assert.doesNotMatch(source, /XMLHttpRequest|WebSocket|EventSource/, 'no second transport')
-  // Every fetch in the module is a GET: no method is declared anywhere, so the default applies.
-  assert.doesNotMatch(source, /method:\s*'/, 'the panel declares no request method at all')
+
+  // ADR 0002 moved the doctrine from "no write verb anywhere" to "two writes, on two paths": creating a
+  // run writes a new directory under `runs_root`, and start/stop writes the host's own act set (or, for
+  // the other intent kinds, a `pending/` file). Every other request stays a GET, so a third write verb
+  // — or one of these with a different verb — is a defect.
+  const writes = [...source.matchAll(/method:\s*'(POST|PUT|PATCH|DELETE)'/g)].map((match) => match[1])
+  assert.deepEqual(writes, ['POST', 'POST'], 'exactly the two write verbs ADR 0002 allows')
+  const create = source.slice(source.indexOf('/api/reprise/runs'), source.indexOf('/api/reprise/runs') + 800)
+  assert.match(create, /method:\s*'POST'/, 'one of them is the run creation')
+  const intent = source.slice(source.indexOf('/api/reprise/intent'))
+  assert.match(intent.slice(0, 800), /method:\s*'POST'/, 'and the other is an intent — start/stop is not a new endpoint')
 })
 
 test('the panel never derives a number: the comparison, the axis and the shapes are the projection\'s', () => {
@@ -765,7 +774,14 @@ test('the panel wears the page\'s class names, not its own', () => {
   // that is exactly how the two designs drifted apart the first time. (Not every page class has a rule
   // of its own — `.identity`, `.audit-line` and `.stream-type` are structural hooks — so "defined in
   // the stylesheet" is the stylesheet test's business, and "used by the page" is this one's.)
+  //
+  // Two names are allowed to be panel-only, and only because the page cannot have them: a run picker
+  // and a create form need a *host* with several runs (ADR 0002), and the standalone page is served to
+  // a browser that was pointed at one workspace. Adding a third name here is a design decision, not a
+  // detail — which is why the list is literal and this small.
+  const PANEL_ONLY = new Set(['run-picker', 'run-create', 'run-toggle'])
   for (const name of panelClasses) {
+    if (PANEL_ONLY.has(name)) continue
     assert.ok(pageUses.has(name), `"${name}" is a class the page does not use — a second design hides here`)
   }
   // The attributes the stylesheet keys its shapes off, not just the class names.

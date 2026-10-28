@@ -47,6 +47,20 @@ function assertFetchRoute(route) {
   }
 }
 
+/**
+ * The `RequestInit` one dispatch is built with: the method the test named, and the body it gave.
+ *
+ * A streamed body needs `duplex: 'half'` (that is undici's rule, not this double's), and it is added
+ * only there: a plain string body is what the host's bridge would hand a route for a small JSON POST,
+ * and modelling anything heavier would be modelling the transport nobody here can break.
+ */
+function requestInit(method, body) {
+  if (body === undefined) return { method }
+  if (typeof body === 'string' || body instanceof Uint8Array) return { method, body }
+  if (typeof body?.getReader === 'function') return { method, body, duplex: 'half' }
+  return { method, body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }
+}
+
 export function fakeConnection() {
   /** @type {Map<string, { path: string, methods: string[], requestBody: string, fetch: Function }>} */
   const routes = new Map()
@@ -86,14 +100,21 @@ export function fakeConnection() {
     /**
      * Dispatch one request the way the host's shared Fetch handler does: exact path, declared
      * method, everything else 404. Returns the status and the decoded body.
+     *
+     * `body` is optional and is what a POST carries: a string (the bytes to parse, so a test can send
+     * deliberately broken JSON), a plain object (stringified here, so a test writes the shape a browser
+     * sends instead of escaping it by hand), a `Uint8Array`, or a `ReadableStream` — a stream that
+     * errors on read is the only way to ask "what if the body cannot be read at all" without a socket.
+     * The method travels back on the answer so a test can assert on what the route was handed rather
+     * than only on what it said: a write route's whole contract is "which verb, which payload".
      */
-    async dispatch(method, url) {
-      const { pathname, searchParams } = new URL(url, 'http://dsh.test')
+    async dispatch(method, url, body) {
+      const { pathname, searchParams, search } = new URL(url, 'http://dsh.test')
       const route = routes.get(pathname)
       if (route === undefined || !route.methods.includes(method)) {
-        return { status: 404, text: 'not found', json: undefined, searchParams }
+        return { status: 404, text: 'not found', json: undefined, searchParams, method }
       }
-      const response = await route.fetch(new Request(`http://dsh.test${pathname}${new URL(url, 'http://dsh.test').search}`, { method }))
+      const response = await route.fetch(new Request(`http://dsh.test${pathname}${search}`, requestInit(method, body)))
       const text = await response.text()
       let json
       try {
@@ -101,7 +122,7 @@ export function fakeConnection() {
       } catch {
         json = undefined
       }
-      return { status: response.status, contentType: response.headers.get('content-type'), text, json, searchParams }
+      return { status: response.status, contentType: response.headers.get('content-type'), text, json, searchParams, method }
     },
   }
 

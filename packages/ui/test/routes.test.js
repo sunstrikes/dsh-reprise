@@ -7,8 +7,9 @@
  *
  *   - the dashboard mounts the paths it promises, on the host's own registry (no second port, no
  *     launcher, no separate process — there is nothing here that could start one);
- *   - every route is `GET`-only, so v1 has no write endpoint by construction rather than by
- *     discipline, and a `POST` to a mounted path is a 404 before any handler runs;
+ *   - the view and asset routes are `GET`-only, so a `POST` to one of them is a 404 before any handler
+ *     runs; ADR 0002 added exactly two writers (`/api/reprise/runs` and `/api/reprise/intent`), and
+ *     `read-only.test.js` owns the proof that they are the whole write surface;
  *   - `registerRoutes` returns a disposer that restores the *previous* registry state — other
  *     features' routes survive, ours are gone, and registering again works (a disposer that only
  *     marked itself "done" would leave the path taken);
@@ -53,6 +54,13 @@ const ASSET_PATHS = [
   '/api/reprise/dashboard.css',
 ]
 
+/**
+ * The two paths ADR 0002 added: the run registry (list and create on one path) and the intent writer.
+ * They are listed separately because their methods are *not* GET-only — that is their reason to exist —
+ * and a test that folded them into `DATA_PATHS` would quietly lose the assertion below.
+ */
+const REGISTRY_PATHS = ['/api/reprise/runs', '/api/reprise/intent']
+
 const workspaceDir = () => mkdtempSync(join(tmpdir(), 'reprise-ui-routes-'))
 
 /**
@@ -92,8 +100,8 @@ test('the dashboard mounts its routes on the host connection and unregisters the
 
   assert.deepEqual(
     connection.paths(),
-    [...DATA_PATHS, ...ASSET_PATHS, '/api/other/thing'].sort(),
-    'the views, the audit and the page with its module, mounted on the host registry instead of a new server',
+    [...DATA_PATHS, ...ASSET_PATHS, ...REGISTRY_PATHS, '/api/other/thing'].sort(),
+    'the views, the audit, the page with its module and the run registry, mounted on the host registry instead of a new server',
   )
   assert.deepEqual(connection.paths().filter((path) => !path.startsWith('/api/reprise/')), ['/api/other/thing'])
 
@@ -103,13 +111,17 @@ test('the dashboard mounts its routes on the host connection and unregisters the
   assert.equal(connection.routes.has('/api/other/thing'), true, 'another feature\'s route is not collateral damage')
 
   const again = registerRoutes({ connection, workspace: workspaceDir() })
-  assert.deepEqual(connection.paths(), [...DATA_PATHS, ...ASSET_PATHS, '/api/other/thing'].sort(), 'unloading really released the paths')
+  assert.deepEqual(
+    connection.paths(),
+    [...DATA_PATHS, ...ASSET_PATHS, ...REGISTRY_PATHS, '/api/other/thing'].sort(),
+    'unloading really released the paths',
+  )
   again()
   elsewhere()
   assert.deepEqual(connection.paths(), [])
 })
 
-test('every mounted route is GET-only: v1 has no write endpoint to reach for', () => {
+test('the views and assets are GET-only; the two writers declare exactly the verbs they need', () => {
   const connection = fakeConnection()
   const dispose = registerRoutes({ connection, workspace: workspaceDir() })
 
@@ -118,6 +130,11 @@ test('every mounted route is GET-only: v1 has no write endpoint to reach for', (
     assert.deepEqual(route.methods, ['GET'], `${path} declares exactly one method, and it is not a mutation`)
     assert.equal(route.requestBody, 'buffered', `${path} declares its body mode, so the bridge never streams into a read`)
   }
+
+  // One path for both registry verbs: reading the list and creating a run are the same resource, and a
+  // second path for the create would make "which of these two is the registry?" a question.
+  assert.deepEqual(connection.routes.get('/api/reprise/runs').methods, ['GET', 'POST'])
+  assert.deepEqual(connection.routes.get('/api/reprise/intent').methods, ['POST'], 'an intent is only ever placed')
 
   dispose()
 })

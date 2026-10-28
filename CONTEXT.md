@@ -1,4 +1,4 @@
-# Context — the ten words this code depends on
+# Context — the words this code depends on
 
 These are not synonyms for ordinary words. Each one names a distinction the implementation relies on,
 and each entry says where the distinction is enforced and what goes wrong when it is blurred. If you
@@ -86,7 +86,8 @@ note. A page that disappears exactly when the run is broken is a page nobody can
 one configuration that leaves nothing to mount is one that names no workspace at all.
 
 *Blurred with:* a view (a projection *is* a view, but a projection is specifically the one the display
-layer reads; it must never grow a write path). v1 has no write endpoints.
+layer reads; it must never grow a write path). Since ADR 0002 the page has exactly two write endpoints
+— create a run, place an intent — and neither of them can touch a fact (see 12).
 
 ## 5. Candidate (候选)
 
@@ -229,3 +230,32 @@ starts from in its phase state (`parent_id`, which `dump` renders and `LAND` bra
 
 *Blurred with:* the injected "current frontier" (see 3), which means the non-dominated set and not the
 ranking; and with `best`, which is one row of the ranking rather than a verdict about the set.
+
+## 12. Run registry (run 注册表)
+
+**A directory of runs, and the one rule that turns a request into a run.**
+
+`workspace`, every entry of `runs`, and every non-hidden subdirectory of `runs_root` are one flat
+listing, deduplicated by `realpath`; a run's id is its directory's name. A request says which run it
+means with `?run=<id>`, and **absent means the default run** — the one the host ticks — so every URL
+written before the registry existed still means what it meant. An id the listing does not hold is a
+404 that names it: the listing is the allow-list, so an id is never joined onto a path, and `../x` is
+unknown rather than resolved. A directory whose name cannot be an id is reported as skipped, never
+renamed.
+
+Enforced in `packages/core/lib/runs.js` (the listing, the id rule, `scaffoldRun`) and
+`packages/ui/lib/runs.js` (`resolveRun`, the two write handlers).
+
+The registry also answers the second question — *which* of these does this host drive? — and that
+answer is **not** a run's fact: "nobody has started me yet" is not something that happened to a run. It
+is the one piece of host state, the set in `<runs_root>/.reprise-host.json` (`core/lib/active-runs.js`),
+absent meaning "only the run `workspace` names". Every active run gets its own workspace object, its own
+`reprise.toml` (resolved with the run directory as the cwd), its own in-flight guard, and one shared
+interval that advances up to `max_active_runs` of them per beat in round-robin order.
+
+*Blurred with:* a workspace. A workspace is what one run *owns*; the registry is the many runs a host
+may *show*, and the active set is the few it *advances*. One workspace is still one run, and two runs
+still share nothing but the machine. Nor is the registry a write surface over a run's facts: the two
+routes that write (`POST /runs`, `POST /intent`) create a directory under `runs_root`, place the
+`<run>/pending/` file the kernel already consumes, or record the host's own active set — which is why
+the dashboard can offer them without ever being able to change what it is watching.

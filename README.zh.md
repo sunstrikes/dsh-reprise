@@ -202,6 +202,41 @@ plugin_manager { action: "install_bundle", target: "/absolute/path/to/dsh-repris
 | `metrics.primary` / `.objectives` | 取领域包的契约 | 在 INIT 时记录；会与轮次契约交叉核对 |
 | `poll.base_ms` / `.max_ms` / `.grace_attempts` | `1000` / `60000` / `2` | 作业轮询退避 |
 | `limits.max_wall_ms` / `.max_idle_ms` | `3600000` / `1800000` | 单作业的实际耗时与静默期限 |
+| `runs_root` | — | 一个目录，其子目录就是各个 run；面板列出来，请求用 `?run=<id>` 指名 |
+| `runs` | `[]` | `runs_root` 之外额外的绝对 run 目录（已经落在某个 checkout 里的 run） |
+| `max_active_runs` | `2` | 同时允许推进几个 run（现在只校验，等 ticking 半身驱动多个时才生效） |
+
+### 多个跑，一个看板
+
+不设 `runs_root` 的部署和以前完全一样：一个跑，就是 `workspace` 指的那个。设了它，面板就多出 run 选择器
+和新建表单——因为从前要开第二个探索任务，得改这份 patch 再重组宿主，决策记录见
+[docs/adr/0002](docs/adr/0002-a-run-registry-not-a-single-workspace.md)。
+
+- **一个 run 就是一个目录。** 目录名就是它的 id（`[A-Za-z0-9._-]+`，但不能是 `.` 或 `..`）；
+  `workspace`、`runs` 里的每一项、以及 `runs_root` 下每个非隐藏子目录各列一次，按 realpath 去重。
+  名字不合规的目录只会被**报告为跳过**，绝不改名。
+- **每个 run 可以带自己的 `reprise.toml`**——键与这份 patch 相同，由一个严格的 TOML 子集读取器读
+  （`packages/core/lib/toml.js`：注释、表、数组、内联表都认；日期时间、数组表、多行字符串一律点名拒绝，
+  绝不猜）。文件里的 `workspace = "."` 相对文件自身解析，所以一个 run 目录连同它的文件可以整体搬走。
+- **视图路由认 `?run=<id>`。** 不带参数就是默认 run，所以所有已有 URL 含义不变；注册表里没有的 id 是
+  404 并点名它，而不是悄悄换成另一个 run 的数字。
+- **两处写入口，都不碰事实。** `POST /api/reprise/runs` 在 `runs_root` 下搭一个目录（本地仓库用
+  `--shared` 克隆，多个 run 共用一份对象库），`POST /api/reprise/intent` 写的就是 CLI 写的那份
+  `<run>/pending/` 文件。run 自己的状态依然只在内核消费意图时才改变。
+
+- **开与停是宿主的决定，记在 runs 旁边。** `<runs_root>/.reprise-host.json` 记着这台宿主会推进哪些 run。
+  文件不存在就等于**只跑 `workspace` 指的那个**，所以旁边冒出来的目录绝不会自己开始花钱；面板上的
+  开始/停止按钮走同一条 `POST /api/reprise/intent`（`kind: activate` / `deactivate`，应答 `scope: "host"`）。
+  run 级的 `pause` 含义不变——仍然是被看着但不派发。
+- **开始与停止在下一拍就生效**——每一拍前都会重读这份记录，所以面板上点「开始」不需要重启宿主，点「停止」
+  也不会丢掉任何一条事实。
+- **一个 interval，轮转推进。** 每一拍推进至多 `max_active_runs` 个还没在 tick 的 run，所以一个 run 在等
+  作业轮询时不会把别的 run 饿死；上限是**每拍**的，因此 5 个活跃 run + `max_active_runs: 2` 也都会推进，
+  只是两两交错。活跃但 `reprise.toml` 解析不通的 run 会连同原因被跳过（日志里一行，列表行的
+  `runnable.problem` 里同样一句），其余 run 照常推进。
+
+两个已知边界：概览里的集群列表仍按配置里那个 run 的 executor 去问，别的 run 的页面会说「集群没读」而不是
+显示别人的卡；`reprise_status` 也只答配置里那个 run。
 
 校验在 `packages/core/lib/config.js` 里，启动时只跑一次。本包不导出 `Config` 对象，所以宿主对这条
 配置行没有 schema：配置有问题只是一行日志，永远不会变成启动失败。有两处拒绝值得在你撞上之前先知道——有

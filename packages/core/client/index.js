@@ -28,9 +28,19 @@
  *      is pinned to `states.js` for the words that module owns, so a candidate cannot be "rejected"
  *      on one surface and something else on the other.
  *
- * Read-only, like the page: every request is a `GET` against the routes the Host half already
- * mounts, and this module never sends anything back. v1 has no write endpoint, so there is no button
- * here that could change a run.
+ * Read-mostly, and honest about the exceptions: every view is a `GET` against the routes the Host half
+ * already mounts, and the panel writes exactly twice — `POST /runs`, which scaffolds a *new* directory
+ * under the registry's root, and `POST /intent`, which records the host-level decision to advance one
+ * run (an `activate`/`deactivate` pair, `core/lib/active-runs.js`). Neither changes a fact of a run
+ * that is already ticking: the second one decides only whether this host ticks it at all, which is why
+ * the button says so in its own tooltip. No button here can change a fact of the run it is watching —
+ * that is the property `read-only.test.js` holds, and it is what the masthead's mode line says out loud.
+ *
+ * Since ADR 0002 this page shows *a* run rather than *the* run. The registry is a directory listing
+ * the Host reads fresh (`GET /runs`), the masthead's `<select>` chooses one of them, and the choice
+ * travels on every view route as `?run=` and lives in `localStorage` under `reprise.run`. That is also
+ * why the cursor book is per run and starts over when the selection moves: an `after=` from one run's
+ * fact stream names a sequence another run never wrote.
  *
  * Two rules from `references/ui-plugin.md` are load-bearing:
  *
@@ -55,9 +65,12 @@ window.__ModuleLoader__.load({
     const PANEL_KEY = 'reprise'
 
     /**
-     * The routes this surface reads — the page's six, absolute because the Host mounts them on its
+     * The routes this surface reads — the page's seven, absolute because the Host mounts them on its
      * own origin. `calls` is the audit list and `call` opens one record, so a hundred calls cost a
      * hundred lines rather than a hundred prompts.
+     *
+     * The registry (`/api/reprise/runs`) is not in this table: it is not a view of a run, and it is
+     * named once, beside the two functions that speak it (`RUNS_URL` below).
      */
     const ROUTES = {
       overview: '/api/reprise/overview',
@@ -71,6 +84,29 @@ window.__ModuleLoader__.load({
 
     /** The page's cadence (spec §9.1: the panel moved from 3s to the page's 5s). */
     const POLL_MS = 5_000
+
+    /**
+     * The registry's own, slower cadence.
+     *
+     * A run list is not a live number: it changes when somebody creates a run or drops a directory in,
+     * not every five seconds. Re-reading it on the view poll would cost a `readdir` of every run per
+     * tick — and, on a slow filesystem, a stall a reader would see — to repaint a picker that almost
+     * never changed. So the list is read on mount, after a create, and every half minute.
+     */
+    const RUNS_POLL_MS = 30_000
+
+    /** Where the chosen run is remembered, across reloads and across a dock that was closed. */
+    const RUN_KEY = 'reprise.run'
+
+    /**
+     * The run-id rule of ADR 0002, spelled once, as the create form's native `pattern` attribute.
+     *
+     * The authority is `RUN_ID_PATTERN` in `runs.js` — a run id becomes a directory name and a URL
+     * parameter, so it is a slug and nothing else. This copy exists to let the *browser* refuse a bad
+     * id before the request is sent, without the form writing validation prose of its own; the Host
+     * still refuses it, and its sentence is what the form prints.
+     */
+    const RUN_ID_PATTERN = '^[A-Za-z0-9][A-Za-z0-9._-]*$'
 
     /** How many facts the stream keeps before dropping the oldest: a window, not a history. */
     const STREAM_LIMIT = 200
@@ -94,9 +130,38 @@ window.__ModuleLoader__.load({
 
     const EN = {
       'panel.title': 'Reprise',
-      'panel.mode': 'read-only',
+      'panel.mode': 'the facts are read-only — the only writes are creating a run, and starting or stopping one',
       'panel.loading': 'Reading the fact plane…',
       'panel.sharedFailed': 'The page modules did not load ({reason}) — asking again.',
+
+      'run.picker': 'the run this page is showing',
+      'run.loading': 'reading the run list…',
+      'run.missing': '{id} — not in the registry',
+      'run.create': 'Create a run',
+      'run.field.id': 'run id',
+      'run.field.mode': 'mode',
+      'run.mode.clone': 'clone a repository',
+      'run.mode.empty': 'empty directory',
+      'run.field.repo': 'source repository (path or git URL)',
+      'run.field.domain': 'domain pack (absolute path)',
+      'run.field.rounds': 'rounds',
+      'run.field.gpu': 'GPU hours per candidate',
+      'run.submit': 'Create',
+      'run.creating': 'Creating…',
+      'run.cancel': 'Cancel',
+      'run.refused': 'the Host answered {status} and wrote no reason',
+      'run.notSent': 'the request never reached the Host ({error})',
+      'run.start': 'Start',
+      'run.stop': 'Stop',
+      'run.toggling': 'Working…',
+      // The two sentences a start/stop button owes a reader, kept apart on purpose: what *this* button
+      // decides (whether this host advances the run) and what it does not (the run's own pause/resume,
+      // which is a `pending/` intent the loop consumes). Merging them into one comfortable sentence is
+      // how "stop" starts reading as "pause mid-flight", and those are two different decisions.
+      'run.startHint': 'decides whether this host advances the run — starting it from where it stands changes no fact the run already has.',
+      'run.stopHint': 'decides whether this host advances the run — stopping it leaves every fact in place, and is not the same as interrupting a step already in flight.',
+      'run.pauseElsewhere': "the run's own pause and resume are a pending/ intent the loop consumes, which is another control and not this button.",
+      'run.activationInvalid': 'this host cannot read which runs it advances — {problem}',
 
       'phase.noFacts': 'no facts yet',
       'phase.notRecorded': 'phase not recorded',
@@ -349,9 +414,34 @@ window.__ModuleLoader__.load({
 
     const ZH = {
       'panel.title': 'Reprise',
-      'panel.mode': '只读',
+      'panel.mode': '事实只读 —— 只有新建运行和开始/停止会写入',
       'panel.loading': '正在读取事实…',
       'panel.sharedFailed': '页面模块加载失败（{reason}）——正在重试。',
+
+      'run.picker': '这个页面正在看哪个运行',
+      'run.loading': '正在读取运行列表…',
+      'run.missing': '{id} —— 不在注册表里',
+      'run.create': '新建一个运行',
+      'run.field.id': '运行 id',
+      'run.field.mode': '模式',
+      'run.mode.clone': '克隆一个仓库',
+      'run.mode.empty': '空目录',
+      'run.field.repo': '源仓库（路径或 git URL）',
+      'run.field.domain': '领域包（绝对路径）',
+      'run.field.rounds': '轮次',
+      'run.field.gpu': '每个候选的 GPU 小时',
+      'run.submit': '创建',
+      'run.creating': '正在创建…',
+      'run.cancel': '取消',
+      'run.refused': '宿主回答了 {status}，没有写原因',
+      'run.notSent': '请求没有送到宿主（{error}）',
+      'run.start': '开始',
+      'run.stop': '停止',
+      'run.toggling': '处理中…',
+      'run.startHint': '这决定这个宿主是否推进这个运行 —— 从它现在的位置开始，不改动它已有的任何事实。',
+      'run.stopHint': '这决定这个宿主是否推进这个运行 —— 停止会保留全部事实，也不等于打断正在执行的一步。',
+      'run.pauseElsewhere': '运行自己的暂停与继续是内核消费的 pending/ 意图，那是另一个控件，不是这个按钮。',
+      'run.activationInvalid': '这个宿主读不出它驱动哪些运行的记录 —— {problem}',
 
       'phase.noFacts': '还没有任何事实',
       'phase.notRecorded': '阶段未记录',
@@ -663,13 +753,30 @@ window.__ModuleLoader__.load({
       `${candidateId === null || candidateId === undefined || candidateId === '' ? '' : `${candidateId} `}` +
       `${metric ?? fmt.EM_DASH}=${fmt.number(value)}`
 
-    /** One route URL, with the cursor, the candidate and the audit reference as query parameters. */
-    function urlFor(view, { cursor, candidate, ref } = {}) {
-      const query = []
-      if (cursor) query.push(`after=${encodeURIComponent(cursor)}`)
-      if (candidate) query.push(`candidate=${encodeURIComponent(candidate)}`)
-      if (ref) query.push(`ref=${encodeURIComponent(ref)}`)
-      return query.length === 0 ? ROUTES[view] : `${ROUTES[view]}?${query.join('&')}`
+    /**
+     * The run this page is showing, as one module-level fact.
+     *
+     * Why not a parameter of every read: `?run=` belongs on all seven view routes, and threading it
+     * through each of them would be six call sites that can silently forget it — a page that shows the
+     * default run's numbers under another run's picker is exactly the failure ADR 0002 calls worse than
+     * an error. It is written in one place (`applyRun`), read by `urlFor`, and captured once per poll so
+     * the five reads of one tick cannot disagree about which run they asked for.
+     */
+    const VIEWED = { run: null }
+
+    /** One route URL, with the cursor, the candidate, the audit reference and the run in its query. */
+    function urlFor(view, { cursor, candidate, ref, run = VIEWED.run } = {}) {
+      // `URLSearchParams` and not string concatenation: `candidate`, `call` and `calls` already carry a
+      // query of their own, and a second `?` makes the rest of the string part of the first value — a
+      // bug that only shows up on the routes that have one.
+      const query = new URLSearchParams()
+      if (cursor) query.set('after', cursor)
+      if (candidate) query.set('candidate', candidate)
+      if (ref) query.set('ref', ref)
+      // Absent means "the Host's default run", which is what every pre-registry URL already meant.
+      if (run) query.set('run', run)
+      const text = query.toString()
+      return text === '' ? ROUTES[view] : `${ROUTES[view]}?${text}`
     }
 
     /** The per-client bookkeeping the increment protocol needs. Not rendered: a ref, not state. */
@@ -685,7 +792,10 @@ window.__ModuleLoader__.load({
      * so is this client, because a doubled timeline is a lie about what happened.
      */
     async function readView(view, book, options = {}) {
-      const key = `${view}|${options.candidate ?? ''}`
+      // The book is keyed by run as well as by view and candidate: two runs answering the same route
+      // share one key otherwise, and the `after=` of the run a reader just left would be handed to the
+      // run they switched to — which is a `400`, or worse, a page that skips facts.
+      const key = `${view}|${options.candidate ?? ''}|${options.run ?? VIEWED.run ?? ''}`
       const url = urlFor(view, { cursor: book.cursors.get(key), ...options })
       const response = await fetch(url, { headers: { accept: 'application/json' }, cache: 'no-store' })
       const answer = await response.json().catch(() => ({}))
@@ -714,6 +824,201 @@ window.__ModuleLoader__.load({
         throw new Error(`${view}: HTTP ${response.status} — ${answer?.error?.message ?? 'no answer'}`)
       }
       return answer
+    }
+
+    // -------------------------------------------------------------- the registry (ADR 0002)
+    //
+    // Three requests: the `GET` lists what this Host may show, one `POST` scaffolds a new run under its
+    // root, and one `POST` records the host-level decision to advance an existing run. The list is a
+    // *directory listing* read fresh by the Host (a run dropped in by hand appears without a restart),
+    // so it is read on mount, after a create, after a start or a stop, and every half minute — never on
+    // the five-second view poll.
+
+    /** The registry's one address. `createRun` and `readRuns` below are its only callers. */
+    const RUNS_URL = '/api/reprise/runs'
+
+    /**
+     * The one address that decides whether this host advances a run.
+     *
+     * It is the route `POST /runs`'s sibling: `intentHandler` writes a run's own `pending/` file for
+     * `pause`/`resume`, and the host's activation set for `activate`/`deactivate`. The panel asks for
+     * the second pair only, because the first is the run's decision about a step and the second is the
+     * operator's decision about *this host*.
+     */
+    const INTENT_URL = '/api/reprise/intent'
+
+    /**
+     * The first of the panel's two writes: `POST /api/reprise/runs`, in the body ADR 0002 names.
+     *
+     * It answers rather than throws, because a refusal is this form's normal state — an existing
+     * directory, a bad id, a repository git could not clone — and the sentence that comes back is what
+     * the reader has to see. `said` is that sentence, verbatim, or ours only when the request never
+     * reached the Host at all.
+     *
+     * @param {Function} t the bound dictionary
+     * @param {{id: string, mode: string, repo: string, domain: string, maxRounds: string,
+     *   candidateGpuHours: string}} fields the form's strings, as typed
+     * @returns {Promise<{ok: true, run: {id: string}} | {ok: false, said: string}>}
+     */
+    async function createRun(t, fields) {
+      const body = createBody(fields)
+      let response
+      try {
+        response = await fetch(RUNS_URL, {
+          method: 'POST',
+          headers: { accept: 'application/json', 'content-type': 'application/json' },
+          cache: 'no-store',
+          body: JSON.stringify(body),
+        })
+      } catch (error) {
+        return {
+          ok: false,
+          said: say(t, 'run.notSent', { error: error instanceof Error ? error.message : String(error) }),
+        }
+      }
+      const answer = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        // The route's own sentence, verbatim: it names the field and the value ("a run directory
+        // already exists at …"), and a rewritten version of it would be a second, weaker spec.
+        return {
+          ok: false,
+          said: answer?.error?.message ?? say(t, 'run.refused', { status: response.status }),
+        }
+      }
+      return { ok: true, run: typeof answer?.run?.id === 'string' ? answer.run : { id: fields.id } }
+    }
+
+    /**
+     * The body the create form sends.
+     *
+     * **Flat, and named after the keys `reprise.toml` uses** (`max_rounds`, `candidate_gpu_hours`):
+     * the handler hands it to `scaffoldRun` field for field, so there is no second nesting to keep in
+     * step with the file the operator will edit. Empty inputs are *omitted* rather than sent as `0` or
+     * `null` — the Host's defaults are the Host's business, and a form that sent a zero it made up
+     * would create a run budgeted for nothing. `repo` is sent only in `clone` mode: an empty scaffold
+     * has no repository to copy, and sending one would ask the Host to ignore a field on screen.
+     */
+    function createBody(fields) {
+      const body = { id: fields.id, mode: fields.mode, domain: fields.domain }
+      if (fields.mode === 'clone') body.repo = fields.repo
+      if (fields.maxRounds !== '') body.max_rounds = Number(fields.maxRounds)
+      if (fields.candidateGpuHours !== '') body.candidate_gpu_hours = Number(fields.candidateGpuHours)
+      return body
+    }
+
+    /**
+     * One registry read. It throws on a refusal, and the caller decides what a stale list means.
+     *
+     * A row this surface cannot understand is left out rather than offered as a nameless option: the
+     * picker's whole job is to be a list of ids, and `id` is the only field it reads.
+     *
+     * Two things travel beside the rows, and the start/stop button needs both: each row's `active`
+     * (the operator's decision about this run, kept on the row), and the answer's `activation` — the
+     * status of the file that decision lives in, plus the reader's own sentences when it could not be
+     * read. Both are the Host's, not ours: `runs.js` derives the row from the same activation set it
+     * answers, so a button built from them cannot disagree with the list it sits in.
+     */
+    async function readRuns() {
+      const response = await fetch(RUNS_URL, { headers: { accept: 'application/json' }, cache: 'no-store' })
+      const answer = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(`runs: HTTP ${response.status} — ${answer?.error?.message ?? 'no answer'}`)
+      }
+      return {
+        runs: Array.isArray(answer.runs) ? answer.runs.filter((run) => typeof run?.id === 'string') : [],
+        default_run: typeof answer.default_run === 'string' ? answer.default_run : null,
+        activation: {
+          status: typeof answer.activation?.status === 'string' ? answer.activation.status : 'absent',
+          problems: Array.isArray(answer.activation?.problems)
+            ? answer.activation.problems.filter((problem) => typeof problem === 'string' && problem !== '')
+            : [],
+        },
+      }
+    }
+
+    /**
+     * Move one run into, or out of, the set of runs *this host* advances.
+     *
+     * The body is the pair `intentHandler` reads (`{run, intent: {kind}}`), and the answer is the
+     * host-level one (`scope: 'host'`, the new `status`, the whole `active` list). Only the answer's
+     * ok-ness is used here: what the panel draws next comes from re-reading the registry, because the
+     * row is the thing on screen and a locally-flipped boolean would be a second source for it.
+     *
+     * It answers rather than throws, exactly as `createRun` does and for the same reason: a refusal is
+     * this button's normal state (a host with no `runs_root`, a corrupt activation file), and the
+     * sentence that comes back is the one a reader has to see, word for word.
+     *
+     * @param {Function} t the bound dictionary
+     * @param {{run: string, activate: boolean}} what the selected run, and which way to move it
+     * @returns {Promise<{ok: true, status: string | null} | {ok: false, said: string}>}
+     */
+    async function toggleRun(t, { run, activate }) {
+      let response
+      try {
+        response = await fetch(INTENT_URL, {
+          method: 'POST',
+          headers: { accept: 'application/json', 'content-type': 'application/json' },
+          cache: 'no-store',
+          body: JSON.stringify({ run, intent: { kind: activate ? 'activate' : 'deactivate' } }),
+        })
+      } catch (error) {
+        return {
+          ok: false,
+          said: say(t, 'run.notSent', { error: error instanceof Error ? error.message : String(error) }),
+        }
+      }
+      const answer = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        return {
+          ok: false,
+          said: answer?.error?.message ?? say(t, 'run.refused', { status: response.status }),
+        }
+      }
+      return { ok: true, status: typeof answer?.status === 'string' ? answer.status : null }
+    }
+
+    /**
+     * Which run the page should show, given the registry and what it was already showing.
+     *
+     * The first read and every read after it are different questions, and the difference is which one
+     * of them may overrule the operator.
+     *
+     *   - **Nothing chosen yet** (`kept` is null — a fresh page): the remembered choice wins while the
+     *     registry still lists it, and the Host's own default is the fallback. That is what makes a
+     *     reload land on the run it was left on, and what keeps a stale `localStorage` value from
+     *     pointing the page at a directory that no longer exists.
+     *   - **Something chosen** (every later read, including the 30-second refresh): the choice stands,
+     *     *including* an id that has since left the registry. The view routes answer `404` naming it,
+     *     which a reader can act on by picking another run; quietly swapping in the default would show
+     *     one run's numbers under another run's name, which ADR 0002 refuses outright.
+     *
+     * @param {{listed: string[], kept: string|null, remembered: string|null, fallback: string|null}} what
+     * @returns {string|null}
+     */
+    function resolveRun({ listed, kept, remembered, fallback }) {
+      if (kept !== null) return kept
+      if (remembered !== null && listed.includes(remembered)) return remembered
+      return fallback
+    }
+
+    /** The remembered choice, or `null`. A browser that refuses storage simply has not remembered one. */
+    function rememberedRun() {
+      try {
+        const value = window.localStorage.getItem(RUN_KEY)
+        return typeof value === 'string' && value !== '' ? value : null
+      } catch {
+        return null
+      }
+    }
+
+    /** Remember one choice, best effort: a refused write must not break the picker it came from. */
+    function rememberRun(id) {
+      try {
+        window.localStorage.setItem(RUN_KEY, id)
+      } catch {
+        // A private window refuses the write. The choice still holds for this page's lifetime, which
+        // is the whole of what the memory is for; a reload simply starts at the Host's default again.
+      }
     }
 
     /** The card count, or the word for "we could not ask": an unread listing is never `0`. */
@@ -864,8 +1169,13 @@ window.__ModuleLoader__.load({
      *
      * The bookkeeping the increment protocol needs lives in a ref (`newBook()`), because it is not
      * rendered: it is what the *next* request asks for. Everything a reader can see is state, and the
-     * only two pieces of state a poll must not own are the selection and the audit — both survive a
-     * re-render because they are the reader's, not the run's.
+     * pieces a poll must not own are the three that are the reader's rather than the run's — the
+     * candidate selection, the audit, and which run this page is looking at.
+     *
+     * The run is deliberately a pair: the state the picker draws, and a ref the next request asks
+     * with. The ref is what keeps `poll` a stable callback (a dependency on the id would rebuild the
+     * five-second interval on every create, and resetting the interval is delaying the next read), and
+     * the state is what makes the picker a controlled `<select>`.
      */
     function Dashboard({ t, shared }) {
       const [snapshot, setSnapshot] = useState(null)
@@ -875,6 +1185,20 @@ window.__ModuleLoader__.load({
       const [auditOpen, setAuditOpen] = useState(false)
       const [openRef, setOpenRef] = useState(null)
       const [openRecord, setOpenRecord] = useState(null)
+      /** The registry's last answer, and whether one has arrived at all (a refusal counts). */
+      const [registry, setRegistry] = useState(null)
+      const [registryRead, setRegistryRead] = useState(false)
+      const [runId, setRunId] = useState(null)
+      const [formOpen, setFormOpen] = useState(false)
+      /**
+       * The start/stop request: whether one is in flight, and the Host's sentence when it refused.
+       *
+       * Both live here rather than inside the button for the reason every other piece of state does —
+       * the components below are pure functions of what they are handed — and the refusal is cleared
+       * when the next attempt starts, so a stale sentence cannot sit under a button that has moved on.
+       */
+      const [toggleBusy, setToggleBusy] = useState(false)
+      const [toggleSaid, setToggleSaid] = useState(null)
       const book = useRef(null)
       if (book.current === null) book.current = newBook()
       const alive = useRef(true)
@@ -889,21 +1213,79 @@ window.__ModuleLoader__.load({
       // What the poll should ask for on its next tick. A ref, so changing the selection does not tear
       // down and rebuild the interval (which would also reset its phase).
       const chosen = useRef(null)
+      // The run the next request asks for. The picker draws `runId`; this is what `poll` and `urlFor`
+      // read, so a selection change costs one read and not a rebuilt interval.
+      const runRef = useRef(null)
+
+      /**
+       * Point the page at one run: the ref the next request asks with, the state the picker draws, and
+       * the memory a reload reads.
+       *
+       * Silent when the id is the one already showing — re-selecting a run is not a change, and it must
+       * not cost a read. Everything that describes the *old* run is dropped here rather than left to be
+       * overwritten by the next answer: the fact book (whose `after=` belongs to another run), the
+       * selected candidate (whose id may not exist in the new run at all), and the page itself, because
+       * showing A's headline under B's picker for one round trip is showing a number that is not true.
+       */
+      const applyRun = useCallback((id) => {
+        if (id === runRef.current) return
+        runRef.current = id
+        VIEWED.run = id
+        setRunId(id)
+        if (id !== null) rememberRun(id)
+        book.current = newBook()
+        chosen.current = null
+        setSelected(null)
+        setSnapshot(null)
+        setFailure(null)
+        setReadAt(null)
+      }, [])
+
+      /**
+       * One registry read: the list the picker offers, and — on the first answer — which run to show.
+       *
+       * A refusal is not an empty registry. The page keeps the list it has (stale, and honestly so: 30
+       * seconds is the whole of what a directory listing is owed) and keeps the run it is showing, so a
+       * `readdir` that failed once cannot blank the page, clear the selection, or take the picker away.
+       * `registryRead` is set on both paths because its one job is "the first read has settled, the
+       * poll may start".
+       */
+      const loadRuns = useCallback(async () => {
+        try {
+          const answer = await readRuns()
+          if (!alive.current) return
+          setRegistry(answer)
+          setRegistryRead(true)
+          applyRun(
+            resolveRun({
+              listed: answer.runs.map((run) => run.id),
+              kept: runRef.current,
+              remembered: rememberedRun(),
+              fallback: answer.default_run,
+            }),
+          )
+        } catch {
+          if (alive.current) setRegistryRead(true)
+        }
+      }, [applyRun])
 
       const poll = useCallback(async (candidateId) => {
         const mine = ++gen.current
+        // One run per tick: the five reads of this poll are five questions about the same run, and
+        // capturing it here is what makes that true even if the picker moves mid-flight.
+        const run = runRef.current
         try {
           const [overview, rounds, conclusion, tree, calls] = await Promise.all([
-            readView('overview', book.current),
-            readView('rounds', book.current),
-            readView('conclusion', book.current),
-            readView('tree', book.current),
-            readView('calls', book.current),
+            readView('overview', book.current, { run }),
+            readView('rounds', book.current, { run }),
+            readView('conclusion', book.current, { run }),
+            readView('tree', book.current, { run }),
+            readView('calls', book.current, { run }),
           ])
           const candidate =
             candidateId === null || candidateId === undefined
               ? null
-              : await readView('candidate', book.current, { candidate: candidateId })
+              : await readView('candidate', book.current, { candidate: candidateId, run })
           // A newer read started while this one was in flight: its answer is the one that describes the
           // page now, and applying this one would overwrite it with an older selection.
           if (!alive.current || mine !== gen.current) return
@@ -926,7 +1308,22 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
+      // The registry: read on mount, then every half minute. Its own interval, so the five-second poll
+      // keeps its phase — one timer per question, rather than one timer asked to do two jobs at the
+      // cadence of the faster one.
       useEffect(() => {
+        void loadRuns()
+        const timer = setInterval(() => void loadRuns(), RUNS_POLL_MS)
+        return () => clearInterval(timer)
+      }, [loadRuns])
+
+      useEffect(() => {
+        // Nothing is polled until the registry has answered, even if that answer is a refusal. Without
+        // the wait, the first read would ask for the Host's *default* run, paint its numbers, and then
+        // re-point at the remembered run a tick later — two runs' facts on one screen, in whichever
+        // order the network answered. A refused registry settles this flag too: the page then polls
+        // exactly what it polled before the picker existed, the default run.
+        if (!registryRead) return undefined
         alive.current = true
         void poll(chosen.current)
         const timer = setInterval(() => void poll(chosen.current), POLL_MS)
@@ -934,7 +1331,7 @@ window.__ModuleLoader__.load({
           alive.current = false
           clearInterval(timer)
         }
-      }, [poll])
+      }, [poll, registryRead])
 
       const select = useCallback(
         (candidateId) => {
@@ -943,6 +1340,83 @@ window.__ModuleLoader__.load({
           void poll(candidateId)
         },
         [poll],
+      )
+
+      /**
+       * The picker's one action: remember the choice, re-point the page, and read at once.
+       *
+       * Immediately, and not on the next tick: five seconds of the previous run under the new run's
+       * name is the same lie as painting another run's numbers, only shorter. An empty value (the
+       * placeholder a reader can only see before the registry has answered) is not a choice.
+       */
+      const chooseRun = useCallback(
+        (id) => {
+          const next = typeof id === 'string' && id !== '' ? id : null
+          if (next === runRef.current) return
+          applyRun(next)
+          void poll(chosen.current)
+        },
+        [applyRun, poll],
+      )
+
+      /**
+       * A created run is the run the reader now wants to look at.
+       *
+       * The list is re-read *before* the poll so the picker has an `<option>` for the new id by the
+       * time the first answer lands (a `<select>` whose value is not among its options shows nothing).
+       * The create route answers `{ ok, run: { id } }`, which is the only thing taken from it: what the
+       * run contains is the run's business, and the views are about to say it.
+       */
+      const runCreated = useCallback(
+        async (run) => {
+          setFormOpen(false)
+          const id = typeof run?.id === 'string' && run.id !== '' ? run.id : null
+          if (id !== null) applyRun(id)
+          await loadRuns()
+          if (id !== null) void poll(null)
+        },
+        [applyRun, loadRuns, poll],
+      )
+
+      const toggleForm = useCallback(() => setFormOpen((open) => !open), [])
+      // A stable identity, because the form's Escape listener depends on it: a handler rebuilt on every
+      // render would unsubscribe and resubscribe the document listener on every keystroke.
+      const closeForm = useCallback(() => setFormOpen(false), [])
+
+      /**
+       * Start or stop the selected run on *this host*.
+       *
+       * Three things happen in this order, and the order is the point:
+       *
+       *   1. the button goes busy, so a second click cannot be a second decision while the first is
+       *      still being written;
+       *   2. on success the *registry* is re-read — not a local boolean flipped — because the row is
+       *      what the button draws, and after a refusal the page must show what the Host actually
+       *      recorded rather than what was asked for. The selection stands: `loadRuns` keeps
+       *      `runRef.current`, so a start does not move the page to another run;
+       *   3. on a refusal the Host's sentence is kept verbatim and the button is armed again, because a
+       *      sentence a reader cannot act on is not an error message.
+       *
+       * Nothing here polls the views: starting or stopping changes which host ticks the run, not one
+       * fact of it, so there is nothing new for the five-second read to say.
+       */
+      const toggleActive = useCallback(
+        async (id, activate) => {
+          if (typeof id !== 'string' || id === '') return
+          setToggleBusy(true)
+          setToggleSaid(null)
+          const result = await toggleRun(t, { run: id, activate })
+          if (!alive.current) return
+          if (result.ok !== true) {
+            setToggleSaid(result.said)
+            setToggleBusy(false)
+            return
+          }
+          await loadRuns()
+          if (!alive.current) return
+          setToggleBusy(false)
+        },
+        [loadRuns, t],
       )
 
       const openCall = useCallback(async (ref) => {
@@ -967,7 +1441,28 @@ window.__ModuleLoader__.load({
       }
 
       return h('div', { className: 'reprise', 'data-mount': 'panel' }, [
-        h(RegionMasthead, { key: 'masthead', t, shared, snapshot: answers, readAt, failure }),
+        h(RegionMasthead, {
+          key: 'masthead',
+          t,
+          shared,
+          snapshot: answers,
+          readAt,
+          failure,
+          // The picker and the create form are one thing — "which run is this page about" — so they
+          // arrive as one object rather than six sibling props the region has to keep in step. The
+          // start/stop control is the third member of the same sentence: it is about *that* run, and
+          // it is drawn from the same registry answer as the `<select>` beside it.
+          runs: {
+            registry,
+            selected: runId,
+            formOpen,
+            onSelect: chooseRun,
+            onToggleForm: toggleForm,
+            onCreated: runCreated,
+            onCloseForm: closeForm,
+            toggle: { busy: toggleBusy, said: toggleSaid, onToggle: toggleActive },
+          },
+        }),
         h(RegionHeadline, { key: 'headline', t, shared, conclusion: answers.conclusion }),
         h(RegionStrips, { key: 'strips', t, shared, snapshot: answers, failure, readAt }),
         h(RegionStop, { key: 'stop', t, shared, overview: answers.overview }),
@@ -1018,16 +1513,28 @@ window.__ModuleLoader__.load({
     // --------------------------------------------------------------- the regions
 
     /**
-     * The masthead: the phase capsule, and the four stamps that answer "which run, when did I read,
-     * when did the run last move, and at which fact".
+     * The masthead: which run this page is about, the phase capsule, and the four stamps that answer
+     * "which run, when did I read, when did the run last move, and at which fact".
      *
      * The capsule is the only place the workspace phase appears, and it is `aria-live` because a phase
      * change is worth hearing. The stamps come from the envelope: `read at` is this browser's last
      * successful poll, and `last fact` is the *published cursor's* instant — never a running maximum
      * over the facts this client happened to read, because the page and the panel see different
-     * windows of one run and would then print two different answers.
+     * windows of one run and would then print two different answers. The workspace stamp shows the path
+     * of the run the picker names, because it is read from *that* run's overview answer.
+     *
+     * The picker sits beside the title because it is the same kind of claim as the title: what this
+     * page is. The create form lives in the same header, on its own line, because it is a sentence
+     * about the registry rather than a place to go — a modal would take the facts off screen to
+     * describe a run that, once created, becomes the run the page shows.
+     *
+     * Two sentences a refused click or a corrupt record owes a reader live on their own full-width
+     * line under the stamps, wearing the class the create form's refusal already wears: the Host's
+     * words about the activation file it could not read, and the Host's words about the start or stop
+     * it refused. Neither is a stamp — both are sentences — and a sentence inside the wrapping row of
+     * stamps would push the numbers around.
      */
-    function RegionMasthead({ t, shared, snapshot, readAt, failure }) {
+    function RegionMasthead({ t, shared, snapshot, readAt, failure, runs }) {
       const fmt = shared.format
       const overview = snapshot.overview
       const data = overview?.data
@@ -1041,6 +1548,11 @@ window.__ModuleLoader__.load({
       const capsuleState =
         data === null || data === undefined ? say(t, 'state.unknown') : say(t, stopped ? 'state.stopped' : 'state.running')
       const cursorKey = overview?.cursor ?? null
+      // Why the start/stop button might be drawn over a decision nobody can read: `.reprise-host.json`
+      // is corrupt, and the registry answered the default run's set plus the reader's own sentence.
+      // One sentence, once, in the Host's words — the file's path and what is wrong with it.
+      const activationProblem =
+        runs.registry?.activation?.status === 'invalid' ? (runs.registry.activation.problems[0] ?? null) : null
 
       const stamp = (id, label, value, title) =>
         h('span', { className: 'stamp', key: id }, [
@@ -1051,6 +1563,16 @@ window.__ModuleLoader__.load({
       return h('header', { className: 'masthead' }, [
         h('div', { className: 'masthead-run', key: 'run' }, [
           h('h1', { key: 'title' }, say(t, 'panel.title')),
+          h(RunPicker, {
+            key: 'picker',
+            t,
+            registry: runs.registry,
+            selected: runs.selected,
+            open: runs.formOpen,
+            onSelect: runs.onSelect,
+            onToggleForm: runs.onToggleForm,
+            toggle: runs.toggle,
+          }),
           h('span', { className: 'phase-capsule', 'data-state': phaseState, 'aria-live': 'polite', key: 'phase' }, [
             h('span', { className: 'phase-capsule-dot', 'aria-hidden': 'true', key: 'dot' }),
             h('span', { className: 'phase-capsule-name', key: 'name' }, capsuleName),
@@ -1065,7 +1587,275 @@ window.__ModuleLoader__.load({
           stamp('lastFact', say(t, 'stamp.lastFact'), fmt.clock(fmt.cursorAt(cursorKey))),
           stamp('cursor', say(t, 'stamp.cursor'), cursorKey === null ? fmt.EM_DASH : fmt.cursor(cursorKey)),
         ]),
+        // The Host's own sentence, verbatim in the middle: ours is the frame that says what it is about.
+        activationProblem === null
+          ? null
+          : h(
+              'p',
+              { className: 'warning', key: 'activation' },
+              say(t, 'run.activationInvalid', { problem: activationProblem }),
+            ),
+        // A refused start or stop, in the same paragraph the create form prints its refusals in.
+        runs.toggle.said === null
+          ? null
+          : h('p', { className: 'warning', key: 'toggleRefusal' }, runs.toggle.said),
+        runs.formOpen === true
+          ? h(RunCreateForm, { key: 'create', t, onCreated: runs.onCreated, onClose: runs.onCloseForm })
+          : null,
       ])
+    }
+
+    /**
+     * The registry as one native `<select>`, plus the two buttons that act on the run it names: `＋`,
+     * which opens the create form, and the start/stop control, which is about the run *on screen*.
+     *
+     * Native because the listbox has already been written, by every browser, with keyboard navigation,
+     * type-ahead and the reader's own platform picker — and this is a choice between a handful of short
+     * ids. The selected run is listed even when the registry no longer lists it, marked rather than
+     * silently swapped for the default: the view routes answer `404` naming it, which a reader can act
+     * on, and a picker that quietly moved to another run would hide exactly the fact worth seeing.
+     *
+     * The whole picker is one `inline-flex` unit that never wraps, so the `<select>` and both buttons
+     * cannot separate and the stamps keep their line: the `<select>` is the only member allowed to
+     * shrink (the stylesheet's `max-width` on it is the whole of that rule).
+     */
+    function RunPicker({ t, registry, selected, open, toggle, onSelect, onToggleForm }) {
+      const rows = registry?.runs ?? []
+      const listed = rows.map((run) => run.id)
+      // The row the button reads its state from. Absent while the registry has not answered, and for a
+      // selected run that has left the registry — see `RunToggle` for what is drawn then.
+      const row = rows.find((run) => run.id === selected) ?? null
+      // The one option that is not in the registry: the run on screen, when it has left the list.
+      const ids = selected === null || listed.includes(selected) ? listed : [selected, ...listed]
+      const options =
+        ids.length === 0
+          ? [h('option', { value: '', key: 'none' }, selected === null ? say(t, 'run.loading') : selected)]
+          : ids.map((id) =>
+              h('option', { value: id, key: id }, listed.includes(id) ? id : say(t, 'run.missing', { id })),
+            )
+
+      return h('span', { className: 'run-picker' }, [
+        h(
+          'select',
+          {
+            key: 'select',
+            'aria-label': say(t, 'run.picker'),
+            title: say(t, 'run.picker'),
+            value: selected ?? '',
+            onChange: (event) => onSelect(event.currentTarget.value),
+          },
+          options,
+        ),
+        h(
+          'button',
+          {
+            type: 'button',
+            key: 'create',
+            'aria-label': say(t, 'run.create'),
+            'aria-expanded': open === true,
+            title: say(t, 'run.create'),
+            onClick: () => onToggleForm(),
+          },
+          '＋',
+        ),
+        h(RunToggle, { key: 'toggle', t, row, toggle }),
+      ])
+    }
+
+    /**
+     * Start or stop the run the picker names — the one control here that is a decision about the
+     * *host*, not a fact about the run, and the one place a careless label would lie about which.
+     *
+     * Four states, and each is a different sentence:
+     *
+     *   - **No row** (the registry has not answered, or the selected run has left it): nothing is
+     *     drawn. There is no operator decision to read, and a button that guessed one would offer to
+     *     start a run this host no longer knows about — the picker's own `not in the registry` option
+     *     already says what is true.
+     *   - **`active: false`**: `Start`, filled rather than outlined, because it is the one action on
+     *     the masthead a reader is meant to take. Its tooltip is the truth in two separate sentences:
+     *     what this decides (whether this host advances the run, with every fact kept) and what it is
+     *     not (the run's own pause/resume, a `pending/` intent the loop consumes).
+     *   - **`active: false && runnable.ok === false`**: disabled, and its `title` is `runnable.problem`
+     *     verbatim — the configuration sentence `resolveConfig` already wrote. Starting a run whose
+     *     configuration is incomplete changes nothing, and a reader deserves that sentence instead of
+     *     a button that looks available and does nothing.
+     *   - **`active: true`**: `Stop`, in secondary ink and an open border. Noise is not warranted for
+     *     stopping, but it must not read as the thing to click either. Stopping stays available even
+     *     when the configuration is incomplete: a started run that cannot move is exactly the one to
+     *     switch off.
+     *
+     * While the request is in flight every state collapses to one: disabled, labelled `Working…`, so a
+     * second click cannot be a second decision.
+     */
+    function RunToggle({ t, row, toggle }) {
+      if (row === null) return null
+      const active = row.active === true
+      const busy = toggle.busy === true
+      const problem =
+        typeof row.runnable?.problem === 'string' && row.runnable.problem !== '' ? row.runnable.problem : null
+      // Only the direction that could not change anything is refused: a run that is already ticking
+      // may always be stopped, whatever its configuration now says.
+      const blocked = active === false && row.runnable?.ok === false
+      const label = busy ? say(t, 'run.toggling') : say(t, active ? 'run.stop' : 'run.start')
+      const title = blocked
+        ? // The Host's reason, word for word — it names the file and what is wrong with it.
+          (problem ?? undefined)
+        : // Two sentences joined, never merged: the decision, then the thing it is not.
+          `${say(t, active ? 'run.stopHint' : 'run.startHint')} ${say(t, 'run.pauseElsewhere')}`
+      return h(
+        'button',
+        {
+          type: 'button',
+          className: 'run-toggle',
+          // Which way the button points, so the stylesheet can draw "filled" for one direction and
+          // "outlined" for the other without reading a label that is spelled differently per language.
+          'data-active': active ? 'true' : 'false',
+          'aria-busy': busy === true,
+          // The visible word is the action, but it changes to `Working…` mid-request; the label keeps
+          // saying which action this is, for a screen reader and for the disabled state.
+          'aria-label': say(t, active ? 'run.stop' : 'run.start'),
+          title,
+          disabled: busy || blocked,
+          onClick: () => toggle.onToggle(row.id, active !== true),
+        },
+        label,
+      )
+    }
+
+    /**
+     * The create form: one inline row under the masthead, never a modal.
+     *
+     * Three decisions worth naming, because none of them is in the ADR.
+     *
+     *   - **The browser validates, we do not write a second spec.** `required`, `pattern` and
+     *     `type="number"` refuse an empty id or a bad slug before the request is sent, in the reader's
+     *     own language and with the reader's own accessibility settings. What the *Host* will accept is
+     *     `runs.js`'s rule, and its refusal is one sentence the form prints verbatim — encoding that
+     *     rule twice, in two languages, is how the two copies start to disagree.
+     *   - **A committed create cannot be cancelled, so it is not offered as one.** While the POST is in
+     *     flight the submit button is disabled and says so; the form stays open with everything typed,
+     *     because a refusal is the reader's work in progress and not a page to navigate away from.
+     *   - **Escape and the cancel button are the same call.** Two ways out that behave differently is
+     *     a form that loses half of what was typed for one of them.
+     *
+     * The `repo` field stays visible in `empty` mode and is disabled there: it keeps what was typed, and
+     * a greyed label says "this one does not apply" better than a field that vanishes mid-edit.
+     */
+    function RunCreateForm({ t, onCreated, onClose }) {
+      const [id, setId] = useState('')
+      const [mode, setMode] = useState('clone')
+      const [repo, setRepo] = useState('')
+      const [domain, setDomain] = useState('')
+      const [maxRounds, setMaxRounds] = useState('3')
+      const [gpuHours, setGpuHours] = useState('0.5')
+      const [busy, setBusy] = useState(false)
+      const [refusal, setRefusal] = useState(null)
+
+      useEffect(() => {
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') onClose()
+        }
+        // On the document rather than on the form: Escape should close it wherever the focus sits,
+        // including after a click on the masthead that moved focus out of the row.
+        document.addEventListener('keydown', onKeyDown)
+        return () => document.removeEventListener('keydown', onKeyDown)
+      }, [onClose])
+
+      const send = async (event) => {
+        event.preventDefault()
+        if (busy === true) return
+        setBusy(true)
+        setRefusal(null)
+        const result = await createRun(t, {
+          id: id.trim(),
+          mode,
+          repo: repo.trim(),
+          domain: domain.trim(),
+          maxRounds: maxRounds.trim(),
+          candidateGpuHours: gpuHours.trim(),
+        })
+        if (result.ok === true) {
+          onCreated(result.run)
+          return
+        }
+        setRefusal(result.said)
+        setBusy(false)
+      }
+
+      /** One field: the caption above the control, and the caption as the control's own label. */
+      const field = (name, caption, control) =>
+        h('label', { key: name }, [h('span', { key: 'caption' }, caption), control])
+
+      const text = (name, value, setValue, extra) =>
+        h('input', {
+          key: 'control',
+          name,
+          type: 'text',
+          autoComplete: 'off',
+          spellCheck: false,
+          value,
+          disabled: busy,
+          onChange: (event) => setValue(event.currentTarget.value),
+          ...extra,
+        })
+
+      const number = (name, value, setValue, extra) =>
+        h('input', {
+          key: 'control',
+          name,
+          type: 'number',
+          value,
+          disabled: busy,
+          onChange: (event) => setValue(event.currentTarget.value),
+          ...extra,
+        })
+
+      return h(
+        'form',
+        { className: 'run-create', onSubmit: send, 'aria-busy': busy === true, 'aria-label': say(t, 'run.create') },
+        [
+          field('id', say(t, 'run.field.id'), text('id', id, setId, { required: true, pattern: RUN_ID_PATTERN })),
+          field(
+            'mode',
+            say(t, 'run.field.mode'),
+            h(
+              'select',
+              {
+                key: 'control',
+                name: 'mode',
+                value: mode,
+                disabled: busy,
+                onChange: (event) => setMode(event.currentTarget.value),
+              },
+              [
+                h('option', { value: 'clone', key: 'clone' }, say(t, 'run.mode.clone')),
+                h('option', { value: 'empty', key: 'empty' }, say(t, 'run.mode.empty')),
+              ],
+            ),
+          ),
+          field(
+            'repo',
+            say(t, 'run.field.repo'),
+            text('repo', repo, setRepo, {
+              // `required` only where it is read: a disabled input is barred from validation anyway,
+              // and saying it twice is how a reader learns to distrust the form.
+              required: mode === 'clone',
+              disabled: busy || mode !== 'clone',
+            }),
+          ),
+          field('domain', say(t, 'run.field.domain'), text('domain', domain, setDomain, { required: true })),
+          field('maxRounds', say(t, 'run.field.rounds'), number('max_rounds', maxRounds, setMaxRounds, { min: 1, step: 1 })),
+          field(
+            'gpuHours',
+            say(t, 'run.field.gpu'),
+            number('candidate_gpu_hours', gpuHours, setGpuHours, { min: 0, step: 0.1 }),
+          ),
+          h('button', { type: 'submit', key: 'submit', disabled: busy }, say(t, busy ? 'run.creating' : 'run.submit')),
+          h('button', { type: 'button', key: 'cancel', onClick: () => onClose() }, say(t, 'run.cancel')),
+          refusal === null ? null : h('p', { className: 'warning', key: 'refusal' }, refusal),
+        ],
+      )
     }
 
     /**

@@ -227,6 +227,52 @@ pack, and a pack missing a part is refused by name at boot instead of running ha
 | `poll.base_ms` / `.max_ms` / `.grace_attempts` | `1000` / `60000` / `2` | job poll backoff |
 | `gate.max_attempts` / `.base_ms` / `.max_ms` | `3` / `1000` / `60000` | how many times gate two may run before a candidate stops, and the backoff between attempts; `1` restores a single shot |
 | `limits.max_wall_ms` / `.max_idle_ms` | `3600000` / `1800000` | per-job wall-clock and silence deadlines |
+| `runs_root` | — | a directory whose subdirectories are runs. The panel lists them, and a request names one with `?run=<id>` |
+| `runs` | `[]` | extra absolute run directories outside `runs_root` (a run that already lives in a checkout) |
+| `max_active_runs` | `2` | how many runs may tick at once (validated now, enforced when the ticking half drives several) |
+
+### Several runs, one dashboard
+
+A deployment that never sets `runs_root` behaves exactly as before: one run, the one `workspace` names.
+Set it and the panel grows a run picker and a create form, because a second exploration task used to
+mean editing this patch and recomposing the host — [docs/adr/0002](docs/adr/0002-a-run-registry-not-a-single-workspace.md)
+is the decision record.
+
+- **A run is a directory.** Its name is its id (`[A-Za-z0-9._-]+`, never `.` or `..`); `workspace`,
+  every entry of `runs`, and every non-hidden subdirectory of `runs_root` are listed once each,
+  deduplicated by realpath. A directory whose name is not an id is *reported* as skipped, never
+  renamed.
+- **Every run may carry its own `reprise.toml`** — the same keys as this patch, read by a strict TOML
+  subset reader (`packages/core/lib/toml.js`): comments, tables, arrays and inline tables read;
+  datetimes, arrays of tables and multiline strings are refused by name rather than guessed.
+  `workspace = "."` inside it resolves against the file, so a run directory and its file can move as a
+  unit.
+- **Views take `?run=<id>`.** Absent means the default run, so every existing URL keeps its meaning; an
+  id the registry does not know is a 404 naming it rather than a silent fall back to another run's
+  numbers.
+- **Two writes, and neither touches a fact.** `POST /api/reprise/runs` scaffolds a directory under
+  `runs_root` (a local repository is cloned with `--shared`, so runs share one object store), and
+  `POST /api/reprise/intent` places the same `<run>/pending/` file the CLI writes. A run's own state
+  still only changes when the kernel consumes an intent. **Creating a run does not start it**: the row
+  appears with `active: false` and the panel's Start, and a run whose `reprise.toml` cannot resolve
+  cannot be started at all (the button says why, in the configuration's own words).
+
+- **Start and stop are the host's decision, recorded beside the runs.** `<runs_root>/.reprise-host.json`
+  holds the set of runs this host advances. An absent file means *only the run `workspace` names*, so a
+  directory dropped next to a run never starts spending on its own; the panel's start/stop button writes
+  it through the same `POST /api/reprise/intent` (`kind: activate` / `deactivate`, answered with
+  `scope: "host"`). A run-scoped `pause` still means what it always did — watched, not dispatching.
+- **Starting and stopping apply on the next beat** — the set is re-read before each beat, so a run
+  started from the panel joins without a host restart, and a stopped one leaves without losing a fact.
+- **One interval, a round-robin beat.** Each beat advances up to `max_active_runs` runs that are not
+  already ticking, so a run waiting on a long job poll cannot starve the others; the cap is per beat,
+  which means five active runs at `max_active_runs: 2` all keep moving, two at a time. A run that is
+  active but whose `reprise.toml` cannot resolve is skipped with its reason in the log and in
+  `runnable.problem` on its row — every other run keeps ticking.
+
+Two limits worth knowing: the overview's cluster listing is still built from the configured run's
+executor (another run's page says the cluster was not read rather than showing someone else's cards),
+and `reprise_status` answers about the configured run.
 
 One of `model.kind` and `model.command` must be there when `rounds` is set; the five call sites are the
 only places a model is consulted, and they all go through this one adapter —

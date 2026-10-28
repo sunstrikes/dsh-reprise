@@ -120,7 +120,11 @@ test('a valid run answers its own workspace and no notice', () => {
   assert.equal(resolved.ok, true, resolved.problems?.join('; '))
 
   const display = displayForHost({}, resolved, () => {})
-  assert.deepEqual(display, { workspaceDir: '/srv/host/.run', notice: undefined }, 'a working run needs no apology')
+  assert.equal(display.workspaceDir, '/srv/host/.run', 'a working run needs no apology')
+  assert.equal(display.notice, undefined, 'and nothing to explain')
+  // The registry travels with the display half too (ADR 0002): the page may show the one run this host
+  // ticks even when the list is a list of one.
+  assert.deepEqual(display.registry.list().map((entry) => entry.id), ['.run'], 'the id is the directory name, dot and all')
 })
 
 test('a refused run answers the directory it still declared, and the reason it is not ticking', () => {

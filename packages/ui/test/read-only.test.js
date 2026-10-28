@@ -1,21 +1,26 @@
 /**
- * Guards the decision "the dashboard cannot change what it is watching" (spec 展示层 "v1 无写端点";
- * ticket 11 AC 5).
+ * Guards the decision "the dashboard cannot change what it is watching".
  *
- * Two independent proofs, because "we only call read functions" is a promise and not a property:
+ * The doctrine changed with ADR 0002 (a run registry): the page may now **create a run** and **place
+ * an intent**, and it still may not touch a fact of a run it shows. So the property asserted here is
+ * narrower and sharper than "every route is a GET":
  *
- *   - **The handle refuses.** Every route reads through `Store.openReadOnly`, so an accidental
- *     write in a view throws instead of landing. This is asserted directly on the handle the routes
- *     use rather than by reading the source.
+ *   - **The handle refuses.** Every view reads through `Store.openReadOnly`, so an accidental write in
+ *     a view throws instead of landing. This is asserted directly on the handle the routes use rather
+ *     than by reading the source.
  *   - **Nothing moved.** Every fact the workspace holds — the event streams, the workspace record,
  *     each candidate's state, its immutable bindings, the job ledger and the spend ledger — is
- *     identical before and after a full tour of every route, including cursor reads. The event
- *     stream is the one that matters: a dashboard that appended one "viewed" event per visit would
- *     be a run that rewrites its own history.
+ *     identical before and after a full tour of every route, including cursor reads. The event stream
+ *     is the one that matters: a dashboard that appended one "viewed" event per visit would be a run
+ *     that rewrites its own history.
+ *   - **The write surface is a closed set of two paths**, and neither of them is a view: creating a
+ *     run writes a new directory under `runs_root`, and an intent writes a file under
+ *     `<run>/pending/`. What those two do is asserted in `runs-routes.test.js`; what is asserted here
+ *     is that no *other* path can be reached with a verb that writes.
  *
  * The routes are exercised through the registered route objects (`connection.dispatch`), so this
- * covers the adapter as well: a mutation verb is unrouted, and a bad query is a 400 with a JSON error
- * body rather than a page.
+ * covers the adapter as well: a mutation verb against a view path is unrouted, and a bad query is a
+ * 400 with a JSON error body rather than a page.
  */
 
 import assert from 'node:assert/strict'
@@ -25,9 +30,12 @@ import { dirname, join } from 'node:path'
 import test from 'node:test'
 
 import { Store } from '../../core/lib/store.js'
-import { registerRoutes, withStore } from '../lib/routes.js'
+import { ROUTES, registerRoutes, withStore } from '../lib/routes.js'
 import { fakeJudge, openWorkspace, runCandidate, seedConfig } from '../../core/test/support/fake-ports.js'
 import { fakeConnection } from './support/fake-connection.js'
+
+/** The two paths allowed to accept a verb other than GET. Anything else is a defect. */
+const WRITE_PATHS = Object.freeze(['/api/reprise/intent', '/api/reprise/runs'])
 
 /** Every fact the workspace holds, through the store's own readers. */
 function facts(store) {
@@ -175,13 +183,33 @@ test('a bad query is a 400 with a JSON error, never a page and never a 500', asy
   }
 })
 
-test('nothing in the route table can unregister itself into a write: the mounted paths are a closed set', async () => {
+test('the write surface is a closed set: the two non-GET paths, and no view among them', async () => {
   const dir = await workspaceWithEverything()
   const connection = fakeConnection()
   const dispose = registerRoutes({ connection, workspace: dir })
   try {
-    const wideOpen = [...connection.routes.values()].filter((route) => route.methods.some((method) => method !== 'GET'))
-    assert.deepEqual(wideOpen, [], 'v1 has no write endpoint — not disabled, not permission-gated, absent')
+    const writers = [...connection.routes.values()].filter((route) => route.methods.some((method) => method !== 'GET'))
+    assert.deepEqual(
+      writers.map((route) => route.path).sort(),
+      [...WRITE_PATHS].sort(),
+      'creating a run and placing an intent are the only writes, and both are named here on purpose',
+    )
+    // One path for both registry verbs — reading the list and creating a run are the same resource —
+    // and one path that only ever accepts a POST, because an intent is placed, never read back.
+    const METHODS = { '/api/reprise/runs': ['GET', 'POST'], '/api/reprise/intent': ['POST'] }
+    for (const route of writers) {
+      assert.deepEqual(route.methods, METHODS[route.path], `${route.path} declares exactly the verbs it needs`)
+    }
+
+    // Every view path is still GET-only, so a mutation verb against it is unrouted — the property the
+    // old closed-set test existed for, kept for the paths that still have it.
+    const viewPaths = ROUTES.filter((entry) => entry.method === undefined || entry.method === 'GET').map((entry) => entry.path)
+    for (const path of viewPaths) {
+      const mounted = connection.routes.get(path)
+      assert.ok(mounted !== undefined, `${path} is mounted`)
+      assert.deepEqual(mounted.methods, ['GET'], `${path} reads only`)
+    }
+
     const streaming = [...connection.routes.values()].filter((route) => route.requestBody !== 'buffered')
     assert.deepEqual(streaming, [], 'no route asks the bridge to stream a request body into a read')
   } finally {

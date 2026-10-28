@@ -279,6 +279,174 @@
 }
 
 /*
+ * The run picker: the registry as one native `<select>`, and the button that opens the create form.
+ *
+ * It sits beside the title because "which run is this page about" is the same kind of claim as the
+ * title itself — the one control on the masthead that is a choice rather than a stamp. It is also the
+ * only thing on this line allowed to *shrink*: a long run id loses its tail to an ellipsis before the
+ * capsule, the title or the stamps give up their place, because a truncated id is still a recognisable
+ * id while a masthead that wrapped in the middle of an item is a paragraph. The picker is one unit
+ * (`display: inline-flex`, no wrapping) so the select and its ＋ never separate.
+ */
+.reprise .run-picker {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.reprise .run-picker select {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 11rem;
+  padding: 0.0625rem 0.25rem;
+  color: var(--reprise-text);
+  background: var(--reprise-surface-raised);
+  border: 1px solid var(--reprise-rule-ledger);
+  border-radius: var(--reprise-radius-sm);
+  font-family: var(--reprise-mono);
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+}
+
+.reprise .run-picker select:focus-visible {
+  outline: 2px solid var(--reprise-link);
+  outline-offset: 1px;
+}
+
+.reprise .run-picker button {
+  flex: 0 0 auto;
+  line-height: 1.2;
+}
+
+/*
+ * The start/stop control — the one thing on this line that is a decision about the *host* (does it
+ * advance this run?) rather than a stamp about the run.
+ *
+ * Two looks, one per direction, and neither is a hue: `Start` is the only action the masthead asks a
+ * reader to take, so it wears the ink and the ground the wrong way round; `Stop` keeps the frame and
+ * recedes into secondary ink behind a broken border, because stopping is not an alarm and must not
+ * compete for the click. The distinction is drawn from `data-active`, so the shapes are decided by
+ * which way the button points and not by the word in the label — the two languages spell that word
+ * differently, and the sheet must not have to know.
+ *
+ * It is `nowrap` like the rest of the picker: the unit is `<select>` + `＋` + this, and the `<select>`
+ * is the only member allowed to shrink, so a long run id can never push these two onto a second line.
+ */
+.reprise .run-toggle {
+  white-space: nowrap;
+}
+
+.reprise .run-toggle[data-active='false']:not([disabled]) {
+  color: var(--reprise-bg);
+  background: var(--reprise-text);
+  border-color: var(--reprise-text);
+}
+
+.reprise .run-toggle[data-active='true']:not([disabled]) {
+  color: var(--reprise-dim);
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--reprise-rule-ledger);
+}
+
+/* Not askable right now: a request in flight, or a run whose configuration the Host already refused.
+   Receding ink and the faintest frame — the `title` carries the reason in the Host's own words, and
+   the label says `Working…` while the reason is only "ask again in a moment". */
+.reprise .run-toggle[disabled] {
+  color: var(--reprise-faint);
+  background: transparent;
+  border-color: var(--reprise-rule-hairline);
+  cursor: not-allowed;
+}
+
+.reprise .run-toggle[aria-busy='true'] {
+  cursor: progress;
+}
+
+/*
+ * The Host's sentences about the picker — a corrupt activation record, or a start/stop it refused —
+ * are full-width rows inside the letterhead, for the same reason the create form is: each is a
+ * sentence about the registry, not a stamp, and one wrapped into the line of stamps would push the
+ * numbers around. Same class the create form's refusal wears, so a refusal looks the same wherever
+ * it comes from.
+ */
+.reprise .masthead > .warning {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+/*
+ * The create form: one inline row inside the masthead, on a line of its own, never a modal.
+ *
+ * `flex-basis: 100%` is what buys it that line — the header is a wrapping flex row of the title group
+ * and the stamps, so a full-basis child starts a row beneath them and stays inside the letterhead's
+ * bottom rule. That placement is the decision: describing a run is part of "what this page is", while
+ * a dialog would take the facts off screen to talk about a run that, once created, becomes the run the
+ * page shows.
+ */
+.reprise .masthead .run-create {
+  flex-basis: 100%;
+  margin-top: 0.125rem;
+  padding-top: 0.625rem;
+  border-top: 1px solid var(--reprise-rule-hairline);
+}
+
+.reprise .run-create {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.5rem 0.75rem;
+}
+
+/* A field is its caption over its control: the caption is the label, so the two cannot disagree
+   about what the box is called. */
+.reprise .run-create label {
+  display: flex;
+  flex: 1 1 9rem;
+  flex-direction: column;
+  gap: 0.125rem;
+  min-width: 0;
+}
+
+.reprise .run-create label > span {
+  color: var(--reprise-faint);
+  font-size: 0.6875rem;
+}
+
+.reprise .run-create input,
+.reprise .run-create select {
+  min-width: 0;
+  padding: 0.125rem 0.375rem;
+  color: var(--reprise-text);
+  background: var(--reprise-surface-raised);
+  border: 1px solid var(--reprise-rule-ledger);
+  border-radius: var(--reprise-radius-sm);
+  font-family: var(--reprise-mono);
+  font-size: 0.75rem;
+}
+
+/* A field that does not apply to the chosen mode keeps what was typed and says so by receding:
+   `repo` in `empty` mode, and every control while the create is in flight. */
+.reprise .run-create input:disabled,
+.reprise .run-create select:disabled {
+  color: var(--reprise-faint);
+  background: transparent;
+}
+
+.reprise .run-create button[disabled] {
+  color: var(--reprise-faint);
+  cursor: progress;
+}
+
+/* The Host's refusal, on its own line under the fields it is about. */
+.reprise .run-create .warning {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+/*
  * One stamp: its label and its value. The label is not optional — "17:15:30" alone does not say
  * whether it is when the page last read or when the run last moved, and those are two different
  * claims. `overflow-wrap` on the value is what keeps a workspace path from setting the page's
@@ -2041,6 +2209,26 @@
 
   .reprise .facts {
     gap: 0.375rem 0;
+  }
+
+  /* The masthead stays one line by giving up the picker's width, not its stamp's: a run id truncated
+     to seven characters is still the run, while a picker that wrapped away from its ＋ would be two
+     controls in two places. Below this the title group wraps as whole items (the row already allows
+     it), never inside one — the capsule and the picker both refuse to break. */
+  .reprise .run-picker select {
+    max-width: 7rem;
+  }
+
+  /* The start/stop word is two characters in one language and five in the other, and it is the one
+     label on this line a reader has to read — so it gives up padding before it gives up its word. */
+  .reprise .run-toggle {
+    padding: 0.125rem 0.25rem;
+  }
+
+  /* The create form goes one field per line: six controls side by side at this width is a row of
+     labels too narrow to read, and the caption is the only thing that says what a box is. */
+  .reprise .run-create label {
+    flex-basis: 100%;
   }
 
   .reprise .fact {
